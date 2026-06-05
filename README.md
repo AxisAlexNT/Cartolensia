@@ -25,6 +25,7 @@ Very early development. The repository currently contains the product vision, ta
 
 ## Documentation
 
+* [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 * [Project vision](docs/PROJECT_VISION.md)
 * [Target architecture](docs/ARCHITECTURE_TARGET.md)
 * [AI assistance note](docs/AI_ASSISTANCE.md)

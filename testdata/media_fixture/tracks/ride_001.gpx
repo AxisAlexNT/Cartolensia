@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="cartolensia-fixture">
+  <trk>
+    <name>Generated fixture ride</name>
+    <trkseg>
+      <trkpt lat="40.0000" lon="44.0000"><time>2024-06-01T10:00:00Z</time></trkpt>
+      <trkpt lat="40.0010" lon="44.0010"><time>2024-06-01T10:05:00Z</time></trkpt>
+      <trkpt lat="40.0020" lon="44.0020"><time>2024-06-01T10:10:00Z</time></trkpt>
+    </trkseg>
+  </trk>
+</gpx>

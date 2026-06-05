@@ -1,0 +1,24 @@
+name: cartolensia
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${CARTOLENSIA_DB_NAME:-cartolensia}
+      POSTGRES_USER: ${CARTOLENSIA_DB_USER:-cartolensia}
+      POSTGRES_PASSWORD: ${CARTOLENSIA_DB_PASSWORD:-cartolensia_dev_password}
+    volumes:
+      - cartolensia_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  cartolensia_pgdata:

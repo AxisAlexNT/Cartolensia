@@ -1,0 +1,10 @@
+{
+  "fixture": "cartolensia generated dummy media fixture",
+  "real_media": false,
+  "files": [
+    "photos/2024-trip/photo_001.jpg",
+    "photos/2024-trip/photo_002.heic",
+    "videos/clip_001.mp4",
+    "tracks/ride_001.gpx"
+  ]
+}

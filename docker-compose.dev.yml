@@ -1,0 +1,6 @@
+services:
+  postgres:
+    ports:
+      - "${CARTOLENSIA_POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
