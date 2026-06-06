@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/auth"
@@ -30,6 +31,7 @@ type App struct {
 	Workers      *workers.Manager
 	authn        auth.Authenticator
 	authz        auth.Authorizer
+	authService  *auth.LocalService
 }
 
 func New(ctx context.Context, configPath string) (*App, error) {
@@ -98,8 +100,24 @@ func New(ctx context.Context, configPath string) (*App, error) {
 	}
 	switch cfg.Auth.Mode {
 	case "local":
-		app.authn = auth.DisabledLocalAuth{}
-		app.authz = auth.DisabledLocalAuth{}
+		authStore := auth.Store(auth.NewMemoryStore())
+		if app.DB != nil {
+			authStore = app.DB
+		}
+		authCfg, err := authConfig(cfg.Auth)
+		if err != nil {
+			app.Close()
+			return nil, err
+		}
+		service := auth.NewLocalService(authStore, authCfg)
+		password := os.Getenv(authCfg.AdminPasswordEnv)
+		if _, _, err := service.Bootstrap(ctx, password); err != nil {
+			app.Close()
+			return nil, fmt.Errorf("bootstrap local auth: %w", err)
+		}
+		app.authn = service
+		app.authz = service
+		app.authService = service
 	default:
 		app.authn = auth.DevNoAuth{}
 		app.authz = auth.DevNoAuth{}
@@ -147,6 +165,7 @@ func (a *App) Handler() *server.Server {
 		Capabilities:  a.Capabilities,
 		Authenticator: a.authn,
 		Authorizer:    a.authz,
+		AuthService:   a.authService,
 	})
 }
 
@@ -169,5 +188,24 @@ func workerConfig(cfg config.WorkerConfig) (workers.Config, error) {
 		LeaseDuration:     leaseDuration,
 		HeartbeatInterval: heartbeatInterval,
 		MaxConcurrency:    cfg.MaxConcurrency,
+	}, nil
+}
+
+func authConfig(cfg config.AuthConfig) (auth.Config, error) {
+	sessionTTL, err := time.ParseDuration(cfg.SessionTTL)
+	if err != nil {
+		return auth.Config{}, fmt.Errorf("parse auth.session_ttl: %w", err)
+	}
+	apiTokenTTL, err := time.ParseDuration(cfg.APITokenTTL)
+	if err != nil {
+		return auth.Config{}, fmt.Errorf("parse auth.api_token_ttl: %w", err)
+	}
+	return auth.Config{
+		AdminEmail:       cfg.AdminEmail,
+		AdminDisplayName: cfg.AdminDisplayName,
+		AdminPasswordEnv: cfg.AdminPasswordEnv,
+		SessionTTL:       sessionTTL,
+		APITokenTTL:      apiTokenTTL,
+		CookieName:       cfg.CookieName,
 	}, nil
 }

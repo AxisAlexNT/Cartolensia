@@ -8,8 +8,10 @@ import {
   type ExplorerView,
   type Job,
   type PluginManifest,
+  type Principal,
   type Stats,
-  type StorageConfig
+  type StorageConfig,
+  type TrackSummary
 } from "./api";
 
 const nav = [
@@ -38,6 +40,11 @@ const storages = ref<StorageConfig[]>([]);
 const plugins = ref<PluginManifest[]>([]);
 const stats = ref<Stats | null>(null);
 const backend = ref<BackendStatus | null>(null);
+const principal = ref<Principal | null>(null);
+const loginEmail = ref("");
+const loginPassword = ref("");
+const tracks = ref<TrackSummary[]>([]);
+const mapData = ref<Record<string, unknown> | null>(null);
 
 const activePlugin = computed(() => {
   const id = active.value.toLowerCase().replaceAll(" ", "-");
@@ -64,13 +71,16 @@ async function refresh() {
   loading.value = true;
   error.value = "";
   try {
-    const [explorerRows, jobRows, storageRows, pluginRows, statData, backendStatus] = await Promise.all([
+    await refreshAuth();
+    const [explorerRows, jobRows, storageRows, pluginRows, statData, backendStatus, trackRows, geojson] = await Promise.all([
       api.explorer(),
       api.jobs(),
       api.storages(),
       api.plugins(),
       api.stats(),
-      api.status()
+      api.status(),
+      api.tracks(),
+      api.map()
     ]);
     rows.value = explorerRows;
     explorer.value = await api.explorerFolders(explorerPath.value);
@@ -79,11 +89,39 @@ async function refresh() {
     plugins.value = pluginRows;
     stats.value = statData;
     backend.value = backendStatus;
+    tracks.value = trackRows;
+    mapData.value = geojson;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     loading.value = false;
   }
+}
+
+async function refreshAuth() {
+  try {
+    const result = await api.me();
+    principal.value = result.principal;
+  } catch {
+    principal.value = null;
+  }
+}
+
+async function login() {
+  error.value = "";
+  try {
+    const result = await api.login(loginEmail.value, loginPassword.value);
+    principal.value = result.principal;
+    loginPassword.value = "";
+    await refresh();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function logout() {
+  await api.logout();
+  principal.value = null;
 }
 
 async function startDiscovery() {
@@ -143,7 +181,16 @@ onMounted(refresh);
     <header class="topbar">
       <div>
         <h1>Cartolensia</h1>
-        <span>{{ backend?.store_backend ?? "starting" }} store</span>
+        <span>{{ backend?.store_backend ?? "starting" }} store · {{ backend?.auth_mode ?? "dev_no_auth" }}</span>
+      </div>
+      <form v-if="backend?.auth_mode === 'local' && !principal" class="login-form" @submit.prevent="login">
+        <input v-model="loginEmail" type="email" autocomplete="username" placeholder="Email" />
+        <input v-model="loginPassword" type="password" autocomplete="current-password" placeholder="Password" />
+        <button type="submit">Login</button>
+      </form>
+      <div v-else-if="principal" class="userbox">
+        <span>{{ principal.email ?? principal.name }}</span>
+        <button v-if="backend?.auth_mode === 'local'" type="button" @click="logout">Logout</button>
       </div>
       <button type="button" @click="refresh">Refresh</button>
     </header>
@@ -305,6 +352,32 @@ onMounted(refresh);
             <article><strong>{{ stats.hashed }}</strong><span>Hashed</span></article>
             <article><strong>{{ formatBytes(stats.total_bytes) }}</strong><span>Total</span></article>
           </div>
+        </section>
+
+        <section v-else-if="active === 'GPS Tracks'" class="panel">
+          <header class="panel-head">
+            <h2>GPS Tracks</h2>
+            <span>{{ tracks.length }} tracks</span>
+          </header>
+          <table>
+            <thead><tr><th>Name</th><th>Points</th><th>Start</th><th>End</th></tr></thead>
+            <tbody>
+              <tr v-for="track in tracks" :key="track.track_asset_id">
+                <td>{{ track.name }}</td>
+                <td>{{ track.point_count }}</td>
+                <td>{{ track.start_time ?? "" }}</td>
+                <td>{{ track.end_time ?? "" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section v-else-if="active === 'Map'" class="panel">
+          <header class="panel-head">
+            <h2>Map</h2>
+            <span>{{ Array.isArray(mapData?.features) ? mapData?.features.length : 0 }} features</span>
+          </header>
+          <pre class="geojson">{{ JSON.stringify(mapData, null, 2) }}</pre>
         </section>
 
         <section v-else class="panel">

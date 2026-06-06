@@ -139,7 +139,7 @@ func (m *Manager) run(job jobs.Job, handler Handler) {
 	go m.heartbeat(job.ID, done)
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			_ = m.store.FailLeasedJob(m.ctx, job, m.cfg.WorkerID, fmt.Errorf("panic: %v", recovered))
+			_ = m.store.FailLeasedJob(m.ctx, job, m.cfg.WorkerID, jobs.PanicError(fmt.Errorf("panic: %v", recovered)))
 		}
 	}()
 	err := handler(m.ctx, &job)

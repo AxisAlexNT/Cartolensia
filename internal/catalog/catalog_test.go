@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -57,6 +58,46 @@ func TestMemoryJobLeaseOwnershipAndExpiry(t *testing.T) {
 	}
 	if done.Status != jobs.StatusSucceeded {
 		t.Fatalf("expected success, got %#v", done)
+	}
+}
+
+func TestMemoryJobRetryClassification(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	transient := jobs.New("hash", nil)
+	transient.MaxAttempts = 2
+	transient, _ = store.EnqueueJob(ctx, transient)
+	leased, err := store.LeaseNextJob(ctx, "worker", []string{"hash"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailLeasedJob(ctx, leased, "worker", jobs.Transient(fmt.Errorf("temporary"))); err != nil {
+		t.Fatal(err)
+	}
+	afterTransient, err := store.GetJob(ctx, transient.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterTransient.Status != jobs.StatusQueued || afterTransient.NextRunAt == nil {
+		t.Fatalf("expected transient retry, got %#v", afterTransient)
+	}
+
+	permanent := jobs.New("hash", nil)
+	permanent.MaxAttempts = 3
+	permanent, _ = store.EnqueueJob(ctx, permanent)
+	leasedPermanent, err := store.LeaseNextJob(ctx, "worker", []string{"hash"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailLeasedJob(ctx, leasedPermanent, "worker", jobs.Permanent(fmt.Errorf("bad input"))); err != nil {
+		t.Fatal(err)
+	}
+	afterPermanent, err := store.GetJob(ctx, permanent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterPermanent.Status != jobs.StatusFailed || afterPermanent.NextRunAt != nil {
+		t.Fatalf("expected permanent failure, got %#v", afterPermanent)
 	}
 }
 

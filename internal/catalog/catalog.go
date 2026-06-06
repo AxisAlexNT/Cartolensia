@@ -21,12 +21,14 @@ const (
 )
 
 type Asset struct {
-	ID          string     `json:"id"`
-	MediaKind   string     `json:"media_kind"`
-	DisplayName string     `json:"display_name"`
-	FirstSeenAt time.Time  `json:"first_seen_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	Locations   []Location `json:"locations"`
+	ID          string         `json:"id"`
+	MediaKind   string         `json:"media_kind"`
+	DisplayName string         `json:"display_name"`
+	TakenAt     *time.Time     `json:"taken_at,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	FirstSeenAt time.Time      `json:"first_seen_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	Locations   []Location     `json:"locations"`
 }
 
 type Location struct {
@@ -63,12 +65,67 @@ type UpsertResult struct {
 	Created bool  `json:"created"`
 }
 
+type TrackPoint struct {
+	ID           int64     `json:"id,omitempty"`
+	TrackAssetID string    `json:"track_asset_id,omitempty"`
+	RecordedAt   time.Time `json:"recorded_at"`
+	Lat          float64   `json:"lat"`
+	Lon          float64   `json:"lon"`
+	ElevationM   *float64  `json:"elevation_m,omitempty"`
+	SpeedMPS     *float64  `json:"speed_mps,omitempty"`
+	Source       string    `json:"source"`
+}
+
+type TrackSummary struct {
+	TrackAssetID string     `json:"track_asset_id"`
+	Name         string     `json:"name"`
+	PointCount   int        `json:"point_count"`
+	StartTime    *time.Time `json:"start_time,omitempty"`
+	EndTime      *time.Time `json:"end_time,omitempty"`
+	MinLat       *float64   `json:"min_lat,omitempty"`
+	MinLon       *float64   `json:"min_lon,omitempty"`
+	MaxLat       *float64   `json:"max_lat,omitempty"`
+	MaxLon       *float64   `json:"max_lon,omitempty"`
+}
+
+type TrackDetail struct {
+	Summary TrackSummary `json:"summary"`
+	Points  []TrackPoint `json:"points"`
+}
+
+type TrackLink struct {
+	ID           string     `json:"id"`
+	AssetID      string     `json:"asset_id"`
+	TrackAssetID string     `json:"track_asset_id"`
+	MatchStatus  string     `json:"match_status"`
+	OverlapStart *time.Time `json:"overlap_start,omitempty"`
+	OverlapEnd   *time.Time `json:"overlap_end,omitempty"`
+	TimeOffsetMS int64      `json:"time_offset_ms"`
+	Confidence   *float64   `json:"confidence,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type TrackCandidate struct {
+	Track        TrackSummary `json:"track"`
+	OverlapStart *time.Time   `json:"overlap_start,omitempty"`
+	OverlapEnd   *time.Time   `json:"overlap_end,omitempty"`
+	Confidence   float64      `json:"confidence"`
+}
+
 type Store interface {
 	UpsertDiscoveredFile(context.Context, storage.FileInfo) (UpsertResult, error)
 	ListAssets(context.Context) ([]Asset, error)
 	GetAsset(context.Context, string) (Asset, error)
+	UpdateAssetMetadata(context.Context, string, *time.Time, map[string]any) error
 	UpdateLocationHash(context.Context, string, string, int64) error
 	Stats(context.Context) (Stats, error)
+	UpsertTrackPoints(context.Context, string, []TrackPoint) error
+	ListTracks(context.Context) ([]TrackSummary, error)
+	GetTrack(context.Context, string) (TrackDetail, error)
+	TrackCandidates(context.Context, string) ([]TrackCandidate, error)
+	SaveTrackLink(context.Context, TrackLink) (TrackLink, error)
+	ListTrackLinks(context.Context, string) ([]TrackLink, error)
 	EnqueueJob(context.Context, jobs.Job) (jobs.Job, error)
 	UpdateJob(context.Context, jobs.Job) error
 	ListJobs(context.Context) ([]jobs.Job, error)
@@ -88,6 +145,8 @@ type MemoryStore struct {
 	assets          map[string]Asset
 	byURL           map[string]string
 	locationByAsset map[string]string
+	trackPoints     map[string][]TrackPoint
+	trackLinks      map[string]TrackLink
 	jobs            map[string]jobs.Job
 }
 
@@ -96,6 +155,8 @@ func NewMemoryStore() *MemoryStore {
 		assets:          make(map[string]Asset),
 		byURL:           make(map[string]string),
 		locationByAsset: make(map[string]string),
+		trackPoints:     make(map[string][]TrackPoint),
+		trackLinks:      make(map[string]TrackLink),
 		jobs:            make(map[string]jobs.Job),
 	}
 }
@@ -126,6 +187,7 @@ func (s *MemoryStore) UpsertDiscoveredFile(_ context.Context, info storage.FileI
 		ID:          assetID,
 		MediaKind:   info.MediaKind,
 		DisplayName: info.Name,
+		Metadata:    map[string]any{},
 		FirstSeenAt: now,
 		UpdatedAt:   now,
 		Locations: []Location{{
@@ -202,6 +264,28 @@ func (s *MemoryStore) UpdateLocationHash(_ context.Context, assetID, sha512Hex s
 	return nil
 }
 
+func (s *MemoryStore) UpdateAssetMetadata(_ context.Context, assetID string, takenAt *time.Time, metadata map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	asset, ok := s.assets[assetID]
+	if !ok {
+		return ErrNotFound
+	}
+	if takenAt != nil {
+		t := takenAt.UTC()
+		asset.TakenAt = &t
+	}
+	if asset.Metadata == nil {
+		asset.Metadata = map[string]any{}
+	}
+	for key, value := range metadata {
+		asset.Metadata[key] = value
+	}
+	asset.UpdatedAt = time.Now().UTC()
+	s.assets[assetID] = asset
+	return nil
+}
+
 func (s *MemoryStore) Stats(_ context.Context) (Stats, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -228,6 +312,120 @@ func (s *MemoryStore) Stats(_ context.Context) (Stats, error) {
 		}
 	}
 	return stats, nil
+}
+
+func (s *MemoryStore) UpsertTrackPoints(_ context.Context, trackAssetID string, points []TrackPoint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[trackAssetID]; !ok {
+		return ErrNotFound
+	}
+	out := make([]TrackPoint, 0, len(points))
+	for i, point := range points {
+		point.ID = int64(i + 1)
+		point.TrackAssetID = trackAssetID
+		if point.Source == "" {
+			point.Source = "gpx"
+		}
+		out = append(out, point)
+	}
+	s.trackPoints[trackAssetID] = out
+	return nil
+}
+
+func (s *MemoryStore) ListTracks(_ context.Context) ([]TrackSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]TrackSummary, 0, len(s.trackPoints))
+	for trackAssetID, points := range s.trackPoints {
+		out = append(out, summarizeTrack(s.assets[trackAssetID], points))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left := out[i].StartTime
+		right := out[j].StartTime
+		if left == nil || right == nil {
+			return out[i].Name < out[j].Name
+		}
+		return left.Before(*right)
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) GetTrack(_ context.Context, trackAssetID string) (TrackDetail, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	points, ok := s.trackPoints[trackAssetID]
+	if !ok {
+		return TrackDetail{}, ErrNotFound
+	}
+	return TrackDetail{Summary: summarizeTrack(s.assets[trackAssetID], points), Points: append([]TrackPoint(nil), points...)}, nil
+}
+
+func (s *MemoryStore) TrackCandidates(_ context.Context, assetID string) ([]TrackCandidate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	asset, ok := s.assets[assetID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	assetStart, assetEnd, ok := assetInterval(asset)
+	if !ok {
+		return nil, nil
+	}
+	var out []TrackCandidate
+	for trackAssetID, points := range s.trackPoints {
+		summary := summarizeTrack(s.assets[trackAssetID], points)
+		if summary.StartTime == nil || summary.EndTime == nil {
+			continue
+		}
+		overlapStart, overlapEnd, overlap := overlapInterval(assetStart, assetEnd, *summary.StartTime, *summary.EndTime)
+		if !overlap {
+			continue
+		}
+		confidence := overlapEnd.Sub(overlapStart).Seconds() / assetEnd.Sub(assetStart).Seconds()
+		if confidence > 1 {
+			confidence = 1
+		}
+		out = append(out, TrackCandidate{Track: summary, OverlapStart: &overlapStart, OverlapEnd: &overlapEnd, Confidence: confidence})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) SaveTrackLink(_ context.Context, link TrackLink) (TrackLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[link.AssetID]; !ok {
+		return TrackLink{}, ErrNotFound
+	}
+	if _, ok := s.assets[link.TrackAssetID]; !ok {
+		return TrackLink{}, ErrNotFound
+	}
+	now := time.Now().UTC()
+	if link.ID == "" {
+		link.ID = id.NewUUID()
+	}
+	if link.MatchStatus == "" {
+		link.MatchStatus = "manual"
+	}
+	if link.CreatedAt.IsZero() {
+		link.CreatedAt = now
+	}
+	link.UpdatedAt = now
+	s.trackLinks[link.ID] = link
+	return link, nil
+}
+
+func (s *MemoryStore) ListTrackLinks(_ context.Context, assetID string) ([]TrackLink, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []TrackLink
+	for _, link := range s.trackLinks {
+		if assetID == "" || link.AssetID == assetID {
+			out = append(out, link)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
 }
 
 func (s *MemoryStore) EnqueueJob(_ context.Context, job jobs.Job) (jobs.Job, error) {
@@ -452,7 +650,7 @@ func (s *MemoryStore) failLeasedLocked(job jobs.Job, cause error) error {
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
-	if job.Attempts < maxAttempts && job.Status != jobs.StatusCancelRequested {
+	if job.Attempts < maxAttempts && job.Status != jobs.StatusCancelRequested && jobs.ShouldRetry(cause) {
 		delay := retryDelay(job.Attempts)
 		if err := jobs.Retry(&job, delay, cause); err != nil {
 			return err
@@ -597,6 +795,13 @@ func BuildExplorerView(assets []Asset, opts ExplorerOptions) (ExplorerView, erro
 
 func cloneAsset(asset Asset) Asset {
 	asset.Locations = append([]Location(nil), asset.Locations...)
+	if asset.Metadata != nil {
+		metadata := make(map[string]any, len(asset.Metadata))
+		for key, value := range asset.Metadata {
+			metadata[key] = value
+		}
+		asset.Metadata = metadata
+	}
 	return asset
 }
 
@@ -733,4 +938,90 @@ func sortExplorerFiles(files []ExplorerFile, key string) {
 			return files[i].Name < files[j].Name
 		})
 	}
+}
+
+func summarizeTrack(asset Asset, points []TrackPoint) TrackSummary {
+	summary := TrackSummary{TrackAssetID: asset.ID, Name: asset.DisplayName, PointCount: len(points)}
+	for i, point := range points {
+		lat := point.Lat
+		lon := point.Lon
+		if i == 0 {
+			start := point.RecordedAt
+			end := point.RecordedAt
+			summary.StartTime = &start
+			summary.EndTime = &end
+			summary.MinLat = &lat
+			summary.MaxLat = &lat
+			summary.MinLon = &lon
+			summary.MaxLon = &lon
+			continue
+		}
+		if summary.StartTime == nil || point.RecordedAt.Before(*summary.StartTime) {
+			t := point.RecordedAt
+			summary.StartTime = &t
+		}
+		if summary.EndTime == nil || point.RecordedAt.After(*summary.EndTime) {
+			t := point.RecordedAt
+			summary.EndTime = &t
+		}
+		if summary.MinLat == nil || point.Lat < *summary.MinLat {
+			v := point.Lat
+			summary.MinLat = &v
+		}
+		if summary.MaxLat == nil || point.Lat > *summary.MaxLat {
+			v := point.Lat
+			summary.MaxLat = &v
+		}
+		if summary.MinLon == nil || point.Lon < *summary.MinLon {
+			v := point.Lon
+			summary.MinLon = &v
+		}
+		if summary.MaxLon == nil || point.Lon > *summary.MaxLon {
+			v := point.Lon
+			summary.MaxLon = &v
+		}
+	}
+	return summary
+}
+
+func assetInterval(asset Asset) (time.Time, time.Time, bool) {
+	if asset.TakenAt == nil {
+		return time.Time{}, time.Time{}, false
+	}
+	start := asset.TakenAt.UTC()
+	durationSeconds := float64(1)
+	if asset.Metadata != nil {
+		switch value := asset.Metadata["duration_seconds"].(type) {
+		case float64:
+			durationSeconds = value
+		case int:
+			durationSeconds = float64(value)
+		case int64:
+			durationSeconds = float64(value)
+		case jsonNumber:
+			if parsed, err := value.Float64(); err == nil {
+				durationSeconds = parsed
+			}
+		}
+	}
+	if durationSeconds <= 0 {
+		durationSeconds = 1
+	}
+	return start, start.Add(time.Duration(durationSeconds * float64(time.Second))), true
+}
+
+func overlapInterval(aStart, aEnd, bStart, bEnd time.Time) (time.Time, time.Time, bool) {
+	start := aStart
+	if bStart.After(start) {
+		start = bStart
+	}
+	end := aEnd
+	if bEnd.Before(end) {
+		end = bEnd
+	}
+	return start, end, end.After(start) || end.Equal(start)
+}
+
+type jsonNumber interface {
+	Float64() (float64, error)
 }

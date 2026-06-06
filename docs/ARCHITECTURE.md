@@ -23,10 +23,12 @@ Runtime migrations are embedded into the Go binary from `migrations/*.sql`. Disk
 - `internal/discovery`: fast fixture-safe discovery and lazy SHA-512 hashing handlers with cancellation checks.
 - `internal/jobs`: job model, state transitions, counters, progress, logs, cancellation, leases, and retry scheduling.
 - `internal/workers`: async worker loop, lease acquisition, heartbeats, panic recovery, and graceful stop.
-- `internal/auth`: local auth interfaces plus explicit `dev_no_auth` development mode.
-- `internal/preview`: preview status and cache-key/path foundation.
+- `internal/auth`: local admin bootstrap, session/API-token auth, persisted auth store contracts, and explicit `dev_no_auth` development mode.
+- `internal/gpx`: dependency-free GPX track point parser.
+- `internal/preview`: preview status, cache-key/path safety, and JPEG preview generation for decodable images.
+- `internal/media`: SHA-512 streaming hash and optional ffprobe video metadata detection/extraction.
 - `internal/plugins`: built-in plugin manifests and dependency topological sort.
-- `internal/server`: REST API, original streaming, preview not-implemented response, and WebUI static serving.
+- `internal/server`: REST API, original streaming, cached preview serving, and WebUI static serving.
 
 ## REST API
 
@@ -35,6 +37,12 @@ Implemented endpoints:
 - `GET /api/v1/health`
 - `GET /api/v1/version`
 - `GET /api/v1/config/effective`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/tokens`
+- `POST /api/v1/auth/tokens`
+- `DELETE /api/v1/auth/tokens/{id}`
 - `GET /api/v1/storages`
 - `GET /api/v1/plugins`
 - `POST /api/v1/plugins/rescan`
@@ -45,6 +53,12 @@ Implemented endpoints:
 - `GET /api/v1/assets`
 - `GET /api/v1/assets/{id}`
 - `GET /api/v1/explorer`
+- `GET /api/v1/tracks`
+- `GET /api/v1/tracks/{track_asset_id}`
+- `GET /api/v1/sync/candidates?asset_id=...`
+- `GET /api/v1/sync/links`
+- `POST /api/v1/sync/links`
+- `GET /api/v1/map?bbox=minLon,minLat,maxLon,maxLat&zoom=...`
 - `GET /api/v1/stats`
 - `GET /api/v1/backend/status`
 - `GET /api/v1/media/{asset_id}/original`
@@ -52,7 +66,7 @@ Implemented endpoints:
 
 `POST /api/v1/discovery/start` and `POST /api/v1/hash/start` enqueue jobs and return quickly in the app runtime. The worker loop leases and executes queued jobs asynchronously. Tests can opt into a synchronous server dependency path for deterministic fixture checks.
 
-Original streaming uses the read-only storage registry and `http.ServeContent`, which provides HTTP Range support when the underlying file supports seeking. Preview generation currently returns a clean status response (`not_implemented` or `unsupported`) and never writes near originals.
+Original streaming uses the read-only storage registry and `http.ServeContent`, which provides HTTP Range support when the underlying file supports seeking. Preview generation decodes standard-library-supported image formats, writes cached JPEG previews under the configured Cartolensia cache directory, serves the generated preview, and never writes near originals. Unsupported formats return a clean JSON status.
 
 ## WebUI
 
@@ -62,6 +76,8 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Explorer table backed by `/api/v1/explorer`, including folder grouping and breadcrumbs;
 - asset detail view backed by `/api/v1/assets/{id}`;
 - Discovery page with scan and hash actions;
+- GPS Tracks page backed by parsed GPX track points;
+- Map page backed by GeoJSON from the map API;
 - Storages page;
 - Plugins page;
 - Stats page;
@@ -79,6 +95,7 @@ Browser route state is saved in `localStorage`.
 - `..` path segments are rejected before cleaning, including encoded URL traversal attempts.
 - Symlinks are skipped during recursive discovery and opening a symlink that escapes the root is rejected.
 - Write-like endpoints pass through an auth hook; `dev_no_auth` is the default fixture mode.
+- `local` auth mode requires configured admin email and a password supplied through the configured password environment variable. No production password is hardcoded.
 - `/mnt/Models/rclone` is not required and was not touched by the MVP tests.
 
 ## Database Capability Policy

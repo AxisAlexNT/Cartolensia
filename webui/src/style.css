@@ -42,6 +42,7 @@ a {
   background: #ffffff;
   border-bottom: 1px solid #d8dee4;
   display: flex;
+  gap: 12px;
   justify-content: space-between;
   min-height: 64px;
   padding: 0 24px;
@@ -56,6 +57,22 @@ a {
 .topbar span {
   color: #57606a;
   font-size: 14px;
+}
+
+.login-form,
+.userbox {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.login-form input {
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  font: inherit;
+  min-height: 34px;
+  padding: 0 10px;
+  width: 180px;
 }
 
 .layout {
@@ -260,7 +277,33 @@ td {
   padding: 12px;
 }
 
+.geojson {
+  background: #f6f8fa;
+  border: 0;
+  margin: 0;
+  max-height: 560px;
+  overflow: auto;
+  padding: 16px;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 760px) {
+  .topbar {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 12px;
+  }
+
+  .login-form,
+  .userbox {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .login-form input {
+    width: 100%;
+  }
+
   .layout {
     grid-template-columns: 1fr;
   }

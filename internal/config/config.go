@@ -62,7 +62,11 @@ type WorkerConfig struct {
 type AuthConfig struct {
 	Mode             string `json:"mode" yaml:"mode"`
 	AdminEmail       string `json:"admin_email,omitempty" yaml:"admin_email"`
+	AdminDisplayName string `json:"admin_display_name,omitempty" yaml:"admin_display_name"`
 	AdminPasswordEnv string `json:"admin_password_env,omitempty" yaml:"admin_password_env"`
+	SessionTTL       string `json:"session_ttl,omitempty" yaml:"session_ttl"`
+	APITokenTTL      string `json:"api_token_ttl,omitempty" yaml:"api_token_ttl"`
+	CookieName       string `json:"cookie_name,omitempty" yaml:"cookie_name"`
 }
 
 func Load(path string) (Config, error) {
@@ -122,6 +126,9 @@ func Defaults() Config {
 		Auth: AuthConfig{
 			Mode:             "dev_no_auth",
 			AdminPasswordEnv: "CARTOLENSIA_ADMIN_PASSWORD",
+			SessionTTL:       "24h",
+			APITokenTTL:      "2160h",
+			CookieName:       "cartolensia_session",
 		},
 	}
 }
@@ -150,6 +157,18 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Auth.Mode == "" {
 		cfg.Auth.Mode = "dev_no_auth"
+	}
+	if cfg.Auth.AdminPasswordEnv == "" {
+		cfg.Auth.AdminPasswordEnv = "CARTOLENSIA_ADMIN_PASSWORD"
+	}
+	if cfg.Auth.SessionTTL == "" {
+		cfg.Auth.SessionTTL = "24h"
+	}
+	if cfg.Auth.APITokenTTL == "" {
+		cfg.Auth.APITokenTTL = "2160h"
+	}
+	if cfg.Auth.CookieName == "" {
+		cfg.Auth.CookieName = "cartolensia_session"
 	}
 	if cfg.Auth.Mode != "dev_no_auth" && cfg.Auth.Mode != "local" {
 		return fmt.Errorf("unsupported auth mode %q", cfg.Auth.Mode)
@@ -222,5 +241,23 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("CARTOLENSIA_AUTH_MODE"); value != "" {
 		cfg.Auth.Mode = value
+	}
+	if value := os.Getenv("CARTOLENSIA_ADMIN_EMAIL"); value != "" {
+		cfg.Auth.AdminEmail = value
+	}
+	if value := os.Getenv("CARTOLENSIA_ADMIN_DISPLAY_NAME"); value != "" {
+		cfg.Auth.AdminDisplayName = value
+	}
+	if value := os.Getenv("CARTOLENSIA_ADMIN_PASSWORD_ENV"); value != "" {
+		cfg.Auth.AdminPasswordEnv = value
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_SESSION_TTL"); value != "" {
+		cfg.Auth.SessionTTL = value
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_API_TOKEN_TTL"); value != "" {
+		cfg.Auth.APITokenTTL = value
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_COOKIE_NAME"); value != "" {
+		cfg.Auth.CookieName = value
 	}
 }

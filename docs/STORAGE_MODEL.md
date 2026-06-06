@@ -87,7 +87,8 @@ Do not access `/mnt/Models/rclone` during the MVP preparation or the first unatt
 - File metadata includes URL, relative path, file name, extension, MIME, size, mtime, and media kind.
 - Write, delete, move, and mkdir operations return a read-only error.
 - Original streaming opens files only through the registry and serves them read-only with HTTP Range support through the Go HTTP stack.
-- On-demand preview cache paths are derived from asset/content IDs and live under the Cartolensia cache directory. Preview code must never create files next to originals.
+- On-demand preview cache paths are derived from asset/content IDs and live under the Cartolensia cache directory. Preview code verifies generated cache paths stay inside that directory and must never create files next to originals.
+- Built-in preview generation supports decodable image formats provided by Go's standard image decoders and writes JPEG cache files. Unsupported formats such as dummy text fixtures and HEIC return a clean unsupported response.
 
 ## Non-Media Files
 

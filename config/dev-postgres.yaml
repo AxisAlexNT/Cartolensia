@@ -31,4 +31,9 @@ workers:
 
 auth:
   mode: dev_no_auth
+  admin_email: ""
+  admin_display_name: "Cartolensia Admin"
   admin_password_env: CARTOLENSIA_ADMIN_PASSWORD
+  session_ttl: "24h"
+  api_token_ttl: "2160h"
+  cookie_name: cartolensia_session

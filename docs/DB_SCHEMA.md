@@ -58,6 +58,18 @@ The MVP must start without optional extensions.
 - `taken_at timestamptz null`
 - `metadata_json jsonb not null default '{}'::jsonb`
 
+Current metadata keys used by the MVP are optional and additive:
+
+- `duration_seconds`
+- `width`
+- `height`
+- `ffprobe_available`
+- `track_point_count`
+- `track_start_at`
+- `track_end_at`
+- `lat`
+- `lon`
+
 `asset_locations`
 
 - `id uuid primary key`
@@ -179,6 +191,8 @@ The MVP must start without optional extensions.
 - `created_at timestamptz not null default now()`
 - `updated_at timestamptz not null default now()`
 
+The live video-track sync skeleton uses `assets.taken_at` plus `metadata_json.duration_seconds` to compute candidate overlaps. Manual links are stored in `asset_track_links` with `time_offset_ms`.
+
 ## Indexes
 
 Initial indexes:
@@ -217,3 +231,4 @@ Implemented migrations:
 - `migrations/001_core.sql`: core metadata, assets, locations, contents, jobs, plugins, and GPS/video sync skeleton.
 - `migrations/002_phase1_hardening.sql`: `app_settings`, queued-job scheduling with `next_run_at`, and lease indexes.
 - `migrations/003_auth_foundation.sql`: users, sessions, and API tokens for local auth bootstrap.
+- `migrations/004_job_lease_cancel_index.sql`: forward-only replacement of the lease-expiry index so it covers both `running` and `cancel_requested` jobs.

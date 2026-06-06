@@ -24,16 +24,20 @@
 - Async discovery/hash workers. Implemented.
 - PostgreSQL integration tests gated by environment variables. Implemented.
 - Folder-style Explorer and asset detail API/UI. Implemented.
-- Local auth interfaces plus `dev_no_auth` mode. Implemented as foundation.
-- Preview cache/status foundation. Implemented; actual image/video preview generation remains stubbed.
+- Local auth interfaces plus `dev_no_auth` mode. Implemented.
+- Local auth bootstrap, login/logout, sessions, and API tokens. Implemented.
+- Preview cache/status foundation. Implemented.
+- Standard-library image preview generation. Implemented for decodable image files.
+- GPX parser, track listing/detail APIs, and GPS Tracks UI. Implemented.
+- Live video-track sync candidate/link skeleton. Implemented.
+- GeoJSON map API and basic Map UI. Implemented.
+- ffprobe detection and best-effort video metadata extraction. Implemented.
 
 Remaining Phase 1 hardening:
 
-- local auth persistence/bootstrap flow and UI;
 - richer asset metadata extraction;
-- preview generation workers for images and videos;
-- GPX parser and track APIs;
-- map API and first geospatial UI;
+- preview generation workers for videos and unsupported image formats;
+- richer map rendering with real map tiles/OpenLayers;
 - durable job dashboard filters and retry controls.
 
 ## Phase 2: Media Usability

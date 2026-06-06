@@ -21,6 +21,74 @@ const (
 
 var ErrCanceled = errors.New("job canceled")
 
+type ErrorClass string
+
+const (
+	ErrorClassUnknown   ErrorClass = "unknown"
+	ErrorClassPermanent ErrorClass = "permanent"
+	ErrorClassTransient ErrorClass = "transient"
+	ErrorClassCanceled  ErrorClass = "canceled"
+	ErrorClassPanic     ErrorClass = "panic"
+)
+
+type ClassifiedError struct {
+	Class ErrorClass
+	Err   error
+}
+
+func (e ClassifiedError) Error() string {
+	if e.Err == nil {
+		return string(e.Class)
+	}
+	return e.Err.Error()
+}
+
+func (e ClassifiedError) Unwrap() error { return e.Err }
+
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return ClassifiedError{Class: ErrorClassPermanent, Err: err}
+}
+
+func Transient(err error) error {
+	if err == nil {
+		return nil
+	}
+	return ClassifiedError{Class: ErrorClassTransient, Err: err}
+}
+
+func PanicError(err error) error {
+	if err == nil {
+		return ClassifiedError{Class: ErrorClassPanic, Err: errors.New("panic")}
+	}
+	return ClassifiedError{Class: ErrorClassPanic, Err: err}
+}
+
+func Classify(err error) ErrorClass {
+	if err == nil {
+		return ErrorClassUnknown
+	}
+	if errors.Is(err, ErrCanceled) {
+		return ErrorClassCanceled
+	}
+	var classified ClassifiedError
+	if errors.As(err, &classified) {
+		return classified.Class
+	}
+	return ErrorClassUnknown
+}
+
+func ShouldRetry(err error) bool {
+	switch Classify(err) {
+	case ErrorClassPermanent, ErrorClassCanceled, ErrorClassPanic:
+		return false
+	default:
+		return true
+	}
+}
+
 type Job struct {
 	ID                string     `json:"id"`
 	Kind              string     `json:"kind"`

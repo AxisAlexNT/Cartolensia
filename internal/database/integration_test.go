@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/AxisAlexNT/Cartolensia/internal/auth"
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 	"github.com/AxisAlexNT/Cartolensia/internal/config"
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
@@ -114,6 +115,96 @@ func TestPostgresIntegrationPhase1(t *testing.T) {
 	}
 	if final.Status != jobs.StatusCanceled {
 		t.Fatalf("expected canceled, got %#v", final)
+	}
+
+	authService := auth.NewLocalService(db, auth.Config{AdminEmail: "admin@example.local", SessionTTL: time.Hour, APITokenTTL: time.Hour})
+	user, created, err := authService.Bootstrap(ctx, "password")
+	if err != nil {
+		t.Fatalf("bootstrap auth: %v", err)
+	}
+	if !created || user.ID == "" {
+		t.Fatalf("unexpected bootstrapped user: %#v created=%v", user, created)
+	}
+	login, secret, err := authService.Login(ctx, "admin@example.local", "password")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := db.PrincipalBySessionHash(ctx, auth.TokenHash(secret), time.Now().UTC()); err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	token, err := authService.CreateAPIToken(ctx, login.Principal, "integration", []string{"jobs:write"}, nil)
+	if err != nil {
+		t.Fatalf("create api token: %v", err)
+	}
+	if _, err := db.PrincipalByAPITokenHash(ctx, auth.TokenHash(token.Secret), time.Now().UTC()); err != nil {
+		t.Fatalf("api token lookup: %v", err)
+	}
+
+	trackInfo := storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/tracks/test.gpx",
+		RelativePath: "tracks/test.gpx",
+		Name:         "test.gpx",
+		Extension:    "gpx",
+		MIME:         "application/gpx+xml",
+		MediaKind:    "track",
+		SizeBytes:    32,
+		MTime:        time.Unix(30, 0).UTC(),
+	}
+	trackAsset, err := db.UpsertDiscoveredFile(ctx, trackInfo)
+	if err != nil {
+		t.Fatalf("track upsert: %v", err)
+	}
+	points := []catalog.TrackPoint{
+		{RecordedAt: time.Date(2024, 6, 1, 10, 0, 0, 0, time.UTC), Lat: 40.0, Lon: 44.0, Source: "gpx"},
+		{RecordedAt: time.Date(2024, 6, 1, 10, 5, 0, 0, time.UTC), Lat: 40.1, Lon: 44.1, Source: "gpx"},
+	}
+	if err := db.UpsertTrackPoints(ctx, trackAsset.Asset.ID, points); err != nil {
+		t.Fatalf("upsert track points: %v", err)
+	}
+	tracks, err := db.ListTracks(ctx)
+	if err != nil {
+		t.Fatalf("list tracks: %v", err)
+	}
+	if len(tracks) != 1 || tracks[0].PointCount != 2 {
+		t.Fatalf("unexpected tracks: %#v", tracks)
+	}
+	videoInfo := storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/videos/test.mp4",
+		RelativePath: "videos/test.mp4",
+		Name:         "test.mp4",
+		Extension:    "mp4",
+		MIME:         "video/mp4",
+		MediaKind:    "video",
+		SizeBytes:    64,
+		MTime:        time.Unix(40, 0).UTC(),
+	}
+	videoAsset, err := db.UpsertDiscoveredFile(ctx, videoInfo)
+	if err != nil {
+		t.Fatalf("video upsert: %v", err)
+	}
+	takenAt := time.Date(2024, 6, 1, 10, 0, 0, 0, time.UTC)
+	if err := db.UpdateAssetMetadata(ctx, videoAsset.Asset.ID, &takenAt, map[string]any{"duration_seconds": 600}); err != nil {
+		t.Fatalf("update video metadata: %v", err)
+	}
+	candidates, err := db.TrackCandidates(ctx, videoAsset.Asset.ID)
+	if err != nil {
+		t.Fatalf("track candidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected one candidate, got %#v", candidates)
+	}
+	link, err := db.SaveTrackLink(ctx, catalog.TrackLink{AssetID: videoAsset.Asset.ID, TrackAssetID: trackAsset.Asset.ID, TimeOffsetMS: 500})
+	if err != nil {
+		t.Fatalf("save track link: %v", err)
+	}
+	links, err := db.ListTrackLinks(ctx, videoAsset.Asset.ID)
+	if err != nil {
+		t.Fatalf("list links: %v", err)
+	}
+	if len(links) != 1 || links[0].ID != link.ID {
+		t.Fatalf("unexpected links: %#v", links)
 	}
 }
 

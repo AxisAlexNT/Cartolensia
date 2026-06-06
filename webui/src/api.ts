@@ -81,6 +81,34 @@ export type PreviewInfo = {
   message?: string;
 };
 
+export type Principal = {
+  id: string;
+  name: string;
+  email?: string;
+  role: string;
+};
+
+export type AuthMe = {
+  principal: Principal;
+  auth_mode: string;
+};
+
+export type LoginResult = {
+  principal: Principal;
+  session?: { id: string; expires_at: string; principal: Principal };
+};
+
+export type APIToken = {
+  id: string;
+  user_id: string;
+  name: string;
+  scopes: string[];
+  expires_at?: string;
+  created_at: string;
+  last_used_at?: string;
+  revoked_at?: string;
+};
+
 export type AssetDetail = {
   asset: Asset;
   locations: Asset["locations"];
@@ -90,6 +118,39 @@ export type AssetDetail = {
   content: Record<string, unknown>;
   timestamps: Record<string, string>;
   metadata: Record<string, unknown>;
+};
+
+export type TrackSummary = {
+  track_asset_id: string;
+  name: string;
+  point_count: number;
+  start_time?: string;
+  end_time?: string;
+  min_lat?: number;
+  min_lon?: number;
+  max_lat?: number;
+  max_lon?: number;
+};
+
+export type TrackDetail = {
+  summary: TrackSummary;
+  points: Array<{
+    id?: number;
+    track_asset_id?: string;
+    recorded_at: string;
+    lat: number;
+    lon: number;
+    elevation_m?: number;
+    speed_mps?: number;
+    source: string;
+  }>;
+};
+
+export type TrackCandidate = {
+  track: TrackSummary;
+  overlap_start?: string;
+  overlap_end?: string;
+  confidence: number;
 };
 
 export type Job = {
@@ -126,11 +187,13 @@ export type BackendStatus = {
   capabilities: Array<{ name: string; available: boolean; installed: boolean }>;
   stats: Stats;
   preview_cache: string;
+  auth_mode: string;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...init
   });
   if (!response.ok) {
@@ -142,6 +205,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ status: string }>("/api/v1/health"),
+  me: () => request<AuthMe>("/api/v1/auth/me"),
+  login: (email: string, password: string) =>
+    request<LoginResult>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => request<{ status: string }>("/api/v1/auth/logout", { method: "POST" }),
+  tokens: () => request<APIToken[]>("/api/v1/auth/tokens"),
+  createToken: (name: string, scopes: string[]) =>
+    request<{ token: APIToken; secret: string }>("/api/v1/auth/tokens", {
+      method: "POST",
+      body: JSON.stringify({ name, scopes })
+    }),
   status: () => request<BackendStatus>("/api/v1/backend/status"),
   storages: () => request<StorageConfig[]>("/api/v1/storages"),
   plugins: () => request<PluginManifest[]>("/api/v1/plugins"),
@@ -150,6 +223,12 @@ export const api = {
   explorerFolders: (path = "") =>
     request<ExplorerView>(`/api/v1/explorer?view=folders&path=${encodeURIComponent(path)}&sort=name`),
   asset: (id: string) => request<AssetDetail>(`/api/v1/assets/${encodeURIComponent(id)}`),
+  tracks: () => request<TrackSummary[]>("/api/v1/tracks"),
+  track: (id: string) => request<TrackDetail>(`/api/v1/tracks/${encodeURIComponent(id)}`),
+  syncCandidates: (assetId: string) =>
+    request<TrackCandidate[]>(`/api/v1/sync/candidates?asset_id=${encodeURIComponent(assetId)}`),
+  map: (bbox = "43.8,39.8,44.3,40.3", zoom = 10) =>
+    request<Record<string, unknown>>(`/api/v1/map?bbox=${encodeURIComponent(bbox)}&zoom=${zoom}`),
   stats: () => request<Stats>("/api/v1/stats"),
   startDiscovery: () => request<Job>("/api/v1/discovery/start", { method: "POST" }),
   startHash: () => request<Job>("/api/v1/hash/start", { method: "POST" }),
