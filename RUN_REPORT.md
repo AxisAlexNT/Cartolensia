@@ -1,5 +1,43 @@
 # Run Report
 
+## 2026-06-06 Supervised Audit Status
+
+Current repo state was audited against this report and the Phase 1 architecture docs. The MVP scaffold described below is present in the codebase.
+
+Commands run during this supervised phase:
+
+- `git status --short --untracked-files=all`
+- `rg --files`
+- `sed -n ...` for the requested project docs and selected implementation files
+- `go test ./...`
+- `npm --prefix webui run build`
+- `bash scripts/smoke-test.sh`
+- `go env GOROOT GOPATH GOCACHE GOTOOLCHAIN GOVERSION GOENV`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...` outside the sandbox after the sandboxed exact command failed
+
+Results:
+
+- `go test ./...` failed inside the sandbox with `testing/internal/testdeps: package testmain: cannot find package`.
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
+- `go test ./...` passed when rerun outside the sandbox, so the exact command failure is treated as sandbox/cache/toolchain environment behavior, not a repository test failure.
+- `npm --prefix webui run build` passed.
+- `bash scripts/smoke-test.sh` passed.
+
+Audit findings:
+
+- No small code fixes were required.
+- `docs/PHASE_1_HARDENING_PLAN.md` was added.
+- Jobs are still synchronous in HTTP handlers; this matches the known limitation.
+- PostgreSQL worker lease fields exist in schema, but repository methods and worker loop are not implemented yet.
+- Migrations are filesystem-loaded rather than embedded.
+- DB integration tests are not automated.
+- Explorer is still a flat list.
+- Auth/admin bootstrap is absent.
+- Asset detail and preview cache are not implemented.
+- `docs/DB_SCHEMA.md` mentions `app_settings`, while `migrations/001_core.sql` does not create it. Treat this as a hardening migration/docs cleanup item.
+- `/mnt/Models/rclone` was not touched.
+
 ## Implemented Features
 
 - Real Go backend bootstrap with config loading, storage registry, plugin loading, database selection, REST API, and static WebUI serving.
@@ -110,5 +148,5 @@ The added `scripts/scan-rclone-readonly.sh` refuses to scan by default and requi
 ## Next Recommended Prompt
 
 ```text
-Continue from the current Cartolensia MVP. Read AGENTS.md, README.md, docs/ARCHITECTURE.md, docs/IMPLEMENTATION_PLAN.md, docs/DB_SCHEMA.md, docs/STORAGE_MODEL.md, docs/PLUGIN_MODEL.md, docs/ROADMAP.md, and RUN_REPORT.md. Harden Phase 1: add asynchronous PostgreSQL-backed job workers with leases/heartbeats, add DB integration tests that can run against Docker PostgreSQL, embed migrations with Go embed, add an auth interface stub, and improve Explorer folder grouping. Keep using testdata/media_fixture only. Do not touch /mnt/Models/rclone. Run go test ./..., npm --prefix webui run build, bash scripts/smoke-test.sh, and a DB-backed smoke test. Update RUN_REPORT.md honestly.
+Continue from the current Cartolensia repo. Read AGENTS.md, README.md, RUN_REPORT.md, docs/ARCHITECTURE.md, docs/IMPLEMENTATION_PLAN.md, docs/DB_SCHEMA.md, docs/STORAGE_MODEL.md, docs/PLUGIN_MODEL.md, docs/ROADMAP.md, and docs/PHASE_1_HARDENING_PLAN.md. Implement the Phase 1 hardening plan in order: embedded migrations and migration safety, PostgreSQL job lease/heartbeat/cancellation/retry repository methods, async worker loop, DB integration tests gated by env vars, Explorer folder grouping, local admin/auth bootstrap interfaces, asset detail API/UI, and media preview cache design. Keep using testdata/media_fixture only. Do not touch /mnt/Models/rclone. Run go test ./..., npm --prefix webui run build, bash scripts/smoke-test.sh, and DB-backed Docker smoke checks if available. Update RUN_REPORT.md honestly with commands, failures, fixes, limitations, and next task.
 ```
