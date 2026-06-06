@@ -6,7 +6,7 @@ It is designed for tourists, bikers, hikers, transport fans, and people who mana
 
 ## Status
 
-Very early development. The repository currently contains the product vision, target architecture, and the first implementation plan.
+Phase 1 vertical-slice MVP. The repository contains a runnable Go backend, PostgreSQL-capable metadata store, async discovery/hash workers, strict read-only fixture storage, Vue 3 WebUI, Docker Compose development database, and smoke/integration test scripts.
 
 ## Core ideas
 
@@ -40,6 +40,12 @@ Run local checks:
 make smoke
 ```
 
+Run the sandbox-friendly Go suite directly:
+
+```bash
+GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...
+```
+
 Start the development PostgreSQL/PostGIS service:
 
 ```bash
@@ -56,6 +62,12 @@ Run the backend against the development PostgreSQL service:
 
 ```bash
 go run ./cmd/cartolensia -config config/dev-postgres.yaml
+```
+
+Run gated PostgreSQL integration tests against the development database:
+
+```bash
+bash scripts/test-db.sh
 ```
 
 ## License

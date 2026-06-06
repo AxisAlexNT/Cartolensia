@@ -45,11 +45,11 @@ Validation rules:
 - `ai-base`: AI runtime and future VectorStore skeleton.
 - `ai-classification`: transport/place classification workflow skeleton, depends on `ai-base`.
 
-The current backend exposes these through `GET /api/v1/plugins`. `POST /api/v1/plugins/rescan` reloads built-in and filesystem manifests from `plugins/<id>/plugin.yaml`.
+The current backend exposes these through `GET /api/v1/plugins`. `POST /api/v1/plugins/rescan` reloads built-in and filesystem manifests from `plugins/<id>/plugin.yaml` and is treated as a write-like endpoint by the auth hook.
 
 ## Future Runtime Types
 
-Sidecar HTTP plugins are the next planned runtime once core contracts stabilize. Sidecar plugins should communicate with core through authenticated local APIs, not direct uncontrolled database access.
+Sidecar HTTP plugins are the next planned runtime once core contracts stabilize. Sidecar plugins should communicate with core through authenticated local APIs, scoped API tokens, and explicit capability manifests, not direct uncontrolled database access.
 
 Sidecar gRPC can be considered later for higher-throughput plugin calls.
 
@@ -57,4 +57,4 @@ Go `.so` plugins are experimental developer-mode only and should not be the defa
 
 ## WebUI Extensions
 
-Plugin WebUI assets may later live under `plugins/<id>/webui/dist/`. For MVP, plugin navigation entries and unavailable states can be generated from backend plugin descriptors.
+Plugin WebUI assets may later live under `plugins/<id>/webui/dist/` and be served as static bundles after manifest validation. For MVP, plugin navigation entries and unavailable states are generated from backend plugin descriptors.

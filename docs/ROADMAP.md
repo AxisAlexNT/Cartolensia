@@ -19,13 +19,22 @@
 - REST API. Implemented for MVP endpoints.
 - Vue Explorer, Discovery, Storages, Plugins, Stats, and plugin stubs. Implemented.
 - Smoke workflow. Implemented.
+- Embedded migrations with optional explicit disk loading. Implemented.
+- Durable job leases, heartbeats, cancellation, retry scheduling, and panic recovery. Implemented.
+- Async discovery/hash workers. Implemented.
+- PostgreSQL integration tests gated by environment variables. Implemented.
+- Folder-style Explorer and asset detail API/UI. Implemented.
+- Local auth interfaces plus `dev_no_auth` mode. Implemented as foundation.
+- Preview cache/status foundation. Implemented; actual image/video preview generation remains stubbed.
 
 Remaining Phase 1 hardening:
 
-- asynchronous worker loop with durable leases;
-- richer PostgreSQL integration tests;
-- auth interface stub;
-- embedded migrations via Go `embed` instead of filesystem migration loading.
+- local auth persistence/bootstrap flow and UI;
+- richer asset metadata extraction;
+- preview generation workers for images and videos;
+- GPX parser and track APIs;
+- map API and first geospatial UI;
+- durable job dashboard filters and retry controls.
 
 ## Phase 2: Media Usability
 
@@ -33,7 +42,7 @@ Remaining Phase 1 hardening:
 - Image previews generated on demand into a cache outside originals.
 - ffprobe metadata extraction where available.
 - Missing-file detection and rescan behavior.
-- Improved folder and table filtering.
+- Improved folder and table filtering beyond the current folder MVP.
 
 ## Phase 3: Map And Tracks Foundation
 

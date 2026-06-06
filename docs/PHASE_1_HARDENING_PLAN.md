@@ -4,6 +4,8 @@ This plan assumes the current MVP is a working vertical slice: fixture discovery
 
 Do not touch `/mnt/Models/rclone`. Continue using `testdata/media_fixture/` and synthetic temporary files for tests.
 
+Status after the Phase 1 hardening run: sections 1 through 5 are implemented for the MVP path, section 6 has a gated PostgreSQL integration test, sections 7 and 9 are implemented, section 8 is implemented as interfaces/dev-mode foundation, and section 10 is implemented as a status/cache-path foundation without preview generation.
+
 ## Audit Summary
 
 - `RUN_REPORT.md` matches the current codebase at a high level.

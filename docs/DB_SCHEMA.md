@@ -98,6 +98,7 @@ The MVP must start without optional extensions.
 - `worker_id text null`
 - `lease_expires_at timestamptz null`
 - `cancel_requested_at timestamptz null`
+- `next_run_at timestamptz null`
 - `created_at timestamptz not null default now()`
 - `started_at timestamptz null`
 - `finished_at timestamptz null`
@@ -121,6 +122,38 @@ The MVP must start without optional extensions.
 - `status text not null default 'stub'`
 - `manifest_json jsonb not null`
 - `loaded_at timestamptz not null default now()`
+
+`users`
+
+- `id uuid primary key`
+- `email text unique not null`
+- `display_name text not null`
+- `password_hash text null`
+- `role text not null default 'admin'`
+- `disabled_at timestamptz null`
+- `created_at timestamptz not null default now()`
+- `updated_at timestamptz not null default now()`
+
+`sessions`
+
+- `id uuid primary key`
+- `user_id uuid not null references users(id) on delete cascade`
+- `token_hash bytea unique not null`
+- `expires_at timestamptz not null`
+- `created_at timestamptz not null default now()`
+- `last_seen_at timestamptz null`
+
+`api_tokens`
+
+- `id uuid primary key`
+- `user_id uuid not null references users(id) on delete cascade`
+- `name text not null`
+- `token_hash bytea unique not null`
+- `scopes text[] not null default '{}'`
+- `expires_at timestamptz null`
+- `created_at timestamptz not null default now()`
+- `last_used_at timestamptz null`
+- `revoked_at timestamptz null`
 
 `track_points`
 
@@ -158,8 +191,11 @@ Initial indexes:
 - `assets(taken_at)`
 - `contents(sha512)`
 - `jobs(status, kind, created_at)`
-- `jobs(lease_expires_at) where status = 'running'`
+- `jobs(lease_expires_at) where status in ('running', 'cancel_requested')`
+- `jobs(next_run_at, created_at) where status = 'queued'`
 - `job_logs(job_id, created_at desc)`
+- `sessions(user_id)`
+- `api_tokens(user_id)`
 - `track_points(track_asset_id, recorded_at)`
 - `asset_track_links(asset_id)`
 
@@ -170,9 +206,14 @@ Future geospatial indexes:
 
 ## Migration Policy
 
-- Migrations live in `migrations/`.
+- Migrations live in `migrations/` and are embedded into the Go binary for runtime startup.
+- Disk migration loading is available only when explicitly configured for development/testing.
 - Migrations must be deterministic and idempotence-tested through the migration runner.
 - Do not use destructive migrations without an explicit rollback or backup strategy.
 - Extension creation should use `CREATE EXTENSION IF NOT EXISTS` only for optional capabilities and tolerate absence where PostgreSQL permissions do not allow installation.
 
-The implemented migration is `migrations/001_core.sql`.
+Implemented migrations:
+
+- `migrations/001_core.sql`: core metadata, assets, locations, contents, jobs, plugins, and GPS/video sync skeleton.
+- `migrations/002_phase1_hardening.sql`: `app_settings`, queued-job scheduling with `next_run_at`, and lease indexes.
+- `migrations/003_auth_foundation.sql`: users, sessions, and API tokens for local auth bootstrap.

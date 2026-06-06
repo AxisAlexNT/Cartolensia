@@ -3,13 +3,18 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/AxisAlexNT/Cartolensia/internal/auth"
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 	"github.com/AxisAlexNT/Cartolensia/internal/config"
 	"github.com/AxisAlexNT/Cartolensia/internal/database"
+	"github.com/AxisAlexNT/Cartolensia/internal/discovery"
+	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/plugins"
 	"github.com/AxisAlexNT/Cartolensia/internal/server"
 	"github.com/AxisAlexNT/Cartolensia/internal/storage"
+	"github.com/AxisAlexNT/Cartolensia/internal/workers"
 )
 
 const Version = "dev"
@@ -22,6 +27,9 @@ type App struct {
 	DB           *database.DB
 	StoreBackend string
 	Capabilities []database.Capability
+	Workers      *workers.Manager
+	authn        auth.Authenticator
+	authz        auth.Authorizer
 }
 
 func New(ctx context.Context, configPath string) (*App, error) {
@@ -57,7 +65,12 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := db.ApplyMigrations(ctx, "migrations"); err != nil {
+		if cfg.Database.MigrationsDir != "" {
+			err = db.ApplyMigrationsFromDir(ctx, cfg.Database.MigrationsDir)
+		} else {
+			err = db.ApplyEmbeddedMigrations(ctx)
+		}
+		if err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -83,10 +96,41 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		app.StoreBackend = "postgres"
 		app.Capabilities = caps
 	}
+	switch cfg.Auth.Mode {
+	case "local":
+		app.authn = auth.DisabledLocalAuth{}
+		app.authz = auth.DisabledLocalAuth{}
+	default:
+		app.authn = auth.DevNoAuth{}
+		app.authz = auth.DevNoAuth{}
+	}
+	if cfg.Workers.Enabled {
+		workerCfg, err := workerConfig(cfg.Workers)
+		if err != nil {
+			app.Close()
+			return nil, err
+		}
+		manager := workers.New(app.Store, workerCfg)
+		manager.Register("discovery", func(ctx context.Context, job *jobs.Job) error {
+			runner := discovery.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
+			return runner.Scan(ctx, job)
+		})
+		manager.Register("hash", func(ctx context.Context, job *jobs.Job) error {
+			runner := discovery.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
+			return runner.HashUnhashed(ctx, job)
+		})
+		manager.Start()
+		app.Workers = manager
+	}
 	return app, nil
 }
 
 func (a *App) Close() {
+	if a != nil && a.Workers != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = a.Workers.Stop(ctx)
+	}
 	if a != nil && a.DB != nil {
 		a.DB.Close()
 	}
@@ -94,12 +138,36 @@ func (a *App) Close() {
 
 func (a *App) Handler() *server.Server {
 	return server.New(server.Dependencies{
-		Version:      Version,
-		Config:       a.Config,
-		Plugins:      a.Plugins,
-		Registry:     a.Registry,
-		Store:        a.Store,
-		StoreBackend: a.StoreBackend,
-		Capabilities: a.Capabilities,
+		Version:       Version,
+		Config:        a.Config,
+		Plugins:       a.Plugins,
+		Registry:      a.Registry,
+		Store:         a.Store,
+		StoreBackend:  a.StoreBackend,
+		Capabilities:  a.Capabilities,
+		Authenticator: a.authn,
+		Authorizer:    a.authz,
 	})
+}
+
+func workerConfig(cfg config.WorkerConfig) (workers.Config, error) {
+	pollInterval, err := time.ParseDuration(cfg.PollInterval)
+	if err != nil {
+		return workers.Config{}, fmt.Errorf("parse workers.poll_interval: %w", err)
+	}
+	leaseDuration, err := time.ParseDuration(cfg.LeaseDuration)
+	if err != nil {
+		return workers.Config{}, fmt.Errorf("parse workers.lease_duration: %w", err)
+	}
+	heartbeatInterval, err := time.ParseDuration(cfg.HeartbeatInterval)
+	if err != nil {
+		return workers.Config{}, fmt.Errorf("parse workers.heartbeat_interval: %w", err)
+	}
+	return workers.Config{
+		WorkerID:          cfg.WorkerID,
+		PollInterval:      pollInterval,
+		LeaseDuration:     leaseDuration,
+		HeartbeatInterval: heartbeatInterval,
+		MaxConcurrency:    cfg.MaxConcurrency,
+	}, nil
 }

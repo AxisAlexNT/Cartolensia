@@ -229,6 +229,7 @@ coverage.out
 docker-compose.override.yml
 
 # Local databases / queues / temp volumes
+.cartolensia/
 *.sqlite
 *.sqlite3
 *.db

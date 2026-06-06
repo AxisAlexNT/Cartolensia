@@ -27,5 +27,20 @@ done
 
 curl -fsS "http://${addr}/api/v1/health" >/dev/null
 curl -fsS -X POST "http://${addr}/api/v1/discovery/start" >/dev/null
-curl -fsS -X POST "http://${addr}/api/v1/hash/start" >/dev/null
+
+for _ in $(seq 1 50); do
+  if curl -fsS "http://${addr}/api/v1/stats" | grep -q '"assets":4'; then
+    break
+  fi
+  sleep 0.2
+done
 curl -fsS "http://${addr}/api/v1/stats" | grep -q '"assets":4'
+
+curl -fsS -X POST "http://${addr}/api/v1/hash/start" >/dev/null
+for _ in $(seq 1 50); do
+  if curl -fsS "http://${addr}/api/v1/stats" | grep -q '"hashed":4'; then
+    break
+  fi
+  sleep 0.2
+done
+curl -fsS "http://${addr}/api/v1/stats" | grep -q '"hashed":4'

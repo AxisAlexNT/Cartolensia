@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,6 +25,7 @@ import (
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/plugins"
 	"github.com/AxisAlexNT/Cartolensia/internal/storage"
+	embeddedmigrations "github.com/AxisAlexNT/Cartolensia/migrations"
 )
 
 type DB struct {
@@ -65,29 +68,46 @@ func (db *DB) Close() {
 }
 
 func LoadMigrations(dir string) ([]Migration, error) {
-	entries, err := os.ReadDir(dir)
+	return loadMigrations(os.DirFS(dir), ".", func(name string) string {
+		return filepath.Join(dir, name)
+	})
+}
+
+func LoadEmbeddedMigrations() ([]Migration, error) {
+	return LoadMigrationsFS(embeddedmigrations.FS, ".")
+}
+
+func LoadMigrationsFS(fsys fs.FS, dir string) ([]Migration, error) {
+	return loadMigrations(fsys, dir, func(name string) string {
+		return path.Join(dir, name)
+	})
+}
+
+func loadMigrations(fsys fs.FS, dir string, displayPath func(string) string) ([]Migration, error) {
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return nil, fmt.Errorf("read migrations dir: %w", err)
 	}
-	var paths []string
+	var names []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
-		paths = append(paths, filepath.Join(dir, entry.Name()))
+		names = append(names, entry.Name())
 	}
-	sort.Strings(paths)
-	migrations := make([]Migration, 0, len(paths))
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
+	sort.Strings(names)
+	migrations := make([]Migration, 0, len(names))
+	for _, name := range names {
+		fsysPath := path.Join(dir, name)
+		data, err := fs.ReadFile(fsys, fsysPath)
 		if err != nil {
-			return nil, fmt.Errorf("read migration %s: %w", path, err)
+			return nil, fmt.Errorf("read migration %s: %w", fsysPath, err)
 		}
 		sum := sha256.Sum256(data)
-		version := strings.TrimSuffix(filepath.Base(path), ".sql")
+		version := strings.TrimSuffix(name, ".sql")
 		migrations = append(migrations, Migration{
 			Version:  version,
-			Path:     path,
+			Path:     displayPath(name),
 			SQL:      string(data),
 			Checksum: hex.EncodeToString(sum[:]),
 		})
@@ -96,10 +116,26 @@ func LoadMigrations(dir string) ([]Migration, error) {
 }
 
 func (db *DB) ApplyMigrations(ctx context.Context, dir string) error {
+	return db.ApplyMigrationsFromDir(ctx, dir)
+}
+
+func (db *DB) ApplyMigrationsFromDir(ctx context.Context, dir string) error {
 	migrations, err := LoadMigrations(dir)
 	if err != nil {
 		return err
 	}
+	return db.applyMigrations(ctx, migrations)
+}
+
+func (db *DB) ApplyEmbeddedMigrations(ctx context.Context) error {
+	migrations, err := LoadEmbeddedMigrations()
+	if err != nil {
+		return err
+	}
+	return db.applyMigrations(ctx, migrations)
+}
+
+func (db *DB) applyMigrations(ctx context.Context, migrations []Migration) error {
 	if _, err := db.pool.Exec(ctx, `create table if not exists schema_migrations (version text primary key, checksum text not null, applied_at timestamptz not null default now())`); err != nil {
 		return fmt.Errorf("ensure schema_migrations: %w", err)
 	}
@@ -346,14 +382,19 @@ func (db *DB) Stats(ctx context.Context) (catalog.Stats, error) {
 }
 
 func (db *DB) EnqueueJob(ctx context.Context, job jobs.Job) (jobs.Job, error) {
+	if job.MaxAttempts <= 0 {
+		job.MaxAttempts = 3
+	}
 	payload, counters, err := marshalJobJSON(job)
 	if err != nil {
 		return jobs.Job{}, err
 	}
 	_, err = db.pool.Exec(ctx, `
-		insert into jobs(id, kind, status, payload_json, counters_json, progress_current, progress_total, attempts, max_attempts, created_at, started_at, finished_at, error)
-		values($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	`, job.ID, job.Kind, string(job.Status), payload, counters, job.ProgressCurrent, job.ProgressTotal, job.Attempts, job.MaxAttempts, job.CreatedAt, job.StartedAt, job.FinishedAt, nullString(job.Error))
+		insert into jobs(id, kind, status, payload_json, counters_json, progress_current, progress_total, attempts, max_attempts,
+			worker_id, lease_expires_at, cancel_requested_at, next_run_at, created_at, started_at, finished_at, error)
+		values($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+	`, job.ID, job.Kind, string(job.Status), payload, counters, job.ProgressCurrent, job.ProgressTotal, job.Attempts, job.MaxAttempts,
+		nullString(job.WorkerID), job.LeaseExpiresAt, job.CancelRequestedAt, job.NextRunAt, job.CreatedAt, job.StartedAt, job.FinishedAt, nullString(job.Error))
 	return job, err
 }
 
@@ -370,9 +411,10 @@ func (db *DB) UpdateJob(ctx context.Context, job jobs.Job) error {
 	cmd, err := tx.Exec(ctx, `
 		update jobs
 		set status=$2, payload_json=$3, counters_json=$4, progress_current=$5, progress_total=$6, attempts=$7, max_attempts=$8,
-			started_at=$9, finished_at=$10, error=$11
+			worker_id=$9, lease_expires_at=$10, cancel_requested_at=$11, next_run_at=$12, started_at=$13, finished_at=$14, error=$15
 		where id=$1
-	`, job.ID, string(job.Status), payload, counters, job.ProgressCurrent, job.ProgressTotal, job.Attempts, job.MaxAttempts, job.StartedAt, job.FinishedAt, nullString(job.Error))
+	`, job.ID, string(job.Status), payload, counters, job.ProgressCurrent, job.ProgressTotal, job.Attempts, job.MaxAttempts,
+		nullString(job.WorkerID), job.LeaseExpiresAt, job.CancelRequestedAt, job.NextRunAt, job.StartedAt, job.FinishedAt, nullString(job.Error))
 	if err != nil {
 		return err
 	}
@@ -392,7 +434,7 @@ func (db *DB) UpdateJob(ctx context.Context, job jobs.Job) error {
 
 func (db *DB) ListJobs(ctx context.Context) ([]jobs.Job, error) {
 	rows, err := db.pool.Query(ctx, `
-		select id::text, kind, status, payload_json, counters_json, progress_current, progress_total, attempts, max_attempts, created_at, started_at, finished_at, coalesce(error, '')
+		select `+jobColumns+`
 		from jobs order by created_at desc
 	`)
 	if err != nil {
@@ -415,7 +457,7 @@ func (db *DB) ListJobs(ctx context.Context) ([]jobs.Job, error) {
 
 func (db *DB) GetJob(ctx context.Context, jobID string) (jobs.Job, error) {
 	rows, err := db.pool.Query(ctx, `
-		select id::text, kind, status, payload_json, counters_json, progress_current, progress_total, attempts, max_attempts, created_at, started_at, finished_at, coalesce(error, '')
+		select `+jobColumns+`
 		from jobs where id=$1
 	`, jobID)
 	if err != nil {
@@ -431,6 +473,246 @@ func (db *DB) GetJob(ctx context.Context, jobID string) (jobs.Job, error) {
 	}
 	out[0].Logs, err = db.jobLogs(ctx, out[0].ID)
 	return out[0], err
+}
+
+func (db *DB) LeaseNextJob(ctx context.Context, workerID string, kinds []string, leaseDuration time.Duration) (jobs.Job, error) {
+	if workerID == "" {
+		return jobs.Job{}, fmt.Errorf("worker id is required")
+	}
+	_, _ = db.ReleaseExpiredLeases(ctx, time.Now().UTC())
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	defer rollback(ctx, tx)
+
+	query := `select id::text from jobs
+		where status='queued' and (next_run_at is null or next_run_at <= now())`
+	args := []any{}
+	if len(kinds) > 0 {
+		args = append(args, kinds)
+		query += fmt.Sprintf(" and kind=any($%d)", len(args))
+	}
+	query += ` order by created_at, id for update skip locked limit 1`
+	var jobID string
+	if err := tx.QueryRow(ctx, query, args...).Scan(&jobID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return jobs.Job{}, catalog.ErrNotFound
+		}
+		return jobs.Job{}, err
+	}
+	leaseUntil := time.Now().UTC().Add(leaseDuration)
+	rows, err := tx.Query(ctx, `
+		update jobs
+		set status='running',
+			worker_id=$2,
+			lease_expires_at=$3,
+			started_at=coalesce(started_at, now()),
+			attempts=attempts + 1,
+			next_run_at=null,
+			error=null
+		where id=$1
+		returning `+jobColumns+`
+	`, jobID, workerID, leaseUntil)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	out, err := scanJobs(rows)
+	rows.Close()
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	if len(out) != 1 {
+		return jobs.Job{}, catalog.ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobs.Job{}, err
+	}
+	out[0].Logs, err = db.jobLogs(ctx, out[0].ID)
+	return out[0], err
+}
+
+func (db *DB) HeartbeatJob(ctx context.Context, jobID, workerID string, leaseDuration time.Duration) error {
+	leaseUntil := time.Now().UTC().Add(leaseDuration)
+	cmd, err := db.pool.Exec(ctx, `
+		update jobs
+		set lease_expires_at=$3
+		where id=$1 and worker_id=$2 and status in ('running', 'cancel_requested')
+	`, jobID, workerID, leaseUntil)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return catalog.ErrJobLeaseLost
+	}
+	return nil
+}
+
+func (db *DB) UpdateLeasedJob(ctx context.Context, job jobs.Job, workerID string) error {
+	payload, counters, err := marshalJobJSON(job)
+	if err != nil {
+		return err
+	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+	cmd, err := tx.Exec(ctx, `
+		update jobs
+		set status=case when status='cancel_requested' and $2='running' then status else $2 end,
+			payload_json=$3,
+			counters_json=$4,
+			progress_current=$5,
+			progress_total=$6,
+			attempts=$7,
+			max_attempts=$8,
+			cancel_requested_at=coalesce(cancel_requested_at, $9),
+			next_run_at=$10,
+			started_at=$11,
+			finished_at=$12,
+			error=$13
+		where id=$1 and worker_id=$14 and status in ('running', 'cancel_requested')
+	`, job.ID, string(job.Status), payload, counters, job.ProgressCurrent, job.ProgressTotal, job.Attempts, job.MaxAttempts,
+		job.CancelRequestedAt, job.NextRunAt, job.StartedAt, job.FinishedAt, nullString(job.Error), workerID)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return catalog.ErrJobLeaseLost
+	}
+	if err := replaceJobLogs(ctx, tx, job); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (db *DB) CompleteLeasedJob(ctx context.Context, job jobs.Job, workerID string) error {
+	if err := jobs.Complete(&job); err != nil {
+		return err
+	}
+	return db.finishLeasedJob(ctx, job, workerID, "running")
+}
+
+func (db *DB) FailLeasedJob(ctx context.Context, job jobs.Job, workerID string, cause error) error {
+	if cause == nil {
+		cause = fmt.Errorf("job failed")
+	}
+	maxAttempts := job.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	if job.Attempts < maxAttempts && job.Status != jobs.StatusCancelRequested {
+		delay := time.Duration(job.Attempts)
+		if delay <= 0 {
+			delay = 1
+		}
+		if delay > 5 {
+			delay = 5
+		}
+		if err := jobs.Retry(&job, delay*time.Second, cause); err != nil {
+			return err
+		}
+		jobs.AddLog(&job, "warn", fmt.Sprintf("will retry after %s: %v", delay*time.Second, cause))
+		return db.finishLeasedJob(ctx, job, workerID, "running")
+	}
+	if err := jobs.Fail(&job, cause); err != nil {
+		return err
+	}
+	jobs.AddLog(&job, "error", cause.Error())
+	return db.finishLeasedJob(ctx, job, workerID, "running", "cancel_requested")
+}
+
+func (db *DB) CancelLeasedJob(ctx context.Context, job jobs.Job, workerID string) error {
+	if err := jobs.Cancel(&job); err != nil {
+		return err
+	}
+	jobs.AddLog(&job, "info", "job canceled")
+	return db.finishLeasedJob(ctx, job, workerID, "running", "cancel_requested")
+}
+
+func (db *DB) RequestCancelJob(ctx context.Context, jobID string) (jobs.Job, error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	defer rollback(ctx, tx)
+	rows, err := tx.Query(ctx, `select `+jobColumns+` from jobs where id=$1 for update`, jobID)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	out, err := scanJobs(rows)
+	rows.Close()
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	if len(out) == 0 {
+		return jobs.Job{}, catalog.ErrNotFound
+	}
+	job := out[0]
+	if err := jobs.RequestCancel(&job); err != nil {
+		return jobs.Job{}, err
+	}
+	jobs.AddLog(&job, "info", "cancellation requested")
+	payload, counters, err := marshalJobJSON(job)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	cmd, err := tx.Exec(ctx, `
+		update jobs
+		set status=$2,
+			payload_json=$3,
+			counters_json=$4,
+			cancel_requested_at=$5,
+			finished_at=$6,
+			error=$7
+		where id=$1
+	`, job.ID, string(job.Status), payload, counters, job.CancelRequestedAt, job.FinishedAt, nullString(job.Error))
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	if cmd.RowsAffected() == 0 {
+		return jobs.Job{}, catalog.ErrNotFound
+	}
+	if err := replaceJobLogs(ctx, tx, job); err != nil {
+		return jobs.Job{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobs.Job{}, err
+	}
+	job.Logs, err = db.jobLogs(ctx, job.ID)
+	return job, err
+}
+
+func (db *DB) ReleaseExpiredLeases(ctx context.Context, now time.Time) (int64, error) {
+	cmd, err := db.pool.Exec(ctx, `
+		update jobs
+		set status=case
+				when status='cancel_requested' then 'canceled'
+				when attempts >= max_attempts then 'failed'
+				else 'queued'
+			end,
+			worker_id=null,
+			lease_expires_at=null,
+			finished_at=case
+				when status='cancel_requested' or attempts >= max_attempts then $1
+				else finished_at
+			end,
+			next_run_at=case
+				when status='cancel_requested' or attempts >= max_attempts then next_run_at
+				else $1
+			end,
+			error=case
+				when status='cancel_requested' then error
+				when attempts >= max_attempts then coalesce(error, 'job lease expired')
+				else coalesce(error, 'job lease expired; retry queued')
+			end
+		where status in ('running', 'cancel_requested') and lease_expires_at < $1
+	`, now)
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
 }
 
 func (db *DB) ensureStorage(ctx context.Context, name, kind, root, mode string) (string, error) {
@@ -493,7 +775,8 @@ func scanJobs(rows pgx.Rows) ([]jobs.Job, error) {
 		var status string
 		var payloadBytes []byte
 		var countersBytes []byte
-		if err := rows.Scan(&job.ID, &job.Kind, &status, &payloadBytes, &countersBytes, &job.ProgressCurrent, &job.ProgressTotal, &job.Attempts, &job.MaxAttempts, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &job.Error); err != nil {
+		if err := rows.Scan(&job.ID, &job.Kind, &status, &payloadBytes, &countersBytes, &job.ProgressCurrent, &job.ProgressTotal, &job.Attempts, &job.MaxAttempts,
+			&job.WorkerID, &job.LeaseExpiresAt, &job.CancelRequestedAt, &job.NextRunAt, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &job.Error); err != nil {
 			return nil, err
 		}
 		job.Status = jobs.Status(status)
@@ -506,6 +789,62 @@ func scanJobs(rows pgx.Rows) ([]jobs.Job, error) {
 		out = append(out, job)
 	}
 	return out, rows.Err()
+}
+
+func (db *DB) finishLeasedJob(ctx context.Context, job jobs.Job, workerID string, allowedCurrent ...string) error {
+	payload, counters, err := marshalJobJSON(job)
+	if err != nil {
+		return err
+	}
+	if len(allowedCurrent) == 0 {
+		allowedCurrent = []string{"running"}
+	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+	cmd, err := tx.Exec(ctx, `
+		update jobs
+		set status=$2,
+			payload_json=$3,
+			counters_json=$4,
+			progress_current=$5,
+			progress_total=$6,
+			attempts=$7,
+			max_attempts=$8,
+			worker_id=null,
+			lease_expires_at=null,
+			cancel_requested_at=$9,
+			next_run_at=$10,
+			started_at=$11,
+			finished_at=$12,
+			error=$13
+		where id=$1 and worker_id=$14 and status=any($15)
+	`, job.ID, string(job.Status), payload, counters, job.ProgressCurrent, job.ProgressTotal, job.Attempts, job.MaxAttempts,
+		job.CancelRequestedAt, job.NextRunAt, job.StartedAt, job.FinishedAt, nullString(job.Error), workerID, allowedCurrent)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return catalog.ErrJobLeaseLost
+	}
+	if err := replaceJobLogs(ctx, tx, job); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func replaceJobLogs(ctx context.Context, tx pgx.Tx, job jobs.Job) error {
+	if _, err := tx.Exec(ctx, `delete from job_logs where job_id=$1`, job.ID); err != nil {
+		return err
+	}
+	for _, line := range job.Logs {
+		if _, err := tx.Exec(ctx, `insert into job_logs(job_id, level, message, created_at) values($1, $2, $3, $4)`, job.ID, line.Level, line.Message, line.CreatedAt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *DB) jobLogs(ctx context.Context, jobID string) ([]jobs.LogLine, error) {
@@ -550,6 +889,9 @@ func nullString(value string) any {
 func rollback(ctx context.Context, tx pgx.Tx) {
 	_ = tx.Rollback(ctx)
 }
+
+const jobColumns = `id::text, kind, status, payload_json, counters_json, progress_current, progress_total, attempts, max_attempts,
+	coalesce(worker_id, ''), lease_expires_at, cancel_requested_at, next_run_at, created_at, started_at, finished_at, coalesce(error, '')`
 
 func IsConnectError(err error) bool {
 	var pgErr *pgconn.ConnectError

@@ -27,6 +27,71 @@ export type ExplorerRow = {
   sha512_hex?: string;
 };
 
+export type ExplorerFolder = {
+  name: string;
+  path: string;
+  file_count: number;
+  total_bytes: number;
+  latest_mtime: string;
+};
+
+export type ExplorerFile = ExplorerRow;
+
+export type ExplorerView = {
+  current_path: string;
+  parent_path?: string;
+  folders: ExplorerFolder[];
+  files: ExplorerFile[];
+  file_count: number;
+  folder_count: number;
+  total_bytes: number;
+  offset: number;
+  limit: number;
+};
+
+export type Asset = {
+  id: string;
+  media_kind: string;
+  display_name: string;
+  first_seen_at: string;
+  updated_at: string;
+  locations: Array<{
+    id: string;
+    asset_id: string;
+    storage_name: string;
+    storage_url: string;
+    relative_path: string;
+    file_name: string;
+    extension: string;
+    mime: string;
+    media_kind: string;
+    size_bytes: number;
+    mtime: string;
+    hash_status: string;
+    sha512_hex?: string;
+    content_id?: string;
+    last_seen_at: string;
+  }>;
+};
+
+export type PreviewInfo = {
+  status: string;
+  url?: string;
+  cache_key?: string;
+  message?: string;
+};
+
+export type AssetDetail = {
+  asset: Asset;
+  locations: Asset["locations"];
+  original_url?: string;
+  preview_url?: string;
+  preview: PreviewInfo;
+  content: Record<string, unknown>;
+  timestamps: Record<string, string>;
+  metadata: Record<string, unknown>;
+};
+
 export type Job = {
   id: string;
   kind: string;
@@ -34,7 +99,13 @@ export type Job = {
   progress_current: number;
   progress_total?: number;
   counters: Record<string, number>;
+  attempts: number;
+  max_attempts: number;
   error?: string;
+  worker_id?: string;
+  lease_expires_at?: string;
+  cancel_requested_at?: string;
+  next_run_at?: string;
   logs?: Array<{ level: string; message: string; created_at: string }>;
 };
 
@@ -76,7 +147,11 @@ export const api = {
   plugins: () => request<PluginManifest[]>("/api/v1/plugins"),
   jobs: () => request<Job[]>("/api/v1/jobs"),
   explorer: () => request<ExplorerRow[]>("/api/v1/explorer"),
+  explorerFolders: (path = "") =>
+    request<ExplorerView>(`/api/v1/explorer?view=folders&path=${encodeURIComponent(path)}&sort=name`),
+  asset: (id: string) => request<AssetDetail>(`/api/v1/assets/${encodeURIComponent(id)}`),
   stats: () => request<Stats>("/api/v1/stats"),
   startDiscovery: () => request<Job>("/api/v1/discovery/start", { method: "POST" }),
-  startHash: () => request<Job>("/api/v1/hash/start", { method: "POST" })
+  startHash: () => request<Job>("/api/v1/hash/start", { method: "POST" }),
+  cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" })
 };

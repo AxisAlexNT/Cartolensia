@@ -29,6 +29,10 @@ button:hover {
   background: #0759ba;
 }
 
+a {
+  color: #0969da;
+}
+
 .shell {
   min-height: 100vh;
 }
@@ -148,9 +152,44 @@ td {
   gap: 8px;
 }
 
+.breadcrumbs {
+  align-items: center;
+  border-bottom: 1px solid #d8dee4;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.breadcrumbs button,
+.link-button {
+  background: transparent;
+  border-color: transparent;
+  color: #0969da;
+  min-height: 28px;
+  padding: 0;
+  text-align: left;
+}
+
+.breadcrumbs button {
+  border-color: #d8dee4;
+  padding: 0 8px;
+}
+
+.breadcrumbs button:hover,
+.link-button:hover {
+  background: #f6f8fa;
+}
+
+.folder-row td {
+  background: #fbfcfd;
+  font-weight: 600;
+}
+
 .job-list,
 .cards,
-.metrics {
+.metrics,
+.detail-grid {
   display: grid;
   gap: 12px;
   padding: 16px;
@@ -173,8 +212,22 @@ td {
   gap: 4px;
 }
 
+.job-row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.job-row button {
+  min-height: 28px;
+}
+
 .metrics {
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.detail-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 .metrics strong {
@@ -182,9 +235,21 @@ td {
   font-size: 22px;
 }
 
-.metrics span {
+.metrics span,
+.detail-grid span {
   color: #57606a;
   font-size: 13px;
+}
+
+.detail-grid article {
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.detail-grid strong {
+  display: block;
+  margin-bottom: 4px;
 }
 
 .alert {

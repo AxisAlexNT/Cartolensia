@@ -21,6 +21,8 @@ type Config struct {
 	Cache    CacheConfig     `json:"cache" yaml:"cache"`
 	Storages []StorageConfig `json:"storages" yaml:"storages"`
 	Plugins  PluginConfig    `json:"plugins" yaml:"plugins"`
+	Workers  WorkerConfig    `json:"workers" yaml:"workers"`
+	Auth     AuthConfig      `json:"auth" yaml:"auth"`
 	Source   string          `json:"source"`
 }
 
@@ -29,7 +31,8 @@ type HTTPConfig struct {
 }
 
 type DatabaseConfig struct {
-	URL string `json:"url" yaml:"url"`
+	URL           string `json:"url" yaml:"url"`
+	MigrationsDir string `json:"migrations_dir,omitempty" yaml:"migrations_dir"`
 }
 
 type CacheConfig struct {
@@ -45,6 +48,21 @@ type StorageConfig struct {
 
 type PluginConfig struct {
 	Enabled []string `json:"enabled" yaml:"enabled"`
+}
+
+type WorkerConfig struct {
+	Enabled           bool   `json:"enabled" yaml:"enabled"`
+	WorkerID          string `json:"worker_id" yaml:"worker_id"`
+	PollInterval      string `json:"poll_interval" yaml:"poll_interval"`
+	LeaseDuration     string `json:"lease_duration" yaml:"lease_duration"`
+	HeartbeatInterval string `json:"heartbeat_interval" yaml:"heartbeat_interval"`
+	MaxConcurrency    int    `json:"max_concurrency" yaml:"max_concurrency"`
+}
+
+type AuthConfig struct {
+	Mode             string `json:"mode" yaml:"mode"`
+	AdminEmail       string `json:"admin_email,omitempty" yaml:"admin_email"`
+	AdminPasswordEnv string `json:"admin_password_env,omitempty" yaml:"admin_password_env"`
 }
 
 func Load(path string) (Config, error) {
@@ -94,6 +112,17 @@ func Defaults() Config {
 			"ai-base",
 			"ai-classification",
 		}},
+		Workers: WorkerConfig{
+			Enabled:           true,
+			PollInterval:      "1s",
+			LeaseDuration:     "30s",
+			HeartbeatInterval: "10s",
+			MaxConcurrency:    2,
+		},
+		Auth: AuthConfig{
+			Mode:             "dev_no_auth",
+			AdminPasswordEnv: "CARTOLENSIA_ADMIN_PASSWORD",
+		},
 	}
 }
 
@@ -106,6 +135,24 @@ func Validate(cfg *Config) error {
 	}
 	if len(cfg.Storages) == 0 {
 		return errors.New("at least one storage is required")
+	}
+	if cfg.Workers.PollInterval == "" {
+		cfg.Workers.PollInterval = "1s"
+	}
+	if cfg.Workers.LeaseDuration == "" {
+		cfg.Workers.LeaseDuration = "30s"
+	}
+	if cfg.Workers.HeartbeatInterval == "" {
+		cfg.Workers.HeartbeatInterval = "10s"
+	}
+	if cfg.Workers.MaxConcurrency <= 0 {
+		cfg.Workers.MaxConcurrency = 1
+	}
+	if cfg.Auth.Mode == "" {
+		cfg.Auth.Mode = "dev_no_auth"
+	}
+	if cfg.Auth.Mode != "dev_no_auth" && cfg.Auth.Mode != "local" {
+		return fmt.Errorf("unsupported auth mode %q", cfg.Auth.Mode)
 	}
 	seen := map[string]struct{}{}
 	for i := range cfg.Storages {
@@ -161,7 +208,19 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("CARTOLENSIA_DATABASE_URL"); value != "" {
 		cfg.Database.URL = value
 	}
+	if value := os.Getenv("CARTOLENSIA_MIGRATIONS_DIR"); value != "" {
+		cfg.Database.MigrationsDir = value
+	}
 	if value := os.Getenv("CARTOLENSIA_CACHE_DIR"); value != "" {
 		cfg.Cache.Dir = value
+	}
+	if value := os.Getenv("CARTOLENSIA_WORKERS_ENABLED"); value == "0" || strings.EqualFold(value, "false") {
+		cfg.Workers.Enabled = false
+	}
+	if value := os.Getenv("CARTOLENSIA_WORKER_ID"); value != "" {
+		cfg.Workers.WorkerID = value
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_MODE"); value != "" {
+		cfg.Auth.Mode = value
 	}
 }

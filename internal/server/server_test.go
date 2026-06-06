@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,6 +30,7 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		Registry:     registry,
 		Store:        catalog.NewMemoryStore(),
 		StoreBackend: "memory",
+		SyncJobs:     true,
 	})
 	post := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/start", nil)
 	rec := httptest.NewRecorder()
@@ -50,5 +52,29 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/explorer", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "photo_001.jpg") {
 		t.Fatalf("explorer status %d body %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		AssetID string `json:"asset_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected explorer rows")
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/explorer?view=folders", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"path":"photos"`) {
+		t.Fatalf("folder explorer status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+rows[0].AssetID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"original_url"`) {
+		t.Fatalf("asset detail status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/missing", nil))
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"error"`) {
+		t.Fatalf("asset 404 status %d body %s", rec.Code, rec.Body.String())
 	}
 }

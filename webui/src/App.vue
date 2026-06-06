@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { api, type BackendStatus, type ExplorerRow, type Job, type PluginManifest, type Stats, type StorageConfig } from "./api";
+import {
+  api,
+  type AssetDetail,
+  type BackendStatus,
+  type ExplorerRow,
+  type ExplorerView,
+  type Job,
+  type PluginManifest,
+  type Stats,
+  type StorageConfig
+} from "./api";
 
 const nav = [
   "Explorer",
@@ -20,6 +30,9 @@ const active = ref(localStorage.getItem("cartolensia.route") ?? "Explorer");
 const loading = ref(false);
 const error = ref("");
 const rows = ref<ExplorerRow[]>([]);
+const explorer = ref<ExplorerView | null>(null);
+const explorerPath = ref("");
+const assetDetail = ref<AssetDetail | null>(null);
 const jobs = ref<Job[]>([]);
 const storages = ref<StorageConfig[]>([]);
 const plugins = ref<PluginManifest[]>([]);
@@ -29,6 +42,17 @@ const backend = ref<BackendStatus | null>(null);
 const activePlugin = computed(() => {
   const id = active.value.toLowerCase().replaceAll(" ", "-");
   return plugins.value.find((plugin) => plugin.id === id || plugin.name.toLowerCase() === active.value.toLowerCase());
+});
+
+const breadcrumbs = computed(() => {
+  const parts = explorerPath.value.split("/").filter(Boolean);
+  const crumbs = [{ name: "Root", path: "" }];
+  let current = "";
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    crumbs.push({ name: part, path: current });
+  }
+  return crumbs;
 });
 
 function setActive(next: string) {
@@ -49,6 +73,7 @@ async function refresh() {
       api.status()
     ]);
     rows.value = explorerRows;
+    explorer.value = await api.explorerFolders(explorerPath.value);
     jobs.value = jobRows;
     storages.value = storageRows;
     plugins.value = pluginRows;
@@ -69,6 +94,33 @@ async function startDiscovery() {
 async function startHash() {
   await api.startHash();
   await refresh();
+}
+
+async function cancelJob(id: string) {
+  await api.cancelJob(id);
+  await refresh();
+}
+
+async function openFolder(path: string) {
+  explorerPath.value = path;
+  await refresh();
+}
+
+async function openAsset(id: string) {
+  loading.value = true;
+  error.value = "";
+  try {
+    assetDetail.value = await api.asset(id);
+    setActive("Asset Detail");
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function canCancel(job: Job): boolean {
+  return job.status === "queued" || job.status === "running" || job.status === "cancel_requested";
 }
 
 function formatBytes(value: number): string {
@@ -116,8 +168,13 @@ onMounted(refresh);
         <section v-if="active === 'Explorer'" class="panel">
           <header class="panel-head">
             <h2>Explorer</h2>
-            <span>{{ rows.length }} indexed locations</span>
+            <span>{{ explorer?.folder_count ?? 0 }} folders · {{ explorer?.file_count ?? rows.length }} files</span>
           </header>
+          <div class="breadcrumbs">
+            <button v-for="crumb in breadcrumbs" :key="crumb.path" type="button" @click="openFolder(crumb.path)">
+              {{ crumb.name }}
+            </button>
+          </div>
           <table>
             <thead>
               <tr>
@@ -129,11 +186,22 @@ onMounted(refresh);
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in rows" :key="row.asset_id">
+              <tr v-for="folder in explorer?.folders ?? []" :key="folder.path" class="folder-row">
                 <td>
-                  <a :href="`/api/v1/media/${row.asset_id}/original`" target="_blank" rel="noreferrer">
+                  <button type="button" class="link-button" @click="openFolder(folder.path)">
+                    {{ folder.name }}
+                  </button>
+                </td>
+                <td>folder</td>
+                <td>{{ formatBytes(folder.total_bytes) }}</td>
+                <td>{{ folder.file_count }} files</td>
+                <td>{{ folder.path }}</td>
+              </tr>
+              <tr v-for="row in explorer?.files ?? rows" :key="row.asset_id">
+                <td>
+                  <button type="button" class="link-button" @click="openAsset(row.asset_id)">
                     {{ row.name }}
-                  </a>
+                  </button>
                 </td>
                 <td>{{ row.media_kind }}</td>
                 <td>{{ formatBytes(row.size_bytes) }}</td>
@@ -154,12 +222,51 @@ onMounted(refresh);
           </header>
           <div class="job-list">
             <article v-for="job in jobs" :key="job.id" class="job">
-              <strong>{{ job.kind }}</strong>
-              <span>{{ job.status }}</span>
+              <div class="job-row">
+                <strong>{{ job.kind }}</strong>
+                <button v-if="canCancel(job)" type="button" @click="cancelJob(job.id)">Cancel</button>
+              </div>
+              <span>{{ job.status }} · attempt {{ job.attempts ?? 0 }} / {{ job.max_attempts ?? 0 }}</span>
               <span>{{ job.progress_current }} / {{ job.progress_total ?? "?" }}</span>
               <small>{{ job.logs?.at(-1)?.message ?? job.error }}</small>
             </article>
           </div>
+        </section>
+
+        <section v-else-if="active === 'Asset Detail'" class="panel">
+          <header class="panel-head">
+            <h2>{{ assetDetail?.asset.display_name ?? "Asset" }}</h2>
+            <button type="button" @click="setActive('Explorer')">Back</button>
+          </header>
+          <div v-if="assetDetail" class="detail-grid">
+            <article>
+              <strong>Media</strong>
+              <span>{{ assetDetail.asset.media_kind }}</span>
+            </article>
+            <article>
+              <strong>Hash</strong>
+              <span>{{ String(assetDetail.content.hash_status ?? "unknown") }}</span>
+            </article>
+            <article>
+              <strong>Preview</strong>
+              <span>{{ assetDetail.preview.status }}</span>
+            </article>
+            <article>
+              <strong>Original</strong>
+              <a v-if="assetDetail.original_url" :href="assetDetail.original_url" target="_blank" rel="noreferrer">Open</a>
+            </article>
+          </div>
+          <table v-if="assetDetail">
+            <thead><tr><th>Storage</th><th>Path</th><th>Size</th><th>MIME</th></tr></thead>
+            <tbody>
+              <tr v-for="location in assetDetail.locations" :key="location.id">
+                <td>{{ location.storage_name }}</td>
+                <td>{{ location.relative_path }}</td>
+                <td>{{ formatBytes(location.size_bytes) }}</td>
+                <td>{{ location.mime }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
 
         <section v-else-if="active === 'Storages'" class="panel">

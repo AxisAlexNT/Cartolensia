@@ -11,15 +11,20 @@ Cartolensia can currently run in two modes:
 
 PostgreSQL is the intended durable mode. The memory store is a fallback and test aid, not the long-term production store.
 
+Runtime migrations are embedded into the Go binary from `migrations/*.sql`. Disk-loaded migrations remain available only when `database.migrations_dir` or `CARTOLENSIA_MIGRATIONS_DIR` is explicitly configured.
+
 ## Backend Packages
 
 - `internal/app`: startup wiring, config loading, storage registry, plugin loading, and database selection.
 - `internal/config`: YAML configuration, environment overrides, defaults, validation, and absolute path normalization.
 - `internal/database`: pgx-backed PostgreSQL connection, migrations, config snapshots, plugin/storage upserts, catalog store, jobs, logs, stats, and capability detection.
 - `internal/storage`: universal `fs://storage/path` URLs, strict read-only filesystem adapter, traversal prevention, MIME/media-kind detection, and safe open/list/stat behavior.
-- `internal/catalog`: logical assets, storage locations, content/hash status, stats, and store contract.
-- `internal/discovery`: fast fixture-safe discovery and lazy SHA-512 hashing jobs.
-- `internal/jobs`: job model, state transitions, counters, progress, and logs.
+- `internal/catalog`: logical assets, storage locations, content/hash status, folder-style Explorer grouping, stats, and store contract.
+- `internal/discovery`: fast fixture-safe discovery and lazy SHA-512 hashing handlers with cancellation checks.
+- `internal/jobs`: job model, state transitions, counters, progress, logs, cancellation, leases, and retry scheduling.
+- `internal/workers`: async worker loop, lease acquisition, heartbeats, panic recovery, and graceful stop.
+- `internal/auth`: local auth interfaces plus explicit `dev_no_auth` development mode.
+- `internal/preview`: preview status and cache-key/path foundation.
 - `internal/plugins`: built-in plugin manifests and dependency topological sort.
 - `internal/server`: REST API, original streaming, preview not-implemented response, and WebUI static serving.
 
@@ -34,23 +39,28 @@ Implemented endpoints:
 - `GET /api/v1/plugins`
 - `POST /api/v1/plugins/rescan`
 - `GET /api/v1/jobs`
+- `POST /api/v1/jobs/{id}/cancel`
 - `POST /api/v1/discovery/start`
 - `POST /api/v1/hash/start`
 - `GET /api/v1/assets`
+- `GET /api/v1/assets/{id}`
 - `GET /api/v1/explorer`
 - `GET /api/v1/stats`
 - `GET /api/v1/backend/status`
 - `GET /api/v1/media/{asset_id}/original`
 - `GET /api/v1/media/{asset_id}/preview`
 
-Original streaming uses the read-only storage registry and `http.ServeContent`, which provides HTTP Range support when the underlying file supports seeking. Preview generation intentionally returns `501 Not Implemented` in the MVP.
+`POST /api/v1/discovery/start` and `POST /api/v1/hash/start` enqueue jobs and return quickly in the app runtime. The worker loop leases and executes queued jobs asynchronously. Tests can opt into a synchronous server dependency path for deterministic fixture checks.
+
+Original streaming uses the read-only storage registry and `http.ServeContent`, which provides HTTP Range support when the underlying file supports seeking. Preview generation currently returns a clean status response (`not_implemented` or `unsupported`) and never writes near originals.
 
 ## WebUI
 
 The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 
 - app shell and navigation;
-- Explorer table backed by `/api/v1/explorer`;
+- Explorer table backed by `/api/v1/explorer`, including folder grouping and breadcrumbs;
+- asset detail view backed by `/api/v1/assets/{id}`;
 - Discovery page with scan and hash actions;
 - Storages page;
 - Plugins page;
@@ -66,7 +76,9 @@ Browser route state is saved in `localStorage`.
 - The filesystem adapter exposes read/list/stat/open only.
 - Write, delete, move, mkdir, and similar operations return explicit read-only errors.
 - Path traversal and absolute paths are rejected before filesystem access.
-- Symlinks are not followed during recursive discovery.
+- `..` path segments are rejected before cleaning, including encoded URL traversal attempts.
+- Symlinks are skipped during recursive discovery and opening a symlink that escapes the root is rejected.
+- Write-like endpoints pass through an auth hook; `dev_no_auth` is the default fixture mode.
 - `/mnt/Models/rclone` is not required and was not touched by the MVP tests.
 
 ## Database Capability Policy

@@ -1,152 +1,106 @@
 # Run Report
 
-## 2026-06-06 Supervised Audit Status
+## 2026-06-06 Phase 1 Hardening Run
 
-Current repo state was audited against this report and the Phase 1 architecture docs. The MVP scaffold described below is present in the codebase.
+### Implemented Features
 
-Commands run during this supervised phase:
+- Embedded SQL migrations from `migrations/*.sql`; runtime no longer depends on a relative `migrations/` directory unless `database.migrations_dir` or `CARTOLENSIA_MIGRATIONS_DIR` is explicitly set.
+- Forward migrations:
+  - `002_phase1_hardening.sql`: `app_settings`, `jobs.next_run_at`, queued/lease indexes.
+  - `003_auth_foundation.sql`: `users`, `sessions`, `api_tokens`.
+- PostgreSQL and memory-store job leasing:
+  - enqueue;
+  - lease next job;
+  - heartbeat;
+  - owner-only progress/log updates;
+  - owner-only complete/fail/cancel;
+  - cancellation request;
+  - expired lease release and retry scheduling.
+- Async worker manager with configurable worker ID, poll interval, lease duration, heartbeat interval, max concurrency, graceful stop, and panic recovery.
+- Discovery and SHA-512 hashing now run through queued jobs in the app runtime and check cancellation between files.
+- `POST /api/v1/jobs/{id}/cancel`.
+- Folder-style Explorer API via `/api/v1/explorer?view=folders&path=...`, preserving the previous flat `/api/v1/explorer` response.
+- `GET /api/v1/assets/{id}` asset detail API and Vue asset detail view.
+- Vue Explorer breadcrumbs and folder/file distinction.
+- Local auth foundation:
+  - `Principal`, `Session`, `Authenticator`, `Authorizer`;
+  - explicit `dev_no_auth` default;
+  - write-like endpoints pass through the auth hook.
+- Preview cache/status foundation:
+  - cache keys and paths derive from asset/content IDs;
+  - cache path stays under Cartolensia cache directory;
+  - preview endpoint returns clean `not_implemented`/`unsupported` statuses.
+- Gated PostgreSQL integration test:
+  - `CARTOLENSIA_RUN_DB_TESTS=1`;
+  - `CARTOLENSIA_TEST_DATABASE_URL=...`;
+  - isolated schema per run;
+  - no user database drops.
+- Added `scripts/test-db.sh`.
+- Strengthened tests for migration loading, job states, memory lease races, cancellation, worker panic recovery, storage traversal/symlink/read-only behavior, Explorer grouping, and asset detail.
 
-- `git status --short --untracked-files=all`
-- `rg --files`
-- `sed -n ...` for the requested project docs and selected implementation files
-- `go test ./...`
-- `npm --prefix webui run build`
-- `bash scripts/smoke-test.sh`
-- `go env GOROOT GOPATH GOCACHE GOTOOLCHAIN GOVERSION GOENV`
-- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
-- `go test ./...` outside the sandbox after the sandboxed exact command failed
+### Commands Run
 
-Results:
-
-- `go test ./...` failed inside the sandbox with `testing/internal/testdeps: package testmain: cannot find package`.
+- Inspected docs and code with `sed`, `rg --files`, and `git status --short --untracked-files=all`.
+- Formatted Go files with `gofmt -w ...`.
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
-- `go test ./...` passed when rerun outside the sandbox, so the exact command failure is treated as sandbox/cache/toolchain environment behavior, not a repository test failure.
+- `go test ./...` passed.
 - `npm --prefix webui run build` passed.
 - `bash scripts/smoke-test.sh` passed.
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config` passed.
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres` started PostgreSQL/PostGIS.
+- `bash scripts/test-db.sh` passed after rerunning outside the sandbox.
+- `go run ./cmd/cartolensia -config config/dev-postgres.yaml` started the app with the PostgreSQL store.
+- `curl -fsS` API checks against `http://127.0.0.1:18080` verified health, stats, and jobs.
+- `pkill -TERM -f "cartolensia -config config/dev-postgres.yaml"` stopped the DB-backed app.
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml stop postgres` stopped the PostgreSQL container while preserving the named volume.
 
-Audit findings:
+### Failures And Fixes
 
-- No small code fixes were required.
-- `docs/PHASE_1_HARDENING_PLAN.md` was added.
-- Jobs are still synchronous in HTTP handlers; this matches the known limitation.
-- PostgreSQL worker lease fields exist in schema, but repository methods and worker loop are not implemented yet.
-- Migrations are filesystem-loaded rather than embedded.
-- DB integration tests are not automated.
-- Explorer is still a flat list.
-- Auth/admin bootstrap is absent.
-- Asset detail and preview cache are not implemented.
-- `docs/DB_SCHEMA.md` mentions `app_settings`, while `migrations/001_core.sql` does not create it. Treat this as a hardening migration/docs cleanup item.
-- `/mnt/Models/rclone` was not touched.
+- `bash scripts/test-db.sh` first failed in the sandbox with `socket: operation not permitted` for `127.0.0.1:55432`. Reran with escalation.
+- `scripts/test-db.sh` initially used the wrong default password. Fixed it to `cartolensia_dev_password`, matching Docker Compose.
+- A sandboxed Docker health-poll loop failed on `/var/run/docker.sock`. Reran Docker status with escalation.
+- A new encoded traversal test exposed that `%2e%2e` could normalize away after URL unescape. Fixed `NormalizeRelativePath` to reject any `..` segment before cleaning.
 
-## Implemented Features
+### Tests Passed
 
-- Real Go backend bootstrap with config loading, storage registry, plugin loading, database selection, REST API, and static WebUI serving.
-- YAML config with defaults, environment overrides, validation, and absolute storage/cache paths.
-- PostgreSQL support through `pgx`, SQL migrations, config snapshots, storage/plugin upserts, assets, locations, contents, jobs, job logs, stats, and optional capability detection.
-- Development PostgreSQL/PostGIS Docker Compose service on host port `55432` to avoid conflicts with local PostgreSQL.
-- Built-in plugin manifests with dependency sorting for `albums`, `mapview`, `gpstracks`, `transcoding`, `ai-base`, and `ai-classification`.
-- Strict read-only filesystem storage adapter with universal `fs://` URLs, path traversal protection, symlink-skip discovery, read/list/stat/open behavior, and explicit read-only errors for modifying operations.
-- Fast discovery scan over generated fixture media: URL, relative path, name, extension, MIME, size, mtime, media kind, and `unhashed` status.
-- Lazy SHA-512 hashing job that streams files through the storage adapter.
-- Job model with state transitions, progress, counters, and logs.
-- REST API under `/api/v1`, including health, version, effective config, storages, plugins, plugin rescan, jobs, discovery start, hash start, assets, explorer, stats, backend status, original streaming, and preview `501` response.
-- Original endpoint uses safe read-only storage access and supports HTTP Range via `http.ServeContent`.
-- Vue 3 + TypeScript WebUI with shell/navigation, Explorer, Discovery, Storages, Plugins, Stats, and stub pages for Albums, Map, GPS Tracks, Transcoding, Base AI, and AI Classification.
-- Dockerfile, Compose app service, dev DB scripts, reset script, smoke test script, and guarded read-only rclone scan script.
-- GPS/video sync schema skeleton: `track_points`, `asset_track_links`, overlap fields, candidate status, and manual `time_offset_ms`.
-- Documentation updates: `docs/ARCHITECTURE.md`, `docs/PRODUCT_VISION.md`, storage model, plugin model, DB schema, roadmap, and README development commands.
-
-## Tools Detected
-
-| Tool | Status | Version output |
-| --- | --- | --- |
-| go | found | `go version go1.22.2 linux/amd64` |
-| node | found | `v24.15.0` |
-| npm | found | `11.15.0` |
-| pnpm | missing | `pnpm: command not found` |
-| docker | found | `Docker version 29.2.1, build a5c7197` |
-| docker compose | found | `Docker Compose version v5.0.2` |
-| docker-compose | missing | `docker-compose: command not found` |
-| psql | found | `psql (PostgreSQL) 16.11 (Ubuntu 16.11-0ubuntu0.24.04.1)` |
-| ffmpeg | found | `ffmpeg version 6.1.1-3ubuntu5` |
-| ffprobe | found | `ffprobe version 6.1.1-3ubuntu5` |
-
-## Commands Run
-
-- Read project docs and prompt files with `sed`.
-- Inspected files and status with `rg --files`, `find`, `git status --short`.
-- Dependency/setup commands:
-  - `go get github.com/jackc/pgx/v5 ...`
-  - `go get github.com/jackc/pgx/v5@v5.5.5`
-  - `go get github.com/jackc/pgx/v5/pgconn@v5.5.5 github.com/jackc/pgx/v5/pgxpool@v5.5.5`
-  - `go get github.com/rogpeppe/go-internal@v1.13.1`
-  - `GOTOOLCHAIN=local go mod tidy`
-  - `npm --prefix webui install`
-- Formatting and permissions:
-  - `gofmt -w ...`
-  - `chmod +x scripts/*.sh`
-- Verification:
+- Unit/integration-without-DB:
   - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+  - `go test ./...`
+- Frontend:
   - `npm --prefix webui run build`
+- Local app smoke:
   - `bash scripts/smoke-test.sh`
+- Docker/DB:
   - `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
-  - `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres`
-  - `docker compose -f docker-compose.yml -f docker-compose.dev.yml ps postgres`
-  - `go run ./cmd/cartolensia -config config/dev-postgres.yaml`
-  - `curl -fsS ...` against local API endpoints
-  - `docker compose -f docker-compose.yml -f docker-compose.dev.yml down`
-- Process cleanup:
-  - targeted `pkill -TERM -f 'cartolensia -config config/dev-postgres.yaml'`
+  - `bash scripts/test-db.sh`
+  - DB-backed app smoke on `127.0.0.1:18080`
 
-## Tests Passed
+### Known Limitations
 
-- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`: passed.
-- `npm --prefix webui run build`: passed.
-- `bash scripts/smoke-test.sh`: passed after running outside the sandbox so the backend could bind to `127.0.0.1:18080`.
-- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`: passed.
-- Docker PostgreSQL/PostGIS smoke:
-  - PostgreSQL container started healthy on `55432`.
-  - Backend started with `postgres` store.
-  - Migrations applied.
-  - Config snapshot/storage/plugin rows were written.
-  - `/api/v1/backend/status` reported PostGIS installed, pgvector absent, pg_trgm available but not installed.
-  - `/api/v1/discovery/start` indexed 4 fixture media/track files.
-  - `/api/v1/hash/start` hashed 4 files.
-  - `/api/v1/stats` returned 4 assets, 4 locations, 2 photos, 1 video, 1 track, 4 hashed, 908 bytes.
-  - `/api/v1/media/{asset_id}/original` returned Range bytes from a dummy fixture file.
+- Preview generation is still not implemented; the API reports `not_implemented` or `unsupported` and does not create preview files.
+- Auth persistence/bootstrap tables exist and interfaces are wired, but local login/session/token flows are not implemented.
+- Retry classification is basic: failed leased jobs retry until `max_attempts`; permanent error classification is still coarse.
+- DB integration coverage is useful but still compact; it does not yet test multi-process workers under real concurrency.
+- GPX parsing, track APIs, map APIs, and transcoding capability APIs remain future work.
+- Plugin execution remains manifest/built-in stub only; sidecar HTTP/gRPC runtime is not implemented.
+- `webui/dist` was generated for verification and is ignored by git.
+- Docker state was used for PostgreSQL testing; the container was stopped and the named volume was preserved.
 
-## Failures And Fixes
+### Changed Files Summary
 
-- `pgx v5.10.0` required a newer Go toolchain. Fixed by pinning `pgx v5.5.5`.
-- `go mod tidy` initially selected `github.com/rogpeppe/go-internal v1.15.0`, which requires Go 1.25. Fixed by pinning `github.com/rogpeppe/go-internal v1.13.1` and running `GOTOOLCHAIN=local go mod tidy`.
-- Docker Compose initially failed to bind PostgreSQL to host port `5432` because that port was already in use. Fixed by changing the dev default to `55432`.
-- Sandboxed smoke test failed to bind `127.0.0.1:18080`. Fixed by running the approved smoke script outside the sandbox.
-- Discovery initially indexed fixture README/manifest helper files. Fixed by indexing only media/track kinds and reporting progress over indexable files.
-- Storage API initially emitted Go field names. Fixed by adding JSON tags.
-- A SHA-512 test expected value was incorrect. Fixed the test vector to the actual SHA-512 of `cartolensia`.
+- Backend: app wiring, config, catalog store, database migrations/repository, discovery runner, job model, server routes, storage safety.
+- New backend packages: `internal/auth`, `internal/preview`, `internal/workers`.
+- Tests: catalog, database migration/integration, jobs, server, storage, worker.
+- Frontend: API types/client, Explorer folder UI, asset detail UI, job cancellation button, styles.
+- Operations: embedded migrations, new forward SQL migrations, smoke/test-db scripts, env/config samples, gitignore.
+- Docs: architecture, DB schema, storage model, plugin model, roadmap, hardening plan, README.
 
-## Known Limitations
+### `/mnt/Models/rclone`
 
-- The exact file `CARTOLENSIA_FIRST_15_MIN_PROMPT.md` was absent; `.agents/FirstNightPrompt.md` contained the same prompt content and was used as the available local instruction source.
-- Jobs run synchronously inside API requests; durable worker leasing tables exist, but a background worker loop is not implemented yet.
-- PostgreSQL integration is smoke-tested through Docker, but there are no isolated automated DB unit tests yet.
-- Migrations are loaded from the filesystem instead of embedded with Go `embed`.
-- Authentication is not implemented.
-- Preview generation returns a clean `501 Not Implemented` response; no preview cache files are created.
-- Plugin execution is manifest/stub only. Sidecar HTTP/gRPC runtime is designed but not implemented.
-- Albums, maps, GPS editing, transcoding, AI base, and AI classification are WebUI/API stubs.
-- No real media is included or required; tests use generated dummy fixture files only.
-- `webui/node_modules` and `webui/dist` were created locally for verification and are ignored by git.
-- The Docker image pull created local Docker image/volume state outside the repo; Compose services were stopped with `docker compose down`.
+Skipped entirely. It was not read, written, listed, scanned, mounted, or required for tests.
 
-## `/mnt/Models/rclone`
-
-Skipped entirely. The path was not read, written, listed, scanned, mounted, or required for tests.
-
-The added `scripts/scan-rclone-readonly.sh` refuses to scan by default and requires `CARTOLENSIA_ALLOW_RCLONE_SCAN=1`. It is read-only and only lists files if explicitly enabled later.
-
-## Next Recommended Prompt
+### Exact Recommended Next Prompt
 
 ```text
-Continue from the current Cartolensia repo. Read AGENTS.md, README.md, RUN_REPORT.md, docs/ARCHITECTURE.md, docs/IMPLEMENTATION_PLAN.md, docs/DB_SCHEMA.md, docs/STORAGE_MODEL.md, docs/PLUGIN_MODEL.md, docs/ROADMAP.md, and docs/PHASE_1_HARDENING_PLAN.md. Implement the Phase 1 hardening plan in order: embedded migrations and migration safety, PostgreSQL job lease/heartbeat/cancellation/retry repository methods, async worker loop, DB integration tests gated by env vars, Explorer folder grouping, local admin/auth bootstrap interfaces, asset detail API/UI, and media preview cache design. Keep using testdata/media_fixture only. Do not touch /mnt/Models/rclone. Run go test ./..., npm --prefix webui run build, bash scripts/smoke-test.sh, and DB-backed Docker smoke checks if available. Update RUN_REPORT.md honestly with commands, failures, fixes, limitations, and next task.
+Continue from the current Cartolensia repo. Read AGENTS.md, README.md, RUN_REPORT.md, docs/ARCHITECTURE.md, docs/DB_SCHEMA.md, docs/STORAGE_MODEL.md, docs/PLUGIN_MODEL.md, docs/ROADMAP.md, and docs/PHASE_1_HARDENING_PLAN.md. Build the next Phase 1 slice: local auth bootstrap/login/session/token persistence, richer job retry/error classification, preview generation worker design, GPX parser MVP with synthetic fixtures, track listing API, and map API skeleton. Keep using testdata/media_fixture only. Do not touch /mnt/Models/rclone. Run GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./..., go test ./..., npm --prefix webui run build, bash scripts/smoke-test.sh, docker compose config, and DB integration tests if Docker/PostgreSQL is available. Update RUN_REPORT.md honestly and do not push.
 ```

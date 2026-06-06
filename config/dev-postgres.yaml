@@ -21,3 +21,14 @@ plugins:
     - transcoding
     - ai-base
     - ai-classification
+
+workers:
+  enabled: true
+  poll_interval: "1s"
+  lease_duration: "30s"
+  heartbeat_interval: "10s"
+  max_concurrency: 2
+
+auth:
+  mode: dev_no_auth
+  admin_password_env: CARTOLENSIA_ADMIN_PASSWORD

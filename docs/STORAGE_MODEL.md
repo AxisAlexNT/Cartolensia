@@ -62,8 +62,9 @@ No future mode may bypass adapter-level safety checks. Delete-like operations sh
 
 - Configured roots are absolute after config load.
 - Adapter-relative paths must never escape the root.
-- `..`, absolute paths, malformed URLs, and incompatible schemes are rejected.
-- Symlink behavior must be explicit before enabling real user archives. MVP tests should cover traversal prevention and document any unresolved symlink policy.
+- `..` segments are rejected before path cleaning, including URL-encoded traversal attempts.
+- Absolute paths, malformed URLs, and incompatible schemes are rejected.
+- Recursive discovery skips symlink entries. Opening a symlink that resolves outside the configured root is rejected.
 - Paths are stored using slash-separated relative paths.
 
 ## Current Fixture
@@ -86,6 +87,7 @@ Do not access `/mnt/Models/rclone` during the MVP preparation or the first unatt
 - File metadata includes URL, relative path, file name, extension, MIME, size, mtime, and media kind.
 - Write, delete, move, and mkdir operations return a read-only error.
 - Original streaming opens files only through the registry and serves them read-only with HTTP Range support through the Go HTTP stack.
+- On-demand preview cache paths are derived from asset/content IDs and live under the Cartolensia cache directory. Preview code must never create files next to originals.
 
 ## Non-Media Files
 

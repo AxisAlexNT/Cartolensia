@@ -298,6 +298,11 @@ func NormalizeRelativePath(input string) (string, error) {
 	if input == "" || strings.HasPrefix(input, "/") {
 		return "", ErrTraversal
 	}
+	for _, segment := range strings.Split(input, "/") {
+		if segment == ".." {
+			return "", ErrTraversal
+		}
+	}
 	clean := path.Clean(input)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", ErrTraversal

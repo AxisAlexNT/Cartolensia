@@ -40,3 +40,44 @@ func TestJobFailRecordsError(t *testing.T) {
 		t.Fatalf("unexpected failure state %#v", job)
 	}
 }
+
+func TestJobCancellationStates(t *testing.T) {
+	queued := New("discovery", nil)
+	if err := RequestCancel(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued.Status != StatusCanceled || queued.FinishedAt == nil || queued.CancelRequestedAt == nil {
+		t.Fatalf("queued job not canceled: %#v", queued)
+	}
+
+	running := New("hash", nil)
+	if err := Start(&running); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequestCancel(&running); err != nil {
+		t.Fatal(err)
+	}
+	if running.Status != StatusCancelRequested || running.CancelRequestedAt == nil {
+		t.Fatalf("running job not marked for cancellation: %#v", running)
+	}
+	if err := Cancel(&running); err != nil {
+		t.Fatal(err)
+	}
+	if running.Status != StatusCanceled || running.FinishedAt == nil {
+		t.Fatalf("running job not canceled: %#v", running)
+	}
+}
+
+func TestStartDoesNotDoubleCountLeasedJob(t *testing.T) {
+	job := New("discovery", nil)
+	if err := Start(&job); err != nil {
+		t.Fatal(err)
+	}
+	attempts := job.Attempts
+	if err := Start(&job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Attempts != attempts {
+		t.Fatalf("attempts changed for already running job: %#v", job)
+	}
+}

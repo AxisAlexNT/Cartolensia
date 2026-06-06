@@ -6,26 +6,32 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/AxisAlexNT/Cartolensia/internal/auth"
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 	"github.com/AxisAlexNT/Cartolensia/internal/config"
 	"github.com/AxisAlexNT/Cartolensia/internal/database"
 	"github.com/AxisAlexNT/Cartolensia/internal/discovery"
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/plugins"
+	"github.com/AxisAlexNT/Cartolensia/internal/preview"
 	"github.com/AxisAlexNT/Cartolensia/internal/storage"
 )
 
 type Dependencies struct {
-	Version      string
-	Config       config.Config
-	Plugins      []plugins.Manifest
-	Registry     *storage.Registry
-	Store        catalog.Store
-	StoreBackend string
-	Capabilities []database.Capability
+	Version       string
+	Config        config.Config
+	Plugins       []plugins.Manifest
+	Registry      *storage.Registry
+	Store         catalog.Store
+	StoreBackend  string
+	Capabilities  []database.Capability
+	Authenticator auth.Authenticator
+	Authorizer    auth.Authorizer
+	SyncJobs      bool
 }
 
 type Server struct {
@@ -34,6 +40,12 @@ type Server struct {
 }
 
 func New(deps Dependencies) *Server {
+	if deps.Authenticator == nil {
+		deps.Authenticator = auth.DevNoAuth{}
+	}
+	if deps.Authorizer == nil {
+		deps.Authorizer = auth.DevNoAuth{}
+	}
 	s := &Server{deps: deps, mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -51,9 +63,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	s.mux.HandleFunc("/api/v1/plugins/rescan", s.handlePluginsRescan)
 	s.mux.HandleFunc("/api/v1/jobs", s.handleJobs)
+	s.mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
 	s.mux.HandleFunc("/api/v1/discovery/start", s.handleDiscoveryStart)
 	s.mux.HandleFunc("/api/v1/hash/start", s.handleHashStart)
 	s.mux.HandleFunc("/api/v1/assets", s.handleAssets)
+	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
 	s.mux.HandleFunc("/api/v1/explorer", s.handleExplorer)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/backend/status", s.handleBackendStatus)
@@ -106,6 +120,9 @@ func (s *Server) handlePluginsRescan(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if !s.requireWrite(w, r, "plugins.rescan") {
+		return
+	}
 	manifests, err := plugins.Load("plugins", true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -128,9 +145,38 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobsList)
 }
 
+func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 || parts[1] != "cancel" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "jobs.cancel") {
+		return
+	}
+	job, err := s.deps.Store.RequestCancelJob(r.Context(), parts[0])
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
 func (s *Server) handleDiscoveryStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "discovery.start") {
 		return
 	}
 	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("discovery", map[string]any{"storage": "all"}))
@@ -138,10 +184,12 @@ func (s *Server) handleDiscoveryStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
-	if err := runner.Scan(r.Context(), &job); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	if s.deps.SyncJobs {
+		runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
+		if err := runner.Scan(r.Context(), &job); err != nil && !errors.Is(err, jobs.ErrCanceled) {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusAccepted, job)
 }
@@ -151,15 +199,20 @@ func (s *Server) handleHashStart(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if !s.requireWrite(w, r, "hash.start") {
+		return
+	}
 	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("hash", map[string]any{"scope": "unhashed"}))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
-	if err := runner.HashUnhashed(r.Context(), &job); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	if s.deps.SyncJobs {
+		runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
+		if err := runner.HashUnhashed(r.Context(), &job); err != nil && !errors.Is(err, jobs.ErrCanceled) {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusAccepted, job)
 }
@@ -178,6 +231,28 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, assets)
 }
 
+func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	assetID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/assets/"), "/")
+	if assetID == "" || strings.Contains(assetID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), assetID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.assetDetail(asset))
+}
+
 func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -186,6 +261,25 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	assets, err := s.deps.Store.ListAssets(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	query := r.URL.Query()
+	if query.Get("view") == "folders" || query.Get("path") != "" || query.Get("storage") != "" || query.Get("media_kind") != "" {
+		limit, _ := strconv.Atoi(query.Get("limit"))
+		offset, _ := strconv.Atoi(query.Get("offset"))
+		view, err := catalog.BuildExplorerView(assets, catalog.ExplorerOptions{
+			Storage:   query.Get("storage"),
+			Path:      query.Get("path"),
+			MediaKind: query.Get("media_kind"),
+			Limit:     limit,
+			Offset:    offset,
+			Sort:      query.Get("sort"),
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
 		return
 	}
 	type row struct {
@@ -239,6 +333,8 @@ func (s *Server) handleBackendStatus(w http.ResponseWriter, r *http.Request) {
 		"capabilities":  s.deps.Capabilities,
 		"stats":         stats,
 		"preview_cache": s.deps.Config.Cache.Dir,
+		"auth_mode":     s.deps.Config.Auth.Mode,
+		"workers":       s.deps.Config.Workers,
 	})
 }
 
@@ -258,10 +354,7 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	case "original":
 		s.handleOriginal(w, r, assetID)
 	case "preview":
-		writeJSON(w, http.StatusNotImplemented, map[string]any{
-			"error":     "preview generation is not implemented in the MVP",
-			"cache_dir": s.deps.Config.Cache.Dir,
-		})
+		s.handlePreview(w, r, assetID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -297,6 +390,57 @@ func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request, assetID 
 	http.ServeContent(w, r, info.Name, info.MTime, file)
 }
 
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), assetID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	info := preview.ForAsset(asset)
+	body := map[string]any{
+		"status":     info.Status,
+		"message":    info.Message,
+		"cache_key":  info.CacheKey,
+		"cache_path": preview.CachePath(s.deps.Config.Cache.Dir, asset, "default"),
+	}
+	if info.Status == preview.StatusUnsupported {
+		writeJSON(w, http.StatusUnsupportedMediaType, body)
+		return
+	}
+	writeJSON(w, http.StatusNotImplemented, body)
+}
+
+func (s *Server) assetDetail(asset catalog.Asset) map[string]any {
+	detail := map[string]any{
+		"asset":        asset,
+		"locations":    asset.Locations,
+		"preview":      preview.ForAsset(asset),
+		"metadata":     map[string]any{},
+		"timestamps":   map[string]any{"first_seen_at": asset.FirstSeenAt, "updated_at": asset.UpdatedAt},
+		"content":      map[string]any{"hash_status": "unhashed"},
+		"original_url": "",
+	}
+	if loc, ok := catalog.FirstLocation(asset); ok {
+		detail["original_url"] = "/api/v1/media/" + asset.ID + "/original"
+		detail["preview_url"] = "/api/v1/media/" + asset.ID + "/preview"
+		detail["content"] = map[string]any{
+			"hash_status": loc.HashStatus,
+			"sha512_hex":  loc.SHA512Hex,
+			"content_id":  loc.ContentID,
+			"size_bytes":  loc.SizeBytes,
+		}
+	}
+	return detail
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		http.NotFound(w, r)
@@ -322,4 +466,21 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 func methodNotAllowed(w http.ResponseWriter) {
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+}
+
+func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request, action string) bool {
+	principal, err := s.deps.Authenticator.Authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return false
+	}
+	if err := s.deps.Authorizer.Authorize(principal, action); err != nil {
+		status := http.StatusForbidden
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
+		return false
+	}
+	return true
 }
