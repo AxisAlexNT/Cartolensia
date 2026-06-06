@@ -61,7 +61,7 @@ func (db *DB) QueryAssets(ctx context.Context, query catalog.AssetQuery) (catalo
 	}
 	rows.Close()
 	if len(ids) == 0 {
-		return catalog.AssetPage{Page: catalog.Page{Limit: limit, Offset: offset, Total: total}}, nil
+		return catalog.AssetPage{Assets: []catalog.Asset{}, Page: catalog.Page{Limit: limit, Offset: offset, Total: total}}, nil
 	}
 	rows, err = db.pool.Query(ctx, assetSelectSQL()+`
 		where a.id::text = any($1)
@@ -278,7 +278,7 @@ func (db *DB) ListAlbums(ctx context.Context, query catalog.AlbumQuery) ([]catal
 		return nil, err
 	}
 	defer rows.Close()
-	var albums []catalog.Album
+	albums := []catalog.Album{}
 	for rows.Next() {
 		var album catalog.Album
 		if err := rows.Scan(&album.ID, &album.ParentID, &album.Slug, &album.Title, &album.Description, &album.SortOrder, &album.CreatedAt, &album.UpdatedAt, &album.ItemCount); err != nil {
@@ -588,7 +588,7 @@ func (db *DB) ListGPSTracks(ctx context.Context, query catalog.GPSTrackQuery) ([
 	}
 	args = append(args, limit, offset)
 	sql := `select track_asset_id::text, title, point_count, start_at, end_at, min_lat, min_lon, max_lat, max_lon,
-			distance_m, duration_seconds, elevation_min_m, elevation_max_m
+			distance_m, duration_seconds, elevation_min_m, elevation_max_m, metadata_json::text
 		from gps_tracks`
 	if len(clauses) > 0 {
 		sql += " where " + strings.Join(clauses, " and ")
@@ -602,10 +602,12 @@ func (db *DB) ListGPSTracks(ctx context.Context, query catalog.GPSTrackQuery) ([
 	var out []catalog.TrackSummary
 	for rows.Next() {
 		var summary catalog.TrackSummary
+		var metadataText string
 		if err := rows.Scan(&summary.TrackAssetID, &summary.Name, &summary.PointCount, &summary.StartTime, &summary.EndTime, &summary.MinLat, &summary.MinLon,
-			&summary.MaxLat, &summary.MaxLon, &summary.DistanceM, &summary.DurationSec, &summary.ElevationMin, &summary.ElevationMax); err != nil {
+			&summary.MaxLat, &summary.MaxLon, &summary.DistanceM, &summary.DurationSec, &summary.ElevationMin, &summary.ElevationMax, &metadataText); err != nil {
 			return nil, err
 		}
+		applyTrackMetadata(&summary, metadataText)
 		out = append(out, summary)
 	}
 	if err := rows.Err(); err != nil {

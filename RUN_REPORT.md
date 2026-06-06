@@ -497,3 +497,531 @@ Final sanity commands after that report update:
 - `git diff --check` passed.
 
 No commit was created, no push was done, and `/mnt/Models/rclone` was not touched.
+
+## 2026-06-06 Real-Peek UI Bugfix Runtime Session
+
+### Scope
+
+Interactive/live bugfix run against the temporary `cartolensia_realpeek` PostgreSQL project and localhost app on `127.0.0.1:18080`. The temporary DB was preserved and not reset.
+
+### Diagnostics
+
+- `/api/v1/health`: healthy.
+- Initial `/api/v1/stats` during diagnosis showed the original real-peek subset had `50` assets, `48` photos, `2` videos, and `0` tracks.
+- `/api/v1/assets?limit=20` showed EXIF metadata already present for many indexed assets, including GPS latitude/longitude.
+- `/api/v1/explorer` returned flat asset rows.
+- `/api/v1/albums` showed the existing `Test` album with `0` items.
+- `/api/v1/tracks` and `/api/v1/gps/tracks` returned JSON `null`, which explained GPS page null crashes.
+- `/api/v1/map/status` reported GeoJSON/vector map support.
+- `/api/v1/map` and `/api/v1/map/assets` returned photo point features when not constrained by the frontend's old hardcoded bbox.
+- `/api/v1/map/tracks` returned an empty FeatureCollection.
+
+### Fixes Implemented
+
+- Fixed frontend routing so explicit `?page=...` wins over saved `localStorage` route state; unknown `page` falls back to Explorer.
+- Added frontend API normalization for nullable arrays/objects.
+- Fixed backend track list responses to return `[]`, not `null`.
+- Removed the frontend's hardcoded map bbox that excluded the current real-data coordinates.
+- Added map status counts/warnings and ensured GeoJSON `features` is always an array.
+- Added table/tile toggle for Explorer and Albums.
+- Added Explorer selection controls and a clearer add-selected-to-album workflow.
+- Added album detail tile view and metadata-only remove action.
+- Added shared gallery overlay with photo/video support, arrow buttons, keyboard arrows, Escape close, Open Original, and Asset Detail.
+- Added inline asset detail media panel with image preview/original fallback and HTML5 video player.
+- Added safe video quality selector and `GET /api/v1/media/{asset_id}/stream-options`; transcoding options are visible but disabled because transcoding jobs are not implemented.
+- Changed WebUI discovery action to bounded-only using visible storage/prefix/max fields.
+- Added backend guard refusing unbounded discovery against `/mnt/Models/rclone`.
+
+### Important Runtime Event
+
+A stale unbounded discovery job with payload `{"storage":"all"}` already existed in the temporary DB and resumed after app restart. It was cancelled immediately when discovered:
+
+- job id: `7e5ba768-621c-400d-a50a-2b9d63128174`
+- final status: `canceled`
+
+After the guard was added, a later stale/unbounded discovery attempt failed safely with:
+
+- `unbounded discovery is refused for real archive storage; provide storage, prefixes, max_files, and max_bytes`
+
+The temporary DB therefore no longer represents only the original 50-file subset. Current live counts after cancellation:
+
+- assets: `13744`
+- locations: `13744`
+- photos: `12553`
+- videos: `953`
+- track-kind assets: `238`
+- `/api/v1/gps/tracks`: `[]`
+- geotagged assets from map status: `48`
+- running jobs: `0`
+
+### Verification
+
+- `git diff --check`: passed.
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`: passed.
+- `go test ./...`: passed.
+- `npm --prefix webui run build`: passed, producing `/assets/index-pAxjkaoD.js`.
+- `bash scripts/smoke-test.sh`: passed after temporarily stopping the live app so the smoke script could bind its default `127.0.0.1:18080`.
+
+Failed/handled checks:
+
+- First `bash scripts/smoke-test.sh` attempt failed because the live real-peek app occupied port `18080`.
+- Alternate-port smoke with `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081` failed with sandbox `socket: operation not permitted`.
+- Browser console automation was not run because local `playwright` and `puppeteer` packages are not installed.
+
+### Live App
+
+- App URL: `http://127.0.0.1:18080/`
+- Config: `.cartolensia/runtime/realpeek.yaml`
+- PID file: `.cartolensia/runtime/realpeek.pid`
+- Current frontend bundle: `/assets/index-pAxjkaoD.js`
+- Runtime note: `.cartolensia/runtime/REAL_PEEK_FIX_STATUS.md`
+
+Test pages:
+
+- `http://127.0.0.1:18080/?page=explorer`
+- `http://127.0.0.1:18080/?page=albums`
+- `http://127.0.0.1:18080/?page=map`
+- `http://127.0.0.1:18080/?page=gps-tracks`
+- `http://127.0.0.1:18080/?page=jobs`
+
+### Safety
+
+- PostgreSQL was not reset.
+- No commit was made.
+- No push was done.
+- No missing marking was run.
+- No destructive storage mode was enabled.
+- No files were written, deleted, renamed, moved, chmodded, trashed, transcoded into, or cached inside `/mnt/Models/rclone`.
+- The stale unbounded job read beyond the intended initial sample before cancellation; this changed only temporary PostgreSQL metadata, not real files.
+
+## 2026-06-06 Clean Real-Peek Reset, Guard Hardening, And Final Verification
+
+### Scope
+
+Continued from the live real-peek correction run. The polluted temporary PostgreSQL state was diagnosed, then reset with the supervised temporary Compose project as requested. A clean bounded real-peek session was started afterward.
+
+No commit was made and no push was done.
+
+### Polluted Runtime Diagnostics Before Reset
+
+Queried:
+
+- `/api/v1/stats`
+- `/api/v1/jobs?limit=50`
+- `/api/v1/assets?limit=10`
+- `/api/v1/map/status`
+- `/api/v1/map/assets?limit=10`
+- `/api/v1/albums`
+- `/api/v1/gps/tracks`
+
+Findings:
+
+- The polluted temporary DB had `13744` assets because a stale unbounded `storage=all` discovery job resumed before the guard was added.
+- Running jobs were stopped/cancelled before reset.
+- Map state had some geotags in polluted data, but that state was intentionally discarded.
+- GPS track summaries were still empty.
+
+Reset executed:
+
+```bash
+docker compose -p cartolensia_realpeek -f docker-compose.yml -f docker-compose.dev.yml down -v
+rm -rf .cartolensia/runtime .cartolensia/realpeek-cache
+```
+
+The reset removed only temporary app/runtime/cache data and the temporary PostgreSQL volume for Compose project `cartolensia_realpeek`.
+
+### Implemented Since The Polluted Runtime
+
+- Hard real-archive guardrails:
+  - `storage=all` rejected when any configured storage root is `/mnt/Models/rclone` or inside it.
+  - discovery/hash against real archive storage requires explicit storage, non-empty adapter-relative prefix, `max_files`, and `max_bytes`.
+  - empty/root/dot/dot-dot/archive-root-equivalent prefixes are rejected.
+  - safe absolute prefixes under the configured root are normalized to adapter-relative prefixes; unsafe absolute prefixes are rejected.
+  - stale unsafe queued jobs fail safely before scanning.
+- `scripts/real-peek-start.sh` and `scripts/real-peek-reset.sh`.
+- Bounded hash workflow for selected assets, current prefix, and albums.
+- Original-quality gallery overlay:
+  - opened image uses `/api/v1/media/{asset_id}/original`;
+  - preview is only a tile/detail fallback;
+  - Fit/100% controls, keyboard navigation, Escape close, video player, Open Original, and Asset Detail close behavior.
+- Inline asset media viewer/player and truthful stream options endpoint.
+- Stable tile/gallery card layout and album filter reset controls.
+- On-demand OSM tile proxy/cache:
+  - `/api/v1/tiles/osm/{z}/{x}/{y}.png`;
+  - `/api/v1/map/tile-sources`;
+  - coordinate/path validation, cache under Cartolensia cache directory, attribution metadata, no public-OSM bulk prefetch endpoint.
+- Map status warnings explain empty map causes and show indexed/geotagged/track counts.
+- GPS tracks empty states are robust and explain when track-like assets exist without parsed GPX summaries.
+- Discovery UI labels now distinguish report-only dry run from bounded indexing.
+- Explorer DB-backed filters/pagination/sorting surfaced in WebUI.
+- Month buckets endpoint/UI integration.
+- Report-only duplicate grouping by SHA-512+size:
+  - `/api/v1/duplicates`;
+  - stats include duplicate groups/locations.
+- Moved-file/content identity foundation:
+  - `migrations/007_content_identity.sql`;
+  - content uniqueness by `(sha512, size_bytes)`;
+  - new hashed locations relink to existing logical assets when content equality is confirmed.
+- Optional HTTPS:
+  - configured certificate/key support remains;
+  - added in-memory self-signed TLS via `http.tls_auto_self_signed`;
+  - backend status reports HTTP/TLS mode.
+- Docs updated:
+  - `README.md`;
+  - `docs/ARCHITECTURE.md`;
+  - `docs/DB_SCHEMA.md`;
+  - `docs/STORAGE_MODEL.md`;
+  - `docs/ROADMAP.md`;
+  - `docs/OPERATIONS.md`;
+  - `docs/SECURITY.md`;
+  - `docs/REAL_ARCHIVE_DRY_RUN.md`.
+
+### Clean Real-Peek Session
+
+Clean session settings:
+
+- App URL: `http://127.0.0.1:18080`
+- Compose project: `cartolensia_realpeek`
+- Storage: `rclone_peek`
+- Root: `/mnt/Models/rclone`
+- Mode: `strict_read_only`
+- Prefix indexed: `Cartolensia-photos`
+- Max files: `50`
+- Max bytes: `2147483648`
+- Missing marking: `false`
+- Metadata enrichment: not run
+- Preview generation: not run
+- Hash after index: run only for the bounded indexed prefix subset.
+
+Clean counts after restart:
+
+- assets: `50`
+- locations: `50`
+- photos: `48`
+- videos: `2`
+- tracks: `0`
+- hashed: `50`
+- unhashed: `0`
+- duplicate groups: `0`
+- duplicate locations: `0`
+- geotagged assets: `0`
+- track summaries: `0`
+- total bytes: `614190070`
+
+Jobs:
+
+- Discovery job `0ffef45b-2d79-4947-bfbf-fd336d7b2a7a`: `succeeded`, `scanned=50`, `created=50`, `bytes=614190070`, `errors=0`.
+- Hash job `1c0f5e9e-3390-4e80-9b10-e59dadd23386`: `succeeded`, `hashed=50`, `bytes=614190070`, `errors=0`.
+
+Runtime notes:
+
+- `.cartolensia/runtime/REAL_PEEK_STATUS.md`
+- `.cartolensia/runtime/REAL_PEEK_FIX_STATUS.md`
+
+### Verification Commands
+
+Passed:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Handled failure:
+
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh` failed with sandbox `listen tcp 127.0.0.1:18081: socket: operation not permitted`. The approved/default smoke test on `18080` passed after temporarily stopping and then restarting the live real-peek app.
+
+### Live App For Inspection
+
+The app was restarted after final verification.
+
+- App URL: `http://127.0.0.1:18080`
+- PID file: `.cartolensia/runtime/realpeek.pid`
+- Current indexed state: clean bounded 50-file subset.
+
+Pages:
+
+- `http://127.0.0.1:18080/?page=explorer`
+- `http://127.0.0.1:18080/?page=albums`
+- `http://127.0.0.1:18080/?page=map`
+- `http://127.0.0.1:18080/?page=gps-tracks`
+- `http://127.0.0.1:18080/?page=jobs`
+- `http://127.0.0.1:18080/?page=duplicates`
+
+Stop/reset when inspection is done:
+
+```bash
+bash scripts/real-peek-reset.sh
+```
+
+### Known Limitations
+
+- The clean real-peek subset has no map asset points because metadata enrichment was not run and no typed geotags exist yet.
+- The clean real-peek subset has no GPS track summaries because no GPX metadata enrichment was run and no parsed GPX tracks were present in the bounded subset.
+- OSM tiles are on-demand through Cartolensia and require network for tiles not already cached; packaged offline tiles remain future work.
+- Video transcoding options are visible but disabled except original/direct streaming.
+- Public album sharing, SMB/NFS/S3 adapters, upload/WebDAV, reverse geocoding, AI inference, and real transcoding jobs remain future work.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not written to.
+- No preview/cache/transcoded/database/temp files were created under `/mnt/Models/rclone`.
+- No missing marking was run.
+- No unbounded scan was run after the clean reset.
+- Hashing ran only for the clean bounded indexed prefix subset.
+- Real storage remained `strict_read_only`.
+- No commit was made.
+- No push was done.
+
+### Recommended Next Prompt
+
+```text
+Continue from the current Cartolensia repository and live real-peek state. Do not reset PostgreSQL unless explicitly asked. Do not touch /mnt/Models/rclone except through the existing strict read-only bounded real-peek session. First inspect the UI on http://127.0.0.1:18080 and verify Explorer tile/table, gallery overlay, asset viewer/player, Albums add/remove, Map empty-state explanation, GPS Tracks empty state, Jobs, and Duplicates. If approved, run metadata enrichment only for the current 50 indexed assets, then verify EXIF geotags and map features. Keep missing marking off. Do not commit or push.
+```
+
+## 2026-06-06 Live Pipeline, Map, KML/KMZ, Settings, And Transcode Productization
+
+### Live Diagnosis
+
+Queried the current live service before implementing additional fixes:
+
+- `/api/v1/stats`
+- `/api/v1/jobs?limit=30`
+- `/api/v1/assets?limit=10`
+- `/api/v1/assets?limit=10&hash_status=hashed`
+- `/api/v1/assets?limit=10&hash_status=unhashed`
+- `/api/v1/map/status`
+- `/api/v1/map/assets?limit=50&clusters=false`
+- `/api/v1/map/assets?limit=50&clusters=true`
+- `/api/v1/previews/status`
+- `/api/v1/previews/cache`
+- `/api/v1/gps/tracks`
+- `/api/v1/duplicates`
+- `/api/v1/storages`
+- `/api/v1/config/effective`
+
+Findings:
+
+- Current DB has `50` assets, `48` photos, `2` videos, `50` hashed, `0` unhashed, and `614190070` total bytes.
+- Metadata enrichment had already succeeded for `50 / 50`; `48` photos have EXIF GPS geotags.
+- Preview cache has `48` ready entries. Later `preview_generate 0 / 0` jobs were no-op runs because all scoped photos were already cached.
+- Later `hash 0 / 0` jobs were no-op runs because all scoped assets were already hashed. The original bounded hash job hashed `50 / 50`.
+- Map raw mode returned `48` point features. Cluster mode at zoom 10 previously collapsed most points too coarsely.
+- GPS/KML tracks are empty in the current 50-file subset.
+- Storage remains `rclone_peek`, root `/mnt/Models/rclone`, mode `strict_read_only`.
+
+### Implemented
+
+- Added KML/KMZ support:
+  - KML coordinate parsing for points/lines/rings and `gx:Track`;
+  - KMZ parsing with `archive/zip`;
+  - `.kmz` classified as track media;
+  - metadata enrichment now parses GPX/KML/KMZ into track summaries/points.
+- Added single indexing pipeline UI and backend surface:
+  - `POST /api/v1/indexing/start`;
+  - `GET /api/v1/indexing/latest`;
+  - `GET /api/v1/indexing/{pipeline_id}`;
+  - `POST /api/v1/indexing/{pipeline_id}/cancel`.
+- Discovery UI now has one primary “Start indexing pipeline” action plus “Stop current pipeline”.
+- Pipeline stages preserve scoped storage/prefix between discovery, hash, metadata, preview, track/geotag, and map-refresh stages.
+- No new hash/preview job is enqueued from the UI when scope metrics already show all assets hashed or all photos cached.
+- Hash/preview no-target jobs now log clear reasons.
+- Explorer, Albums, and Track media tiles now show hash/geotag badges.
+- Asset detail shows hash status, short SHA-512, geotag state, media metadata, and a video quality selector.
+- Map cluster payloads now include count and per-kind counts, centroid and bbox, sample assets, and preview/original/detail URLs.
+- Map UI now opens point/cluster popups, can zoom spatial clusters, and shows scrollable mini-gallery samples for clusters.
+- High-zoom clustering returns individual assets except identical-coordinate groups.
+- Added Settings MVP:
+  - tabs;
+  - effective config;
+  - restart-required YAML fields;
+  - runtime preference patch endpoint;
+  - cache-scoped DB metadata export;
+  - guarded import-plan endpoint.
+- Added cache-scoped HLS transcode session MVP:
+  - start session;
+  - serve playlist/segments;
+  - stop session;
+  - stream options expose direct original plus H.264 profiles when `ffmpeg` is available.
+
+### Current Live State After Restart
+
+- App URL: `http://127.0.0.1:18080`
+- Config: `.cartolensia/runtime/realpeek.yaml`
+- Runtime start: direct `go run ./cmd/cartolensia -config .cartolensia/runtime/realpeek.yaml`
+- Storage: `rclone_peek`
+- Root: `/mnt/Models/rclone`
+- Mode: `strict_read_only`
+- Prefix indexed: `Cartolensia-photos`
+- Assets: `50`
+- Photos: `48`
+- Videos: `2`
+- Tracks: `0`
+- Hashed: `50`
+- Unhashed: `0`
+- Geotagged assets: `48`
+- Preview cache entries ready: `48`
+- Duplicate groups: `0`
+
+### Verification Commands
+
+Passed:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Handled:
+
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh` failed with sandbox `listen tcp 127.0.0.1:18081: socket: operation not permitted`; the default-port smoke passed after temporarily stopping and restarting the live app.
+- `scripts/real-peek-start.sh` was blocked by sandbox Docker socket access on restart; PostgreSQL was already running, so the app was restarted directly with the existing config and unchanged temporary DB.
+- H.264-low transcode session creation and stop succeeded; HLS playlist polling was unreliable in the sandbox, so direct/original streaming remains the known-good browser path until manual HLS playback is checked.
+
+### Local Runtime Notes
+
+- `.cartolensia/runtime/REAL_PEEK_STATUS.md`
+- `.cartolensia/runtime/REAL_PEEK_FIX_STATUS.md`
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No preview/cache/transcoded/database/temp files were created under `/mnt/Models/rclone`.
+- No missing marking was run.
+- No unbounded scan was run.
+- Real storage remained `strict_read_only`.
+- No commit was made.
+- No push was done.
+
+### Recommended Next Prompt
+
+```text
+Continue from the current Cartolensia repository and live real-peek state. Inspect http://127.0.0.1:18080 manually. Verify Discovery pipeline, Explorer hash/geotag badges, gallery overlay, asset detail viewer/player, map clusters/popups, Settings tabs, and video direct streaming. Do not reset PostgreSQL unless explicitly requested. Keep storage rclone_peek strict_read_only and do not modify /mnt/Models/rclone. If HLS playback is not supported by the browser, add hls.js or a progressive fragmented-MP4 fallback in a future supervised dependency-approved run. Do not commit or push.
+```
+
+## 2026-06-07 Live Productization Follow-Up: HLS, GPS/KML, Map, Settings
+
+### Live Diagnosis
+
+Queried the live real-peek service during this run:
+
+- `/api/v1/stats`: `54` assets, `54` locations, `48` photos, `2` videos, `4` track files, `54` hashed, `0` unhashed.
+- `/api/v1/jobs?limit=30`: recent scoped GPSLogger metadata jobs originally showed KML/GPX parse errors on truncated XML; after parser fixes the latest scoped job succeeded with `4 / 4` updated and `0` errors.
+- `/api/v1/map/status`: `48` geotagged assets, `4` parsed tracks, OSM proxy enabled, `screen_distance` clustering.
+- `/api/v1/map/assets?...clusters=true`: zoom 10 returns one large `48`-asset cluster; zoom 20 splits into individual markers and same-coordinate clusters with count/sample metadata.
+- `/api/v1/gps/tracks`: now returns `4` summaries: two GPX and two KML tracks.
+- `/api/v1/previews/status`: `48` ready preview entries under `.cartolensia/realpeek-cache`.
+- `/api/v1/media/<video>/stream-options`: direct/original plus `h264_720p_lan` and `h264_low_bitrate` HLS session profiles.
+- `/api/v1/settings`: includes pending YAML metadata and the raw/effective config tab.
+
+### Implemented
+
+- Added `hls.js` frontend dependency, license verified locally from package metadata: `Apache-2.0`, version `1.6.16`.
+- Fixed HLS transcode playback flow:
+  - session status endpoint;
+  - stable profile IDs;
+  - playlist/segment MIME types;
+  - ffmpeg stderr tail in status;
+  - frontend waits for ready playlist/segment before switching;
+  - hls.js attach path for browsers without native HLS;
+  - Original/direct remains default and fallback.
+- Verified live `h264_low_bitrate` transcode session:
+  - ffmpeg produced H.264/AAC HLS under `.cartolensia/realpeek-cache/transcode/<session>`;
+  - playlist served as `application/vnd.apple.mpegurl`;
+  - test session was stopped and its cache directory was removed through the API.
+- Improved map clustering and UI:
+  - backend screen-distance clustering with `cluster_distance_px`;
+  - cluster count/sample metadata;
+  - marker count labels;
+  - OpenLayers overlay popup with scrollable mini-gallery;
+  - cluster zoom no longer gets immediately undone by extent refit.
+- Improved gallery overlay:
+  - original-quality opened image source;
+  - wheel zoom;
+  - double-click fit/100% toggle;
+  - WASD panning for zoomed photos;
+  - arrow keys still navigate assets.
+- Fixed Discovery/Indexing UI semantics:
+  - shared settings panel applies to both preview report and indexing pipeline;
+  - requested default extensions: `jpg,jpeg,png,gpx,kml,kmz,gpz,heif,heic,mp4,mov`.
+- Added robust track parsing:
+  - `.gpz` classified as track-like;
+  - GPZ zip helper for GPX/KML payloads;
+  - tolerant GPX parse for truncated XML with complete points;
+  - KML/KMZ raw coordinate salvage for truncated coordinate blocks;
+  - no-time KML geometry still creates queryable summaries using synthetic timestamps marked in metadata.
+- GPS page now says `GPS/KML Tracks`, shows source format, and has a scoped “Parse track files for current prefix” action.
+- Base AI page is now a dashboard instead of raw JSON only.
+- Settings page now has editable controls for YAML-bound settings, pending YAML save/clear/download, runtime settings, plugin settings JSON controls, and a Raw YAML / Effective Config tab.
+- Added tests for GPX/KML truncation salvage, KML no-time geometry, GPZ parsing, HLS helpers, and screen-distance clustering.
+
+### Current Live State
+
+- App URL: `http://127.0.0.1:18080`
+- Config: `.cartolensia/runtime/realpeek.yaml`
+- Storage: `rclone_peek`
+- Root: `/mnt/Models/rclone`
+- Mode: `strict_read_only`
+- Prefixes represented in the temporary DB: `Cartolensia-photos`, `Cartolensia-photos/GPSLogger`
+- Assets: `54`
+- Photos: `48`
+- Videos: `2`
+- Track files: `4`
+- Parsed GPS/KML track summaries: `4`
+- Hashed: `54`
+- Unhashed: `0`
+- Geotagged assets: `48`
+- Preview cache ready: `48`
+- Duplicate groups: `0`
+
+### Verification Commands
+
+Passed:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh` with escalation for localhost socket binding
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Other results:
+
+- First non-escalated `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh` failed with sandbox-only `listen tcp 127.0.0.1:18081: socket: operation not permitted`; rerunning with approved escalation passed.
+- `npm --prefix webui install hls.js` initially timed out without network access; rerun with approved escalation succeeded.
+- `npm install` reported `2 moderate severity vulnerabilities`; no automatic `npm audit fix --force` was run because that could introduce unrelated dependency churn.
+
+### Remaining Limitations
+
+- Manual browser validation is still needed for hls.js playback controls in Chromium/Firefox/Safari.
+- KML salvage can recover coordinate geometry from truncated files but cannot recover real timestamps from unclosed coordinate-only blocks; synthetic timestamps are used only for DB query compatibility.
+- Settings pending YAML is saved under the configured cache directory and requires manual restart/application; it does not rewrite the active real-peek YAML automatically.
+- Map popup reverse-geocoded location labels remain `null`; no local geocoder has been added.
+- The frontend bundle is over Vite’s 500 KB warning threshold due to OpenLayers plus hls.js; build passes.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was read through strict read-only storage only.
+- `/mnt/Models/rclone` was not written to, deleted from, renamed in, chmodded, transcode-written, tile-cached, preview-cached, or temp-written.
+- HLS output was written only under `.cartolensia/realpeek-cache/transcode`; the test session cache was deleted through the API.
+- OSM tile cache and preview cache remain under `.cartolensia/realpeek-cache`, not under the archive.
+- No missing marking was run.
+- No unbounded scan was run.
+- No commit was made.
+- No push was done.
+
+### Recommended Next Prompt
+
+```text
+Continue from the current Cartolensia repository and live real-peek service. Do not reset PostgreSQL unless explicitly asked. Manually inspect http://127.0.0.1:18080 and verify: Low bitrate LAN HLS playback, map cluster labels/popups, GPS/KML Tracks showing 4 tracks, Discovery shared pipeline settings, Settings pending YAML forms, and gallery wheel/WASD zoom. Keep /mnt/Models/rclone strict read-only, do not mark missing, do not run unbounded scans, do not commit, and do not push.
+```

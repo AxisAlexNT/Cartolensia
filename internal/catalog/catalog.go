@@ -51,14 +51,16 @@ type Location struct {
 }
 
 type Stats struct {
-	Assets     int   `json:"assets"`
-	Locations  int   `json:"locations"`
-	Photos     int   `json:"photos"`
-	Videos     int   `json:"videos"`
-	Tracks     int   `json:"tracks"`
-	Unhashed   int   `json:"unhashed"`
-	Hashed     int   `json:"hashed"`
-	TotalBytes int64 `json:"total_bytes"`
+	Assets             int   `json:"assets"`
+	Locations          int   `json:"locations"`
+	Photos             int   `json:"photos"`
+	Videos             int   `json:"videos"`
+	Tracks             int   `json:"tracks"`
+	Unhashed           int   `json:"unhashed"`
+	Hashed             int   `json:"hashed"`
+	DuplicateGroups    int   `json:"duplicate_groups"`
+	DuplicateLocations int   `json:"duplicate_locations"`
+	TotalBytes         int64 `json:"total_bytes"`
 }
 
 type UpsertResult struct {
@@ -91,6 +93,7 @@ type TrackSummary struct {
 	DurationSec  *float64   `json:"duration_seconds,omitempty"`
 	ElevationMin *float64   `json:"elevation_min_m,omitempty"`
 	ElevationMax *float64   `json:"elevation_max_m,omitempty"`
+	SourceFormat string     `json:"source_format,omitempty"`
 }
 
 type TrackDetail struct {
@@ -146,6 +149,30 @@ type AssetQuery struct {
 type AssetPage struct {
 	Assets []Asset `json:"assets"`
 	Page   Page    `json:"page"`
+}
+
+type DuplicateGroup struct {
+	ContentID  string           `json:"content_id,omitempty"`
+	SHA512Hex  string           `json:"sha512_hex"`
+	SizeBytes  int64            `json:"size_bytes"`
+	Assets     []DuplicateAsset `json:"assets"`
+	AssetCount int              `json:"asset_count"`
+	TotalBytes int64            `json:"total_bytes"`
+}
+
+type DuplicateAsset struct {
+	AssetID      string    `json:"asset_id"`
+	DisplayName  string    `json:"display_name"`
+	MediaKind    string    `json:"media_kind"`
+	StorageName  string    `json:"storage_name"`
+	RelativePath string    `json:"relative_path"`
+	StorageURL   string    `json:"storage_url"`
+	MTime        time.Time `json:"mtime"`
+}
+
+type DuplicatePage struct {
+	Groups []DuplicateGroup `json:"groups"`
+	Page   Page             `json:"page"`
 }
 
 type Album struct {
@@ -488,6 +515,22 @@ func (s *MemoryStore) UpdateLocationHash(_ context.Context, assetID, sha512Hex s
 		return ErrNotFound
 	}
 	contentID := id.NewUUID()
+	targetAssetID := assetID
+	for candidateID, candidate := range s.assets {
+		if candidateID == assetID {
+			continue
+		}
+		for _, loc := range candidate.Locations {
+			if loc.HashStatus == HashStatusHashed && loc.SHA512Hex == sha512Hex && loc.SizeBytes == bytes {
+				contentID = loc.ContentID
+				targetAssetID = candidateID
+				break
+			}
+		}
+		if targetAssetID != assetID {
+			break
+		}
+	}
 	for i := range asset.Locations {
 		asset.Locations[i].SHA512Hex = sha512Hex
 		asset.Locations[i].ContentID = contentID
@@ -496,7 +539,33 @@ func (s *MemoryStore) UpdateLocationHash(_ context.Context, assetID, sha512Hex s
 			asset.Locations[i].SizeBytes = bytes
 		}
 	}
-	asset.UpdatedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	if targetAssetID != assetID {
+		target := s.assets[targetAssetID]
+		for _, loc := range asset.Locations {
+			loc.AssetID = targetAssetID
+			target.Locations = append(target.Locations, loc)
+			s.byURL[loc.StorageURL] = targetAssetID
+		}
+		if target.TakenAt == nil && asset.TakenAt != nil {
+			taken := asset.TakenAt.UTC()
+			target.TakenAt = &taken
+		}
+		if target.Metadata == nil && asset.Metadata != nil {
+			target.Metadata = map[string]any{}
+		}
+		for key, value := range asset.Metadata {
+			if _, exists := target.Metadata[key]; !exists {
+				target.Metadata[key] = value
+			}
+		}
+		target.UpdatedAt = now
+		s.assets[targetAssetID] = target
+		delete(s.assets, assetID)
+		delete(s.locationByAsset, assetID)
+		return nil
+	}
+	asset.UpdatedAt = now
 	s.assets[assetID] = asset
 	return nil
 }
@@ -527,6 +596,7 @@ func (s *MemoryStore) Stats(_ context.Context) (Stats, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var stats Stats
+	duplicateCounts := map[string]int{}
 	stats.Assets = len(s.assets)
 	for _, asset := range s.assets {
 		for _, loc := range asset.Locations {
@@ -543,9 +613,20 @@ func (s *MemoryStore) Stats(_ context.Context) (Stats, error) {
 			switch loc.HashStatus {
 			case HashStatusHashed:
 				stats.Hashed++
+				if loc.ContentID != "" {
+					duplicateCounts[loc.ContentID]++
+				} else if loc.SHA512Hex != "" {
+					duplicateCounts[loc.SHA512Hex]++
+				}
 			default:
 				stats.Unhashed++
 			}
+		}
+	}
+	for _, count := range duplicateCounts {
+		if count > 1 {
+			stats.DuplicateGroups++
+			stats.DuplicateLocations += count
 		}
 	}
 	return stats, nil
@@ -922,12 +1003,15 @@ type notFoundError struct{}
 func (*notFoundError) Error() string { return "not found" }
 
 type ExplorerOptions struct {
-	Storage   string
-	Path      string
-	MediaKind string
-	Limit     int
-	Offset    int
-	Sort      string
+	Storage    string
+	Path       string
+	Q          string
+	MediaKind  string
+	HashStatus string
+	Extension  string
+	Limit      int
+	Offset     int
+	Sort       string
 }
 
 type ExplorerView struct {
@@ -976,16 +1060,27 @@ func BuildExplorerView(assets []Asset, opts ExplorerOptions) (ExplorerView, erro
 	view := ExplorerView{
 		CurrentPath: current,
 		ParentPath:  parentExplorerPath(current),
+		Folders:     []ExplorerFolder{},
+		Files:       []ExplorerFile{},
 		Limit:       opts.Limit,
 		Offset:      opts.Offset,
 	}
 	folderIndex := map[string]int{}
 	for _, asset := range assets {
+		if opts.Q != "" && len(SearchAssets([]Asset{asset}, opts.Q)) == 0 {
+			continue
+		}
 		for _, loc := range asset.Locations {
 			if opts.Storage != "" && loc.StorageName != opts.Storage {
 				continue
 			}
 			if opts.MediaKind != "" && loc.MediaKind != opts.MediaKind {
+				continue
+			}
+			if opts.HashStatus != "" && loc.HashStatus != opts.HashStatus {
+				continue
+			}
+			if opts.Extension != "" && strings.TrimPrefix(strings.ToLower(loc.Extension), ".") != strings.TrimPrefix(strings.ToLower(opts.Extension), ".") {
 				continue
 			}
 			remaining, ok := pathRemainder(loc.RelativePath, current)
@@ -1029,7 +1124,7 @@ func BuildExplorerView(assets []Asset, opts ExplorerOptions) (ExplorerView, erro
 	view.FileCount = len(view.Files)
 	view.FolderCount = len(view.Folders)
 	if opts.Offset >= len(view.Files) {
-		view.Files = nil
+		view.Files = []ExplorerFile{}
 		return view, nil
 	}
 	end := opts.Offset + opts.Limit
@@ -1038,6 +1133,72 @@ func BuildExplorerView(assets []Asset, opts ExplorerOptions) (ExplorerView, erro
 	}
 	view.Files = view.Files[opts.Offset:end]
 	return view, nil
+}
+
+func BuildDuplicateGroups(assets []Asset, limit, offset int) DuplicatePage {
+	type key struct {
+		hash string
+		size int64
+	}
+	groupsByKey := map[key]*DuplicateGroup{}
+	for _, asset := range assets {
+		for _, loc := range asset.Locations {
+			if loc.HashStatus != HashStatusHashed || loc.SHA512Hex == "" {
+				continue
+			}
+			k := key{hash: loc.SHA512Hex, size: loc.SizeBytes}
+			group := groupsByKey[k]
+			if group == nil {
+				group = &DuplicateGroup{
+					ContentID: loc.ContentID,
+					SHA512Hex: loc.SHA512Hex,
+					SizeBytes: loc.SizeBytes,
+					Assets:    []DuplicateAsset{},
+				}
+				groupsByKey[k] = group
+			}
+			if group.ContentID == "" {
+				group.ContentID = loc.ContentID
+			}
+			group.Assets = append(group.Assets, DuplicateAsset{
+				AssetID: asset.ID, DisplayName: asset.DisplayName, MediaKind: asset.MediaKind,
+				StorageName: loc.StorageName, RelativePath: loc.RelativePath, StorageURL: loc.StorageURL, MTime: loc.MTime,
+			})
+			group.TotalBytes += loc.SizeBytes
+		}
+	}
+	groups := []DuplicateGroup{}
+	for _, group := range groupsByKey {
+		if len(group.Assets) < 2 {
+			continue
+		}
+		sort.Slice(group.Assets, func(i, j int) bool {
+			if group.Assets[i].DisplayName == group.Assets[j].DisplayName {
+				return group.Assets[i].RelativePath < group.Assets[j].RelativePath
+			}
+			return group.Assets[i].DisplayName < group.Assets[j].DisplayName
+		})
+		group.AssetCount = len(group.Assets)
+		groups = append(groups, *group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].TotalBytes == groups[j].TotalBytes {
+			return groups[i].SHA512Hex < groups[j].SHA512Hex
+		}
+		return groups[i].TotalBytes > groups[j].TotalBytes
+	})
+	total := len(groups)
+	limit, offset = normalizePage(limit, offset)
+	if offset >= len(groups) {
+		groups = []DuplicateGroup{}
+	} else {
+		end := offset + limit
+		if end > len(groups) {
+			end = len(groups)
+		}
+		groups = groups[offset:end]
+	}
+	return DuplicatePage{Groups: groups, Page: Page{Limit: limit, Offset: offset, Total: total}}
 }
 
 func cloneAsset(asset Asset) Asset {
@@ -1189,7 +1350,15 @@ func sortExplorerFiles(files []ExplorerFile, key string) {
 
 func summarizeTrack(asset Asset, points []TrackPoint) TrackSummary {
 	summary := TrackSummary{TrackAssetID: asset.ID, Name: asset.DisplayName, PointCount: len(points)}
+	if asset.Metadata != nil {
+		if value, ok := asset.Metadata["track_source_format"].(string); ok {
+			summary.SourceFormat = value
+		}
+	}
 	for i, point := range points {
+		if summary.SourceFormat == "" {
+			summary.SourceFormat = point.Source
+		}
 		lat := point.Lat
 		lon := point.Lon
 		if i == 0 {

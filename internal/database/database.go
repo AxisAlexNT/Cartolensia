@@ -522,32 +522,77 @@ func (db *DB) UpdateLocationHash(ctx context.Context, assetID, sha512Hex string,
 	if err != nil {
 		return err
 	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
 	contentID := id.NewUUID()
 	var existingContentID string
-	err = db.pool.QueryRow(ctx, `select id::text from contents where sha512=$1`, hashBytes).Scan(&existingContentID)
+	err = tx.QueryRow(ctx, `select id::text from contents where sha512=$1 and size_bytes=$2`, hashBytes, bytes).Scan(&existingContentID)
 	if err == nil {
 		contentID = existingContentID
 	} else if errors.Is(err, pgx.ErrNoRows) {
-		_, err = db.pool.Exec(ctx, `insert into contents(id, sha512, size_bytes) values($1, $2, $3)`, contentID, hashBytes, bytes)
+		_, err = tx.Exec(ctx, `insert into contents(id, sha512, size_bytes) values($1, $2, $3)`, contentID, hashBytes, bytes)
 		if err != nil {
 			return err
 		}
 	} else {
 		return err
 	}
-	cmd, err := db.pool.Exec(ctx, `
+
+	targetAssetID := assetID
+	var existingAssetID string
+	err = tx.QueryRow(ctx, `
+		select asset_id::text
+		from asset_locations
+		where content_id=$1 and asset_id<>$2
+		order by last_seen_at, id
+		limit 1
+	`, contentID, assetID).Scan(&existingAssetID)
+	if err == nil {
+		targetAssetID = existingAssetID
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	cmd, err := tx.Exec(ctx, `
 		update asset_locations
-		set content_id=$1, hash_status='hashed', size_bytes=$2
-		where asset_id=$3
-	`, contentID, bytes, assetID)
+		set content_id=$1, hash_status='hashed', size_bytes=$2, asset_id=$3
+		where asset_id=$4
+	`, contentID, bytes, targetAssetID, assetID)
 	if err != nil {
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
 		return catalog.ErrNotFound
 	}
-	_, err = db.pool.Exec(ctx, `update assets set updated_at=now() where id=$1`, assetID)
-	return err
+	if targetAssetID != assetID {
+		_, err = tx.Exec(ctx, `
+			update assets target
+			set taken_at=coalesce(target.taken_at, source.taken_at),
+				metadata_json=source.metadata_json || target.metadata_json,
+				updated_at=now()
+			from assets source
+			where target.id=$1 and source.id=$2
+		`, targetAssetID, assetID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			delete from assets a
+			where a.id=$1 and not exists(select 1 from asset_locations l where l.asset_id=a.id)
+		`, assetID)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = tx.Exec(ctx, `update assets set updated_at=now() where id=$1`, assetID)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (db *DB) UpdateAssetMetadata(ctx context.Context, assetID string, takenAt *time.Time, metadata map[string]any) error {
@@ -588,6 +633,19 @@ func (db *DB) Stats(ctx context.Context) (catalog.Stats, error) {
 			coalesce(sum(size_bytes), 0)
 		from asset_locations
 	`).Scan(&stats.Assets, &stats.Locations, &stats.Photos, &stats.Videos, &stats.Tracks, &stats.Hashed, &stats.Unhashed, &stats.TotalBytes)
+	if err != nil {
+		return stats, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		select count(*)::int, coalesce(sum(location_count), 0)::int
+		from (
+			select content_id, count(*)::int as location_count
+			from asset_locations
+			where content_id is not null
+			group by content_id
+			having count(*) > 1
+		) duplicates
+	`).Scan(&stats.DuplicateGroups, &stats.DuplicateLocations)
 	return stats, err
 }
 
@@ -657,6 +715,12 @@ func applyTrackMetadata(summary *catalog.TrackSummary, metadataText string) {
 	}
 	if value, ok := metadataFloat(metadata, "elevation_max_m"); ok {
 		summary.ElevationMax = &value
+	}
+	if value, ok := metadata["source"].(string); ok {
+		summary.SourceFormat = value
+	}
+	if value, ok := metadata["track_source_format"].(string); ok && summary.SourceFormat == "" {
+		summary.SourceFormat = value
 	}
 }
 

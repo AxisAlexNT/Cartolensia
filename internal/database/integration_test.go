@@ -81,6 +81,26 @@ func TestPostgresIntegrationPhase1(t *testing.T) {
 	if stats.Assets != 1 || stats.Hashed != 1 || stats.Unhashed != 0 {
 		t.Fatalf("unexpected stats: %#v", stats)
 	}
+	movedInfo := info
+	movedInfo.StorageURL = "fs://fixture/photos/moved/one.jpg"
+	movedInfo.RelativePath = "photos/moved/one.jpg"
+	moved, err := db.UpsertDiscoveredFile(ctx, movedInfo)
+	if err != nil {
+		t.Fatalf("moved discovery upsert: %v", err)
+	}
+	if moved.Asset.ID == first.Asset.ID {
+		t.Fatal("moved URL should be provisional until hash confirms identity")
+	}
+	if err := db.UpdateLocationHash(ctx, moved.Asset.ID, sha512Hex, 12); err != nil {
+		t.Fatalf("moved update hash: %v", err)
+	}
+	stats, err = db.Stats(ctx)
+	if err != nil {
+		t.Fatalf("stats after moved hash: %v", err)
+	}
+	if stats.Assets != 1 || stats.Locations != 2 || stats.Hashed != 2 {
+		t.Fatalf("moved file was not merged into one logical asset: %#v", stats)
+	}
 
 	job, err := db.EnqueueJob(ctx, jobs.New("hash", nil))
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -85,6 +86,19 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		t.Fatalf("unexpected filtered assets: %#v", filteredAssets)
 	}
 	rec = httptest.NewRecorder()
+	headOriginal := httptest.NewRequest(http.MethodHead, "/api/v1/media/"+filteredAssets[0].ID+"/original", nil)
+	srv.ServeHTTP(rec, headOriginal)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") == "" {
+		t.Fatalf("head original status %d headers %#v", rec.Code, rec.Header())
+	}
+	rec = httptest.NewRecorder()
+	rangeOriginal := httptest.NewRequest(http.MethodGet, "/api/v1/media/"+filteredAssets[0].ID+"/original", nil)
+	rangeOriginal.Header.Set("Range", "bytes=0-3")
+	srv.ServeHTTP(rec, rangeOriginal)
+	if rec.Code != http.StatusPartialContent || !strings.HasPrefix(rec.Header().Get("Content-Range"), "bytes 0-3/") {
+		t.Fatalf("range original status %d content-range %q body %q", rec.Code, rec.Header().Get("Content-Range"), rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/explorer?media_kind=video&limit=1", nil))
 	if rec.Code != http.StatusOK || rec.Header().Get("X-Total-Count") != "1" || !strings.Contains(rec.Body.String(), `"media_kind":"video"`) {
 		t.Fatalf("filtered explorer status %d total %s body %s", rec.Code, rec.Header().Get("X-Total-Count"), rec.Body.String())
@@ -154,6 +168,45 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/sync/links", body))
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"time_offset_ms":1200`) {
 		t.Fatalf("sync link status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScreenDistanceClusteringSplitsWithZoom(t *testing.T) {
+	features := []map[string]any{
+		testPointFeature("a", 44.10000, 40.10000),
+		testPointFeature("b", 44.10005, 40.10005),
+		testPointFeature("c", 44.30000, 40.30000),
+	}
+	low := clusterGeoJSONPoints(features, bbox{}, false, 10, 48)
+	if len(low) >= len(features) {
+		t.Fatalf("expected low zoom to cluster nearby points, got %d features", len(low))
+	}
+	high := clusterGeoJSONPoints(features, bbox{}, false, 21, 48)
+	if len(high) != len(features) {
+		t.Fatalf("expected high zoom to split isolated nearby points, got %#v", high)
+	}
+	same := []map[string]any{testPointFeature("a", 44.1, 40.1), testPointFeature("b", 44.1, 40.1)}
+	clusteredSame := clusterGeoJSONPoints(same, bbox{}, false, 22, 48)
+	if len(clusteredSame) != 1 {
+		t.Fatalf("same coordinate points should remain one cluster, got %#v", clusteredSame)
+	}
+	props, _ := clusteredSame[0]["properties"].(map[string]any)
+	if props["count"] != 2 {
+		t.Fatalf("expected cluster count 2, got %#v", props)
+	}
+}
+
+func testPointFeature(id string, lon, lat float64) map[string]any {
+	return map[string]any{
+		"type": "Feature",
+		"geometry": map[string]any{
+			"type":        "Point",
+			"coordinates": []float64{lon, lat},
+		},
+		"properties": map[string]any{
+			"id":   id,
+			"kind": "photo",
+		},
 	}
 }
 
@@ -317,3 +370,94 @@ func TestJobOperationsEndpoints(t *testing.T) {
 type errTestFailure struct{}
 
 func (errTestFailure) Error() string { return "boom" }
+
+func TestBuildMonthBuckets(t *testing.T) {
+	jan := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	feb := time.Date(2026, 2, 2, 3, 0, 0, 0, time.UTC)
+	assets := []catalog.Asset{
+		{
+			ID: "a", MediaKind: "photo", DisplayName: "a.jpg",
+			Locations: []catalog.Location{{StorageName: "fixture", Extension: "jpg", MediaKind: "photo", SizeBytes: 10, MTime: jan, HashStatus: catalog.HashStatusHashed}},
+		},
+		{
+			ID: "b", MediaKind: "video", DisplayName: "b.mp4",
+			Locations: []catalog.Location{{StorageName: "fixture", Extension: "mp4", MediaKind: "video", SizeBytes: 20, MTime: feb, HashStatus: catalog.HashStatusUnhashed}},
+		},
+	}
+	buckets := buildMonthBuckets(assets, url.Values{})
+	if len(buckets) != 2 || buckets[0].Month != "2026-02" || buckets[1].Month != "2026-01" {
+		t.Fatalf("unexpected buckets %#v", buckets)
+	}
+	filtered := buildMonthBuckets(assets, url.Values{"hash_status": []string{catalog.HashStatusHashed}})
+	if len(filtered) != 1 || filtered[0].Month != "2026-01" || filtered[0].Photos != 1 {
+		t.Fatalf("unexpected filtered buckets %#v", filtered)
+	}
+}
+
+func TestSettingsAndDBExportStayInCache(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       cfg,
+		Plugins:      plugins.BuiltIns(),
+		Registry:     registry,
+		Store:        catalog.NewMemoryStore(),
+		StoreBackend: "memory",
+	})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "runtime_settings") || !strings.Contains(rec.Body.String(), "restart_required") {
+		t.Fatalf("settings status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/settings/runtime", strings.NewReader(`{"indexing.default_max_files":25,"unknown":"ignored"}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "indexing.default_max_files") || strings.Contains(rec.Body.String(), "unknown") {
+		t.Fatalf("runtime settings status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/db/export", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("export status %d body %s", rec.Code, rec.Body.String())
+	}
+	var exported struct {
+		ID   string `json:"id"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &exported); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePathInside(cfg.Cache.Dir, exported.Path); err != nil {
+		t.Fatalf("export escaped cache: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/db/import-plan", strings.NewReader(`{"path":"`+exported.ID+`","confirmation_phrase":"PLAN ONLY"}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "PLAN ONLY") && !strings.Contains(rec.Body.String(), "Validated") {
+		t.Fatalf("import plan status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHLSArgsProfilesAndPathSafety(t *testing.T) {
+	dir := t.TempDir()
+	args, err := hlsArgs("h264-low", "/tmp/source.mp4", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "master.m3u8") || !strings.Contains(joined, "segment_%05d.ts") || !strings.Contains(joined, "-f hls") {
+		t.Fatalf("unexpected hls args %q", joined)
+	}
+	if _, err := hlsArgs("av1-preview", "/tmp/source.mp4", dir); err == nil {
+		t.Fatal("expected unsupported profile error")
+	}
+	if err := ensurePathInside(dir, filepath.Join(dir, "child")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePathInside(dir, filepath.Join(dir, "..", "escape")); err == nil {
+		t.Fatal("expected escape to be rejected")
+	}
+}

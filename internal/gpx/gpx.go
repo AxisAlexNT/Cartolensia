@@ -1,6 +1,7 @@
 package gpx
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -40,9 +41,17 @@ type point struct {
 }
 
 func Parse(reader io.Reader) ([]catalog.TrackPoint, error) {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
 	var doc document
-	decoder := xml.NewDecoder(reader)
+	decoder := xml.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&doc); err != nil {
+		points, salvageErr := parseStreaming(bytes.NewReader(data))
+		if salvageErr == nil && len(points) > 0 {
+			return points, nil
+		}
 		return nil, fmt.Errorf("parse gpx: %w", err)
 	}
 	var points []catalog.TrackPoint
@@ -74,6 +83,93 @@ func Parse(reader io.Reader) ([]catalog.TrackPoint, error) {
 		points = append(points, parsed)
 	}
 	return points, nil
+}
+
+func parseStreaming(reader io.Reader) ([]catalog.TrackPoint, error) {
+	decoder := xml.NewDecoder(reader)
+	var points []catalog.TrackPoint
+	var current *point
+	var currentTag string
+	var currentSource string
+	var text strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return points, nil
+		}
+		if err != nil {
+			if len(points) > 0 && recoverableXMLError(err) {
+				return points, nil
+			}
+			return nil, err
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "trkpt", "rtept", "wpt":
+				current = &point{}
+				currentTag = t.Name.Local
+				currentSource = sourceForGPXElement(t.Name.Local)
+				for _, attr := range t.Attr {
+					switch attr.Name.Local {
+					case "lat":
+						current.Lat = attr.Value
+					case "lon":
+						current.Lon = attr.Value
+					}
+				}
+			case "ele", "time":
+				if current != nil {
+					text.Reset()
+				}
+			}
+		case xml.CharData:
+			if current != nil {
+				text.Write([]byte(t))
+			}
+		case xml.EndElement:
+			if current == nil {
+				continue
+			}
+			raw := strings.TrimSpace(text.String())
+			switch t.Name.Local {
+			case "ele":
+				current.Ele = raw
+				text.Reset()
+			case "time":
+				current.Time = raw
+				text.Reset()
+			case currentTag:
+				parsed, err := parsePoint(*current, currentSource)
+				if err == nil {
+					points = append(points, parsed)
+				}
+				current = nil
+				currentTag = ""
+				currentSource = ""
+				text.Reset()
+			}
+		}
+	}
+}
+
+func sourceForGPXElement(name string) string {
+	switch name {
+	case "rtept":
+		return "gpx_route"
+	case "wpt":
+		return "gpx_waypoint"
+	default:
+		return "gpx"
+	}
+}
+
+func recoverableXMLError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "unexpected EOF") || strings.Contains(text, "EOF")
 }
 
 type Analysis struct {

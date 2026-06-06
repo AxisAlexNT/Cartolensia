@@ -231,6 +231,9 @@ func (s *Server) handleGPSTracks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if tracks == nil {
+		tracks = []catalog.TrackSummary{}
+	}
 	writeJSON(w, http.StatusOK, tracks)
 }
 
@@ -342,14 +345,53 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w)
 			return
 		}
+		stats, _ := s.deps.Store.Stats(r.Context())
+		geoAssets, _ := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{Limit: 1})
+		tracks, _ := s.deps.Store.ListGPSTracks(r.Context(), catalog.GPSTrackQuery{Limit: 10000})
+		geotaggedCount := 0
+		if len(geoAssets) > 0 {
+			geotaggedCount = -1
+		}
+		if allGeo, err := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{Limit: 10000}); err == nil {
+			geotaggedCount = len(allGeo)
+		}
+		warnings := []string{}
+		if stats.Assets > 0 && geotaggedCount == 0 {
+			warnings = append(warnings, "No geotagged assets are indexed yet. Run metadata enrichment or choose media with EXIF/GPS.")
+		}
+		if stats.Tracks == 0 && len(tracks) == 0 {
+			warnings = append(warnings, "No GPX/GPS tracks are indexed in the current scan.")
+		} else if stats.Tracks > 0 && len(tracks) == 0 {
+			warnings = append(warnings, fmt.Sprintf("%d track-like assets are indexed, but no parsed GPS/KML/KMZ/GPZ summaries exist yet. Run metadata enrichment for track files.", stats.Tracks))
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"backend":        "geojson",
-			"base_tiles":     "not_implemented",
-			"clustering":     "grid",
-			"postgis":        capabilityInstalled(s.deps.Capabilities, "postgis"),
-			"asset_geo":      true,
-			"track_geometry": true,
+			"backend":          "geojson",
+			"base_tiles":       "cartolensia_proxy",
+			"base_tiles_note":  "OpenStreetMap tiles are fetched on demand through a local Cartolensia cache; no bulk prefetch is implemented.",
+			"clustering":       "screen_distance",
+			"postgis":          capabilityInstalled(s.deps.Capabilities, "postgis"),
+			"asset_geo":        true,
+			"track_geometry":   true,
+			"indexed_assets":   stats.Assets,
+			"geotagged_assets": geotaggedCount,
+			"track_assets":     stats.Tracks,
+			"tracks":           len(tracks),
+			"warnings":         warnings,
 		})
+	case "tile-sources":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		writeJSON(w, http.StatusOK, []map[string]any{{
+			"id":          "osm",
+			"name":        "OpenStreetMap Standard",
+			"enabled":     true,
+			"template":    "/api/v1/tiles/osm/{z}/{x}/{y}.png",
+			"attribution": "© OpenStreetMap contributors",
+			"policy":      "on-demand cache only; no bulk prefetch against public OSM tiles",
+			"cache_dir":   filepath.Join(s.deps.Config.Cache.Dir, "tiles"),
+		}})
 	case "assets":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -688,6 +730,9 @@ func queryInt(r *http.Request, key string, fallback int) int {
 }
 
 func geoFeatureCollection(features []map[string]any, clustering string, zoom int) map[string]any {
+	if features == nil {
+		features = []map[string]any{}
+	}
 	return map[string]any{"type": "FeatureCollection", "features": features, "clustering": clustering, "zoom": zoom}
 }
 
@@ -743,23 +788,26 @@ func (s *Server) mapAssetFeatures(r *http.Request) ([]map[string]any, string, er
 				"coordinates": []float64{item.Geo.Lon, item.Geo.Lat},
 			},
 			"properties": map[string]any{
-				"id":          item.Asset.ID,
-				"name":        item.Asset.DisplayName,
-				"kind":        item.Asset.MediaKind,
-				"asset_type":  "asset",
-				"source":      item.Geo.Source,
-				"confidence":  item.Geo.Confidence,
-				"track_id":    item.Geo.TrackAssetID,
-				"taken_at":    item.Geo.TakenAt,
-				"clustered":   false,
-				"preview_url": "/api/v1/media/" + item.Asset.ID + "/preview",
+				"id":           item.Asset.ID,
+				"name":         item.Asset.DisplayName,
+				"kind":         item.Asset.MediaKind,
+				"asset_type":   "asset",
+				"source":       item.Geo.Source,
+				"confidence":   item.Geo.Confidence,
+				"track_id":     item.Geo.TrackAssetID,
+				"taken_at":     item.Geo.TakenAt,
+				"clustered":    false,
+				"preview_url":  "/api/v1/media/" + item.Asset.ID + "/preview",
+				"detail_url":   "/?page=asset-detail&asset_id=" + item.Asset.ID,
+				"original_url": "/api/v1/media/" + item.Asset.ID + "/original",
 			},
 		})
 	}
 	clustering := "raw"
 	if boolQuery(firstNonEmpty(query.Get("clusters"), query.Get("cluster"))) {
-		features = clusterGeoJSONPoints(features, bboxValue, hasBBox, queryInt(r, "zoom", 10))
-		clustering = "grid"
+		distancePx := queryInt(r, "cluster_distance_px", queryInt(r, "marker_px", 24)*2)
+		features = clusterGeoJSONPoints(features, bboxValue, hasBBox, queryInt(r, "zoom", 10), distancePx)
+		clustering = "screen_distance"
 	}
 	return features, clustering, nil
 }

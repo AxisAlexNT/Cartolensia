@@ -22,16 +22,18 @@ Runtime migrations are embedded into the Go binary from `migrations/*.sql`. Disk
 - `internal/catalog`: logical assets, storage locations, content/hash status, folder-style Explorer grouping, stats, and store contract.
 - `internal/discovery`: fast fixture-safe discovery, bounded prefix dry-run reports, and lazy SHA-512 hashing handlers with cancellation checks. Discovery intentionally avoids heavy media parsing; metadata enrichment is a separate job.
 - `internal/exif`: small server-side EXIF wrapper around `github.com/rwcarlsen/goexif` with safe no-EXIF handling and conservative timezone policy.
-- `internal/metadata`: explicit metadata enrichment jobs for images, videos, GPX tracks, and track-snapped geotags. Image dimensions use Go decoders, JPEG EXIF can populate metadata and typed `asset_geo`, video metadata uses optional ffprobe, and GPX enrichment computes point counts, bbox, duration, distance, and elevation where possible.
+- `internal/metadata`: explicit metadata enrichment jobs for images, videos, GPX/KML/KMZ tracks, and track-snapped geotags. Image dimensions use Go decoders, JPEG EXIF can populate metadata and typed `asset_geo`, video metadata uses optional ffprobe, and track enrichment computes point counts, bbox, duration, distance, and elevation where possible.
 - `internal/jobs`: job model, state transitions, counters, progress, logs, cancellation, leases, and retry scheduling.
 - `internal/workers`: async worker loop, lease acquisition, heartbeats, panic recovery, and graceful stop.
 - `internal/auth`: local admin bootstrap, password hashing, password rotation, session/API-token auth, token scopes, CSRF flow, persisted auth store contracts, and explicit `dev_no_auth` development mode.
 - `internal/gpx`: dependency-free GPX parser, route/waypoint support, track analysis, haversine distance, and deterministic simplification.
+- `internal/kml`: dependency-free KML/KMZ parser for practical `Point`, line coordinate, and `gx:Track` ingestion.
 - `internal/preview`: preview status, cache-key/path safety, cache cleanup, preview generation jobs, and JPEG preview generation for decodable images.
 - `internal/media`: SHA-512 streaming hash and optional ffprobe video metadata detection/extraction.
 - `internal/plugins`: built-in and filesystem plugin manifests, dependency topological sort, sidecar HTTP manifest validation, and plugin status/health stubs.
-- `internal/transcoding`: bounded ffmpeg/ffprobe capability inventory, encoder parsing, and hardware hints. It does not transcode originals.
-- `internal/server`: REST API, original streaming, cached preview serving, and WebUI static serving.
+- `internal/transcoding`: bounded ffmpeg/ffprobe capability inventory, encoder parsing, and hardware hints.
+- `internal/server`: REST API, indexing pipeline/status surface, original streaming, cached preview serving, cache-scoped HLS transcode sessions, settings/export MVP, tile proxy, and WebUI static serving.
+- `internal/tlsutil`: dependency-free in-memory self-signed TLS certificate generation for local/private HTTPS deployments.
 
 ## REST API
 
@@ -60,6 +62,10 @@ Implemented endpoints:
 - `POST /api/v1/jobs/{id}/cancel`
 - `POST /api/v1/jobs/{id}/retry`
 - `POST /api/v1/discovery/start`
+- `POST /api/v1/indexing/start`
+- `GET /api/v1/indexing/latest`
+- `GET /api/v1/indexing/{pipeline_id}`
+- `POST /api/v1/indexing/{pipeline_id}/cancel`
 - `POST /api/v1/discovery/dry-run`
 - `GET /api/v1/discovery/dry-run/{job_id}/report`
 - `POST /api/v1/hash/start`
@@ -69,7 +75,9 @@ Implemented endpoints:
 - `GET /api/v1/previews/cache`
 - `POST /api/v1/previews/cleanup`
 - `GET /api/v1/assets`
+- `GET /api/v1/assets/months`
 - `GET /api/v1/assets/{id}`
+- `GET /api/v1/duplicates`
 - `GET /api/v1/albums`
 - `POST /api/v1/albums`
 - `GET /api/v1/albums/{id}`
@@ -96,9 +104,18 @@ Implemented endpoints:
 - `GET /api/v1/map/status`
 - `GET /api/v1/map/assets`
 - `GET /api/v1/map/tracks`
+- `GET /api/v1/map/tile-sources`
 - `GET /api/v1/transcoding/status`
 - `GET /api/v1/transcoding/capabilities`
 - `GET /api/v1/transcoding/presets`
+- `GET /api/v1/settings`
+- `GET /api/v1/settings/effective`
+- `PATCH /api/v1/settings/runtime`
+- `GET /api/v1/settings/restart-required`
+- `POST /api/v1/admin/db/export`
+- `GET /api/v1/admin/db/exports`
+- `GET /api/v1/admin/db/exports/{id}/download`
+- `POST /api/v1/admin/db/import-plan`
 - `GET /api/v1/ai/status`
 - `GET /api/v1/ai/accelerators`
 - `GET /api/v1/vector/status`
@@ -106,10 +123,20 @@ Implemented endpoints:
 - `GET /api/v1/backend/status`
 - `GET /api/v1/media/{asset_id}/original`
 - `GET /api/v1/media/{asset_id}/preview`
+- `GET /api/v1/media/{asset_id}/stream-options`
+- `POST /api/v1/media/{asset_id}/transcode-session`
+- `GET /api/v1/media/transcode-sessions/{session_id}/master.m3u8`
+- `GET /api/v1/media/transcode-sessions/{session_id}/{segment}`
+- `DELETE /api/v1/media/transcode-sessions/{session_id}/stop`
+- `GET /api/v1/tiles/{source}/{z}/{x}/{y}.png`
 
-`POST /api/v1/discovery/start`, `POST /api/v1/hash/start`, `POST /api/v1/metadata/enrich/start`, and `POST /api/v1/previews/start` enqueue jobs and return quickly in the app runtime. The worker loop leases and executes queued jobs asynchronously. Tests can opt into a synchronous server dependency path for deterministic fixture checks.
+`POST /api/v1/indexing/start` is the user-facing scoped pipeline entry point. It validates storage/prefix/max bounds, starts bounded discovery, and lets the WebUI orchestrate follow-up hash, metadata/EXIF, preview, track parse, geotag, and map-refresh stages against the same scope. `POST /api/v1/discovery/start`, `POST /api/v1/hash/start`, `POST /api/v1/metadata/enrich/start`, and `POST /api/v1/previews/start` remain lower-level job starters and return quickly in the app runtime. The worker loop leases and executes queued jobs asynchronously. Tests can opt into a synchronous server dependency path for deterministic fixture checks.
 
 Original streaming uses the read-only storage registry and `http.ServeContent`, which provides HTTP Range and HEAD support when the underlying file supports seeking. Preview generation decodes standard-library-supported image formats, writes cached JPEG previews under the configured Cartolensia cache directory, serves the generated preview, and never writes near originals. Unsupported formats return a clean JSON status.
+
+Video stream options truthfully expose direct original streaming plus cache-scoped HLS transcode-session profiles only when `ffmpeg` is available. HLS session output is written under the configured Cartolensia cache directory and can be stopped through the API. Originals are never modified.
+
+The tile proxy is intentionally on-demand only. It validates tile coordinates, caches only tiles actively requested by the browser under the Cartolensia cache directory, exposes attribution metadata through `/api/v1/map/tile-sources`, and provides no bulk prefetch endpoint against public OSM servers.
 
 ## WebUI
 
@@ -118,16 +145,17 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - app shell and navigation;
 - Explorer table backed by `/api/v1/explorer`, including folder grouping and breadcrumbs;
 - asset detail view backed by `/api/v1/assets/{id}`;
-- Discovery page with scan and hash actions;
+- Discovery page with a scoped indexing pipeline and staged hash/metadata/preview/track/map controls;
 - Jobs page with counts, detail/log view, cancel, and retry controls;
 - Metadata page with explicit enrichment and preview generation actions;
 - Albums page for virtual album creation, item management, and map handoff;
-- GPS Tracks page backed by parsed GPX track points and enriched distance/duration metadata, including media lookup and snap-media controls;
-- Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, clustering, album filters, media filters, and track filters;
+- GPS Tracks page backed by parsed GPX/KML/KMZ track points and enriched distance/duration metadata, including media lookup and snap-media controls;
+- Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, clustering, clickable cluster/point popups, album filters, media filters, and track filters;
+- Duplicates page for report-only SHA-512+size content groups;
 - Storages page;
 - Plugins page and plugin detail health/status surface;
 - Stats page;
-- Settings page for password rotation and API token management;
+- Settings page with tabs for effective config, runtime preferences, restart-required YAML settings, cache-scoped DB metadata export, password rotation, and API token management;
 - stub/control surfaces for Albums, Transcoding, Base AI, and AI Classification.
 
 Browser route state is saved in `localStorage`.
@@ -147,7 +175,12 @@ Browser route state is saved in `localStorage`.
 - `local` auth mode requires configured admin email and a password supplied through an environment variable or ignored bootstrap file. No production password is hardcoded.
 - Cookie-authenticated write requests require a CSRF header obtained from `GET /api/v1/auth/csrf`. Bearer API tokens bypass CSRF but must carry sufficient scopes.
 - API token scopes currently include `read`, `write`, `jobs:write`, `plugins:write`, `media:read`, and `admin`.
+- Real-archive guardrails reject `storage=all`, empty/root prefixes, missing max limits, and unsafe absolute prefixes when a configured storage root is `/mnt/Models/rclone` or inside it.
 - `/mnt/Models/rclone` is not required and was not touched by the MVP tests.
+
+## HTTP And HTTPS
+
+The app serves one configured listener at `http.addr`. Plain HTTP is the default. HTTPS can be enabled either by providing both `http.tls_cert_file` and `http.tls_key_file`, or by setting `http.tls_auto_self_signed: true` for a generated in-memory self-signed certificate. Self-signed certificates are intended for local/private deployments and are not persisted to disk.
 
 ## Database Capability Policy
 
@@ -158,4 +191,4 @@ PostGIS, pgvector, and pg_trgm are detected at startup. PostGIS may be installed
 - Vector search should be implemented through a `VectorStore` abstraction. The schema stores JSON embedding placeholders without requiring pgvector.
 - Sidecar HTTP plugins are represented in manifests but are user-managed services; Cartolensia does not auto-start arbitrary plugin binaries.
 - Live video-track sync is represented in schema by `track_points` and `asset_track_links`, including `time_offset_ms`, with a marker interpolation API for linked videos.
-- Transcoding contracts and capability detection exist, but transcoding jobs and outputs are still future work.
+- Transcoding contracts and capability detection exist. Cache-scoped HLS sessions are implemented as a safe MVP; durable transcoding jobs and managed output libraries are still future work.

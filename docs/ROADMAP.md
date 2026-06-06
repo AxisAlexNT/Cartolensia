@@ -37,7 +37,7 @@ Remaining Phase 1 hardening:
 
 - DB-backed sustained worker stress tests beyond fixture integration tests. Partially implemented via `scripts/worker-stress-test.sh`; DB stress remains gated by environment variables.
 - Rescan/missing-file state transitions for explicitly bounded scopes.
-- Real map tiles. OpenLayers vector rendering is implemented without tile dependencies.
+- Real map tiles. OpenLayers vector rendering is implemented; OSM base tiles can be fetched on demand through a local Cartolensia tile cache/proxy, but packaged offline tile sets remain future work.
 
 ## Phase 2: Media Usability
 
@@ -53,33 +53,36 @@ Remaining Phase 1 hardening:
 ## Phase 3: Map And Tracks Foundation
 
 - Virtual Albums plugin MVP. Implemented.
-- Track ingestion from GPX. Implemented.
+- Track ingestion from GPX, KML, and KMZ. Implemented.
 - Track analysis with bbox, distance, duration, elevation, and simplification. Implemented.
 - GPS Track Manager plugin MVP with detail, point queries, media lookup, offset control, and snap-media job. Implemented.
-- Photo/map plugin MVP with GeoJSON APIs, album/media/source/track filters, deterministic point clustering, typed `asset_geo`, and OpenLayers WebUI. Implemented.
+- Photo/map plugin MVP with GeoJSON APIs, album/media/source/track filters, deterministic point clustering, clickable cluster/point popups, typed `asset_geo`, and OpenLayers WebUI. Implemented.
 - Live video-track sync candidates, manual links, deletion, and marker interpolation API. Implemented.
-- Real map tiles and richer geotag editing. Future work.
+- On-demand OSM tile proxy/cache with attribution and no public-OSM bulk prefetch. Implemented.
+- Richer manual geotag editing. Future work.
 
 ## Phase 4: Plugin Expansion
 
 - Sidecar HTTP plugin manifest contract and health stub. Implemented.
 - WebUI plugin asset mounting.
-- Plugin-specific settings backed by PostgreSQL.
+- Plugin-specific settings backed by PostgreSQL. Implemented as a core settings table; plugin-specific UI is future work.
 - Capability and health reporting per plugin. Implemented as core/built-in status and sidecar stub.
 
 ## Phase 5: Transcoding And AI Foundations
 
 - Transcoding preset/output schema contracts. Implemented.
-- ffmpeg/ffprobe encoder and hardware capability detection. Implemented as inventory only.
+- ffmpeg/ffprobe encoder and hardware capability detection. Implemented.
+- Cache-scoped HLS transcode session MVP. Implemented; browser compatibility and durable transcode job management remain future work.
 - AI/vector status APIs and accelerator hints. Implemented without AI dependencies.
 - Embedding schema contract without required pgvector. Implemented.
-- Actual transcoding jobs, model execution, embeddings, and classification. Future work.
+- Durable transcoding jobs, managed transcoding outputs, model execution, embeddings, and classification. Future work.
 
 ## Phase 6: Large Archive Hardening
 
 - Incremental scanning at scale.
-- Better duplicate workflows without destructive defaults.
+- Better duplicate workflows without destructive defaults. Report-only duplicate grouping by SHA-512+size is implemented; review/merge/trash workflows remain future work.
 - Observability and admin status pages.
 - Offline resource packaging.
-- Scoped dry-run readiness for future tiny real-archive tests. Implemented with report-only API, scan-run records, guarded config/script examples, and strict default limits.
+- Scoped dry-run readiness for future tiny real-archive tests. Implemented with report-only API, scan-run records, guarded config/script examples, strict default limits, and real-archive backend guardrails.
+- Temporary real-peek helper scripts for supervised bounded read-only indexing. Implemented.
 - Performance tests on synthetic large datasets. Implemented as bounded scripts; more metrics remain future work.

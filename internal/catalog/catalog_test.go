@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,5 +158,77 @@ func TestBuildExplorerViewGroupsFolders(t *testing.T) {
 	}
 	if photos.FileCount != 1 || photos.Files[0].Name != "one.jpg" {
 		t.Fatalf("unexpected photos view: %#v", photos)
+	}
+	filtered, err := BuildExplorerView(assets, ExplorerOptions{Path: "photos", MediaKind: "video"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.FileCount != 0 || filtered.FolderCount != 0 {
+		t.Fatalf("video filter should hide photo folder entries, got %#v", filtered)
+	}
+}
+
+func TestBuildDuplicateGroups(t *testing.T) {
+	now := time.Now().UTC()
+	assets := []Asset{
+		{
+			ID: "a1", DisplayName: "one.jpg", MediaKind: "photo",
+			Locations: []Location{{StorageName: "fixture", RelativePath: "one.jpg", StorageURL: "fs://fixture/one.jpg", FileName: "one.jpg", SizeBytes: 10, SHA512Hex: "abc", HashStatus: HashStatusHashed, MTime: now}},
+		},
+		{
+			ID: "a2", DisplayName: "two.jpg", MediaKind: "photo",
+			Locations: []Location{{StorageName: "fixture", RelativePath: "two.jpg", StorageURL: "fs://fixture/two.jpg", FileName: "two.jpg", SizeBytes: 10, SHA512Hex: "abc", HashStatus: HashStatusHashed, MTime: now}},
+		},
+		{
+			ID: "a3", DisplayName: "other.jpg", MediaKind: "photo",
+			Locations: []Location{{StorageName: "fixture", RelativePath: "other.jpg", StorageURL: "fs://fixture/other.jpg", FileName: "other.jpg", SizeBytes: 11, SHA512Hex: "abc", HashStatus: HashStatusHashed, MTime: now}},
+		},
+		{
+			ID: "a4", DisplayName: "unhashed.jpg", MediaKind: "photo",
+			Locations: []Location{{StorageName: "fixture", RelativePath: "unhashed.jpg", StorageURL: "fs://fixture/unhashed.jpg", FileName: "unhashed.jpg", SizeBytes: 10, HashStatus: HashStatusUnhashed, MTime: now}},
+		},
+	}
+	page := BuildDuplicateGroups(assets, 10, 0)
+	if page.Page.Total != 1 || len(page.Groups) != 1 {
+		t.Fatalf("expected one duplicate group, got %#v", page)
+	}
+	if page.Groups[0].AssetCount != 2 || page.Groups[0].TotalBytes != 20 {
+		t.Fatalf("unexpected group counters %#v", page.Groups[0])
+	}
+}
+
+func TestMemoryStoreMergesLocationsByHashAndSize(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Now().UTC()
+	first, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName: "fixture", StorageURL: "fs://fixture/a/photo.jpg", RelativePath: "a/photo.jpg",
+		Name: "photo.jpg", Extension: "jpg", MIME: "image/jpeg", MediaKind: "photo", SizeBytes: 12, MTime: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName: "fixture", StorageURL: "fs://fixture/b/photo.jpg", RelativePath: "b/photo.jpg",
+		Name: "photo.jpg", Extension: "jpg", MIME: "image/jpeg", MediaKind: "photo", SizeBytes: 12, MTime: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Asset.ID == second.Asset.ID {
+		t.Fatal("pre-hash URL discovery should create separate provisional assets")
+	}
+	if err := store.UpdateLocationHash(ctx, first.Asset.ID, strings.Repeat("a", 128), 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateLocationHash(ctx, second.Asset.ID, strings.Repeat("a", 128), 12); err != nil {
+		t.Fatal(err)
+	}
+	assets, err := store.ListAssets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || len(assets[0].Locations) != 2 {
+		t.Fatalf("expected one logical asset with two locations, got %#v", assets)
 	}
 }

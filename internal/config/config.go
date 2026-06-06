@@ -27,7 +27,11 @@ type Config struct {
 }
 
 type HTTPConfig struct {
-	Addr string `json:"addr" yaml:"addr"`
+	Addr              string   `json:"addr" yaml:"addr"`
+	TLSCertFile       string   `json:"tls_cert_file,omitempty" yaml:"tls_cert_file"`
+	TLSKeyFile        string   `json:"tls_key_file,omitempty" yaml:"tls_key_file"`
+	TLSAutoSelfSigned bool     `json:"tls_auto_self_signed,omitempty" yaml:"tls_auto_self_signed"`
+	TLSHosts          []string `json:"tls_hosts,omitempty" yaml:"tls_hosts"`
 }
 
 type DatabaseConfig struct {
@@ -141,6 +145,9 @@ func Defaults() Config {
 func Validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.HTTP.Addr) == "" {
 		return errors.New("http.addr is required")
+	}
+	if (strings.TrimSpace(cfg.HTTP.TLSCertFile) == "") != (strings.TrimSpace(cfg.HTTP.TLSKeyFile) == "") {
+		return errors.New("http.tls_cert_file and http.tls_key_file must be configured together")
 	}
 	if strings.TrimSpace(cfg.Cache.Dir) == "" {
 		return errors.New("cache.dir is required")

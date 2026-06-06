@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/app"
+	"github.com/AxisAlexNT/Cartolensia/internal/tlsutil"
 )
 
 func main() {
@@ -41,6 +44,25 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
+		if cartolensia.Config.HTTP.TLSCertFile != "" && cartolensia.Config.HTTP.TLSKeyFile != "" {
+			log.Printf("cartolensia listening with configured TLS on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
+			errCh <- server.ListenAndServeTLS(cartolensia.Config.HTTP.TLSCertFile, cartolensia.Config.HTTP.TLSKeyFile)
+			return
+		}
+		if cartolensia.Config.HTTP.TLSAutoSelfSigned {
+			cert, err := tlsutil.SelfSignedCertificate(tlsHosts(cartolensia.Config.HTTP.Addr, cartolensia.Config.HTTP.TLSHosts))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			server.TLSConfig = &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+			}
+			log.Printf("cartolensia listening with generated self-signed TLS on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
+			errCh <- server.ListenAndServeTLS("", "")
+			return
+		}
 		log.Printf("cartolensia listening on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
 		errCh <- server.ListenAndServe()
 	}()
@@ -61,4 +83,13 @@ func main() {
 			log.Fatalf("server failed: %v", err)
 		}
 	}
+}
+
+func tlsHosts(addr string, configured []string) []string {
+	hosts := append([]string(nil), configured...)
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil && host != "" {
+		hosts = append(hosts, host)
+	}
+	return hosts
 }

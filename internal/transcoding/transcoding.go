@@ -60,7 +60,7 @@ func Detect(ctx context.Context) Capabilities {
 			VAAPI:     hasEncoder(encoders, "vaapi") || exists("/dev/dri"),
 			QSV:       hasEncoder(encoders, "qsv"),
 		},
-		Safety: "detection only; no transcoding jobs execute and originals remain immutable",
+		Safety: "user-triggered HLS transcode sessions write only to the configured Cartolensia cache; originals remain immutable",
 	}
 }
 

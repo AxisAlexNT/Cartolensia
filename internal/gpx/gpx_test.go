@@ -52,3 +52,15 @@ func TestParseGPXRouteWaypointAndMissingTime(t *testing.T) {
 		t.Fatalf("unexpected simplification: %#v", simplified)
 	}
 }
+
+func TestParseTruncatedGPXSalvagesCompletePoints(t *testing.T) {
+	points, err := Parse(strings.NewReader(`<gpx><trk><trkseg>
+<trkpt lat="40.1" lon="44.1"><time>2026-01-01T00:00:00Z</time></trkpt>
+<trkpt lat="40.2" lon="44.2"><time>2026-01-01T00:01:00Z</time></trkpt>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("expected salvaged points, got %#v", points)
+	}
+}

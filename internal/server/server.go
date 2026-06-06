@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"github.com/AxisAlexNT/Cartolensia/internal/config"
 	"github.com/AxisAlexNT/Cartolensia/internal/database"
 	"github.com/AxisAlexNT/Cartolensia/internal/discovery"
+	"github.com/AxisAlexNT/Cartolensia/internal/id"
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/media"
 	"github.com/AxisAlexNT/Cartolensia/internal/metadata"
@@ -58,6 +62,17 @@ type explorerRow struct {
 	SHA512Hex    string    `json:"sha512_hex,omitempty"`
 }
 
+type monthBucket struct {
+	Month      string     `json:"month"`
+	Count      int        `json:"count"`
+	Photos     int        `json:"photos"`
+	Videos     int        `json:"videos"`
+	Tracks     int        `json:"tracks"`
+	TotalBytes int64      `json:"total_bytes"`
+	FirstAt    *time.Time `json:"first_at,omitempty"`
+	LastAt     *time.Time `json:"last_at,omitempty"`
+}
+
 func New(deps Dependencies) *Server {
 	if deps.Authenticator == nil {
 		deps.Authenticator = auth.DevNoAuth{}
@@ -78,6 +93,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
 	s.mux.HandleFunc("/api/v1/config/effective", s.handleConfig)
+	s.mux.HandleFunc("/api/v1/settings", s.handleSettings)
+	s.mux.HandleFunc("/api/v1/settings/effective", s.handleSettingsEffective)
+	s.mux.HandleFunc("/api/v1/settings/runtime", s.handleSettingsRuntime)
+	s.mux.HandleFunc("/api/v1/settings/pending/download", s.handleSettingsPendingDownload)
+	s.mux.HandleFunc("/api/v1/settings/pending", s.handleSettingsPending)
+	s.mux.HandleFunc("/api/v1/settings/restart-required", s.handleSettingsRestartRequired)
+	s.mux.HandleFunc("/api/v1/admin/db/export", s.handleDBExport)
+	s.mux.HandleFunc("/api/v1/admin/db/exports", s.handleDBExports)
+	s.mux.HandleFunc("/api/v1/admin/db/exports/", s.handleDBExportByID)
+	s.mux.HandleFunc("/api/v1/admin/db/import-plan", s.handleDBImportPlan)
 	s.mux.HandleFunc("/api/v1/auth/me", s.handleAuthMe)
 	s.mux.HandleFunc("/api/v1/auth/csrf", s.handleAuthCSRF)
 	s.mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
@@ -93,6 +118,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/jobs/stats", s.handleJobStats)
 	s.mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
 	s.mux.HandleFunc("/api/v1/discovery/start", s.handleDiscoveryStart)
+	s.mux.HandleFunc("/api/v1/indexing/start", s.handleIndexingStart)
+	s.mux.HandleFunc("/api/v1/indexing/latest", s.handleIndexingLatest)
+	s.mux.HandleFunc("/api/v1/indexing/", s.handleIndexingByID)
 	s.mux.HandleFunc("/api/v1/discovery/dry-run", s.handleDiscoveryDryRun)
 	s.mux.HandleFunc("/api/v1/discovery/dry-run/", s.handleDiscoveryDryRunByJob)
 	s.mux.HandleFunc("/api/v1/hash/start", s.handleHashStart)
@@ -101,8 +129,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/previews/status", s.handlePreviewStatus)
 	s.mux.HandleFunc("/api/v1/previews/cache", s.handlePreviewCache)
 	s.mux.HandleFunc("/api/v1/previews/cleanup", s.handlePreviewCleanup)
+	s.mux.HandleFunc("/api/v1/assets/months", s.handleAssetMonths)
 	s.mux.HandleFunc("/api/v1/assets", s.handleAssets)
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
+	s.mux.HandleFunc("/api/v1/duplicates", s.handleDuplicates)
 	s.mux.HandleFunc("/api/v1/albums", s.handleAlbums)
 	s.mux.HandleFunc("/api/v1/albums/", s.handleAlbumByID)
 	s.mux.HandleFunc("/api/v1/explorer", s.handleExplorer)
@@ -124,6 +154,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/vector/status", s.handleVectorStatus)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/backend/status", s.handleBackendStatus)
+	s.mux.HandleFunc("/api/v1/tiles/", s.handleTiles)
 	s.mux.HandleFunc("/api/v1/media/", s.handleMedia)
 	s.mux.HandleFunc("/", s.handleIndex)
 }
@@ -416,6 +447,10 @@ func (s *Server) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.pluginHealth(manifest))
 		return
 	}
+	if len(parts) == 2 && parts[1] == "settings" {
+		s.handlePluginSettings(w, r, manifest.ID)
+		return
+	}
 	http.NotFound(w, r)
 }
 
@@ -575,7 +610,27 @@ func (s *Server) handleDiscoveryStart(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWrite(w, r, "discovery.start") {
 		return
 	}
-	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("discovery", map[string]any{"storage": "all"}))
+	payload := discovery.ScanPayload{}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if payload.MarkMissing {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("mark_missing is not supported for discovery/start"))
+		return
+	}
+	payload = discovery.DecodeScanPayload(payload)
+	var jobPayload any = map[string]any{"storage": "all"}
+	if payload.Storage != "" || payload.Prefix != "" || len(payload.Prefixes) > 0 || payload.MaxFiles > 0 || payload.MaxBytes > 0 {
+		jobPayload = payload
+	}
+	if err := discovery.ValidateScanSafety(s.deps.Registry, discovery.DecodeScanPayload(jobPayload)); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("discovery", jobPayload))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -590,6 +645,179 @@ func (s *Server) handleDiscoveryStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, job)
 }
 
+type indexingStartRequest struct {
+	Storage           string   `json:"storage"`
+	Prefix            string   `json:"prefix,omitempty"`
+	Prefixes          []string `json:"prefixes,omitempty"`
+	MaxFiles          int      `json:"max_files,omitempty"`
+	MaxBytes          int64    `json:"max_bytes,omitempty"`
+	IncludeExtensions []string `json:"include_extensions,omitempty"`
+	ExcludePatterns   []string `json:"exclude_patterns,omitempty"`
+	IndexFiles        *bool    `json:"index_files,omitempty"`
+	Hash              *bool    `json:"hash,omitempty"`
+	Metadata          *bool    `json:"metadata,omitempty"`
+	Previews          *bool    `json:"previews,omitempty"`
+	ParseTracks       *bool    `json:"parse_tracks,omitempty"`
+	GeotagEXIF        *bool    `json:"geotag_exif,omitempty"`
+	SnapToTracks      *bool    `json:"snap_to_tracks,omitempty"`
+	RefreshMap        *bool    `json:"refresh_map,omitempty"`
+}
+
+func (s *Server) handleIndexingStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "discovery.start") {
+		return
+	}
+	var req indexingStartRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	pipelineID := id.NewUUID()
+	prefixes := compactStrings(req.Prefixes)
+	if strings.TrimSpace(req.Prefix) != "" {
+		prefixes = append([]string{strings.TrimSpace(req.Prefix)}, prefixes...)
+	}
+	scanPayload := discovery.DecodeScanPayload(discovery.ScanPayload{
+		Storage:           strings.TrimSpace(req.Storage),
+		Prefixes:          prefixes,
+		MaxFiles:          req.MaxFiles,
+		MaxBytes:          req.MaxBytes,
+		IncludeExtensions: req.IncludeExtensions,
+		ExcludePatterns:   req.ExcludePatterns,
+		MarkMissing:       false,
+	})
+	if err := discovery.ValidateScanSafety(s.deps.Registry, scanPayload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	indexFiles := boolDefault(req.IndexFiles, true)
+	summary, err := s.indexingScopeSummary(r.Context(), scanPayload.Storage, scanPayload.Prefixes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var queued []jobs.Job
+	if indexFiles {
+		jobPayload := map[string]any{
+			"pipeline_id":        pipelineID,
+			"pipeline_stage":     "discovery",
+			"storage":            scanPayload.Storage,
+			"prefixes":           scanPayload.Prefixes,
+			"max_files":          scanPayload.MaxFiles,
+			"max_bytes":          scanPayload.MaxBytes,
+			"include_extensions": scanPayload.IncludeExtensions,
+			"exclude_patterns":   scanPayload.ExcludePatterns,
+			"mark_missing":       false,
+		}
+		job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("discovery", jobPayload))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		queued = append(queued, job)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"pipeline_id": pipelineID,
+		"scope":       summary,
+		"queued_jobs": queued,
+		"options": map[string]bool{
+			"index_files":    indexFiles,
+			"hash":           boolDefault(req.Hash, true),
+			"metadata":       boolDefault(req.Metadata, true),
+			"previews":       boolDefault(req.Previews, true),
+			"parse_tracks":   boolDefault(req.ParseTracks, true),
+			"geotag_exif":    boolDefault(req.GeotagEXIF, true),
+			"snap_to_tracks": boolDefault(req.SnapToTracks, true),
+			"refresh_map":    boolDefault(req.RefreshMap, true),
+		},
+		"note": "Discovery is queued first. The WebUI runs following stages sequentially after the current scope is known.",
+	})
+}
+
+func (s *Server) handleIndexingLatest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	storageName := r.URL.Query().Get("storage")
+	prefixes := compactStrings(r.URL.Query()["prefixes"])
+	if prefix := strings.TrimSpace(r.URL.Query().Get("prefix")); prefix != "" {
+		prefixes = append([]string{prefix}, prefixes...)
+	}
+	summary, err := s.indexingScopeSummary(r.Context(), storageName, prefixes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	jobsList, err := s.deps.Store.ListJobs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"scope":       summary,
+		"latest_jobs": latestIndexingJobs(jobsList, storageName, prefixes),
+	})
+}
+
+func (s *Server) handleIndexingByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/indexing/"), "/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.Split(rest, "/")
+	pipelineID := parts[0]
+	if len(parts) == 2 && parts[1] == "cancel" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		if !s.requireWrite(w, r, "jobs.cancel") {
+			return
+		}
+		jobsList, err := s.deps.Store.ListJobs(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		var canceled []jobs.Job
+		for _, job := range jobsList {
+			if !jobHasPayloadString(job, "pipeline_id", pipelineID) || !canCancelJob(job) {
+				continue
+			}
+			next, err := s.deps.Store.RequestCancelJob(r.Context(), job.ID)
+			if err == nil {
+				canceled = append(canceled, next)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"pipeline_id": pipelineID, "canceled_jobs": canceled})
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	jobsList, err := s.deps.Store.ListJobs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var related []jobs.Job
+	for _, job := range jobsList {
+		if jobHasPayloadString(job, "pipeline_id", pipelineID) {
+			related = append(related, job)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pipeline_id": pipelineID, "jobs": related})
+}
+
 func (s *Server) handleHashStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -598,7 +826,19 @@ func (s *Server) handleHashStart(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWrite(w, r, "hash.start") {
 		return
 	}
-	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("hash", map[string]any{"scope": "unhashed"}))
+	payload := discovery.HashPayload{Scope: "unhashed"}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+	}
+	payload = discovery.DecodeHashPayload(payload)
+	if payload.Scope == "" {
+		payload.Scope = "unhashed"
+	}
+	if err := discovery.ValidateHashSafety(s.deps.Registry, payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("hash", payload))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -686,6 +926,36 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page.Assets)
 }
 
+func (s *Server) handleAssetMonths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	assets, err := s.deps.Store.ListAssets(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildMonthBuckets(assets, r.URL.Query()))
+}
+
+func (s *Server) handleDuplicates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	assets, err := s.deps.Store.ListAssets(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	page := catalog.BuildDuplicateGroups(assets, limit, offset)
+	w.Header().Set("X-Total-Count", strconv.Itoa(page.Page.Total))
+	writeJSON(w, http.StatusOK, page)
+}
+
 func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -723,12 +993,15 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(query.Get("limit"))
 		offset, _ := strconv.Atoi(query.Get("offset"))
 		view, err := catalog.BuildExplorerView(assets, catalog.ExplorerOptions{
-			Storage:   query.Get("storage"),
-			Path:      query.Get("path"),
-			MediaKind: query.Get("media_kind"),
-			Limit:     limit,
-			Offset:    offset,
-			Sort:      query.Get("sort"),
+			Storage:    firstNonEmpty(query.Get("storage"), query.Get("storage_name")),
+			Path:       query.Get("path"),
+			Q:          query.Get("q"),
+			MediaKind:  query.Get("media_kind"),
+			HashStatus: query.Get("hash_status"),
+			Extension:  query.Get("extension"),
+			Limit:      limit,
+			Offset:     offset,
+			Sort:       query.Get("sort"),
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -784,6 +1057,72 @@ func filterAssets(assets []catalog.Asset, query url.Values) []catalog.Asset {
 			break
 		}
 	}
+	return out
+}
+
+func buildMonthBuckets(assets []catalog.Asset, query url.Values) []monthBucket {
+	buckets := map[string]*monthBucket{}
+	mediaKind := strings.TrimSpace(query.Get("media_kind"))
+	hashStatus := strings.TrimSpace(query.Get("hash_status"))
+	storageName := firstNonEmpty(query.Get("storage"), query.Get("storage_name"))
+	extension := normalizeExtension(query.Get("extension"))
+	for _, asset := range assets {
+		if mediaKind != "" && asset.MediaKind != mediaKind {
+			continue
+		}
+		loc, ok := catalog.FirstLocation(asset)
+		if !ok {
+			continue
+		}
+		if storageName != "" && loc.StorageName != storageName {
+			continue
+		}
+		if hashStatus != "" && loc.HashStatus != hashStatus {
+			continue
+		}
+		if extension != "" && normalizeExtension(loc.Extension) != extension {
+			continue
+		}
+		at := loc.MTime
+		if asset.TakenAt != nil {
+			at = *asset.TakenAt
+		}
+		if at.IsZero() {
+			continue
+		}
+		month := at.UTC().Format("2006-01")
+		bucket := buckets[month]
+		if bucket == nil {
+			bucket = &monthBucket{Month: month}
+			buckets[month] = bucket
+		}
+		bucket.Count++
+		bucket.TotalBytes += loc.SizeBytes
+		switch asset.MediaKind {
+		case "photo":
+			bucket.Photos++
+		case "video":
+			bucket.Videos++
+		case "track":
+			bucket.Tracks++
+		}
+		t := at.UTC()
+		if bucket.FirstAt == nil || t.Before(*bucket.FirstAt) {
+			first := t
+			bucket.FirstAt = &first
+		}
+		if bucket.LastAt == nil || t.After(*bucket.LastAt) {
+			last := t
+			bucket.LastAt = &last
+		}
+	}
+	out := make([]monthBucket, 0, len(buckets))
+	for _, bucket := range buckets {
+		out = append(out, *bucket)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Month > out[j].Month
+	})
 	return out
 }
 
@@ -951,6 +1290,9 @@ func (s *Server) handleTracks(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if tracks == nil {
+		tracks = []catalog.TrackSummary{}
 	}
 	writeJSON(w, http.StatusOK, tracks)
 }
@@ -1207,8 +1549,14 @@ func (s *Server) handleBackendStatus(w http.ResponseWriter, r *http.Request) {
 		"preview_cache": s.deps.Config.Cache.Dir,
 		"auth_mode":     s.deps.Config.Auth.Mode,
 		"auth":          s.authStatus(),
-		"workers":       s.deps.Config.Workers,
-		"tools":         map[string]any{"ffprobe": media.DetectFFProbe()},
+		"http": map[string]any{
+			"addr":                 s.deps.Config.HTTP.Addr,
+			"tls_enabled":          s.deps.Config.HTTP.TLSCertFile != "" || s.deps.Config.HTTP.TLSAutoSelfSigned,
+			"tls_cert_configured":  s.deps.Config.HTTP.TLSCertFile != "",
+			"tls_auto_self_signed": s.deps.Config.HTTP.TLSAutoSelfSigned,
+		},
+		"workers": s.deps.Config.Workers,
+		"tools":   map[string]any{"ffprobe": media.DetectFFProbe()},
 	})
 }
 
@@ -1219,6 +1567,10 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/media/")
 	parts := strings.Split(rest, "/")
+	if len(parts) >= 2 && parts[0] == "transcode-sessions" {
+		s.handleTranscodeSession(w, r, parts)
+		return
+	}
 	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
@@ -1229,9 +1581,73 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		s.handleOriginal(w, r, assetID)
 	case "preview":
 		s.handlePreview(w, r, assetID)
+	case "stream-options":
+		s.handleStreamOptions(w, r, assetID)
+	case "transcode-session":
+		s.handleTranscodeSessionStart(w, r, assetID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleStreamOptions(w http.ResponseWriter, r *http.Request, assetID string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), assetID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	loc, _ := catalog.FirstLocation(asset)
+	ffmpegAvailable := false
+	if _, err := exec.LookPath("ffmpeg"); err == nil && asset.MediaKind == "video" {
+		ffmpegAvailable = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":     asset.ID,
+		"media_kind":   asset.MediaKind,
+		"direct_url":   "/api/v1/media/" + asset.ID + "/original",
+		"range":        true,
+		"storage":      loc.StorageName,
+		"storage_mode": "strict_read_only",
+		"options": []map[string]any{
+			{
+				"id":          "original",
+				"label":       "Original/direct",
+				"available":   true,
+				"url":         "/api/v1/media/" + asset.ID + "/original",
+				"description": "Streams the immutable original through Cartolensia with HTTP Range support.",
+			},
+			{
+				"id":               "h264_720p_lan",
+				"label":            "Browser-compatible H.264 720p",
+				"available":        ffmpegAvailable,
+				"profile":          "h264_720p_lan",
+				"session_endpoint": "/api/v1/media/" + asset.ID + "/transcode-session",
+				"disabled_reason":  disabledReason(!ffmpegAvailable, "ffmpeg is unavailable or asset is not a video"),
+			},
+			{
+				"id":               "h264_low_bitrate",
+				"label":            "Low bitrate LAN",
+				"available":        ffmpegAvailable,
+				"profile":          "h264_low_bitrate",
+				"session_endpoint": "/api/v1/media/" + asset.ID + "/transcode-session",
+				"disabled_reason":  disabledReason(!ffmpegAvailable, "ffmpeg is unavailable or asset is not a video"),
+			},
+			{
+				"id":              "av1_low_bitrate",
+				"label":           "AV1 preview/transcode",
+				"available":       false,
+				"disabled_reason": "Transcoding jobs are planned; original streaming is active.",
+			},
+		},
+	})
 }
 
 func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request, assetID string) {
@@ -1794,37 +2210,292 @@ func csvSet(raw string) map[string]struct{} {
 	return out
 }
 
-func clusterGeoJSONPoints(features []map[string]any, b bbox, hasBBox bool, zoom int) []map[string]any {
+func boolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func disabledReason(disabled bool, reason string) string {
+	if disabled {
+		return reason
+	}
+	return ""
+}
+
+func (s *Server) indexingScopeSummary(ctx context.Context, storageName string, prefixes []string) (map[string]any, error) {
+	assets, err := s.deps.Store.ListAssets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	prefixes = compactStrings(prefixes)
+	summary := map[string]any{
+		"storage":          storageName,
+		"prefixes":         prefixes,
+		"assets":           0,
+		"photos":           0,
+		"videos":           0,
+		"tracks":           0,
+		"hashed":           0,
+		"unhashed":         0,
+		"geotagged":        0,
+		"preview_ready":    0,
+		"total_bytes":      int64(0),
+		"track_like_files": 0,
+	}
+	for _, asset := range assets {
+		loc, ok := catalog.FirstLocation(asset)
+		if !ok || !assetInScope(loc, storageName, prefixes) {
+			continue
+		}
+		summary["assets"] = summary["assets"].(int) + 1
+		summary["total_bytes"] = summary["total_bytes"].(int64) + loc.SizeBytes
+		switch asset.MediaKind {
+		case "photo":
+			summary["photos"] = summary["photos"].(int) + 1
+		case "video":
+			summary["videos"] = summary["videos"].(int) + 1
+		case "track":
+			summary["tracks"] = summary["tracks"].(int) + 1
+			summary["track_like_files"] = summary["track_like_files"].(int) + 1
+		}
+		if loc.HashStatus == catalog.HashStatusHashed {
+			summary["hashed"] = summary["hashed"].(int) + 1
+		} else {
+			summary["unhashed"] = summary["unhashed"].(int) + 1
+		}
+		if _, err := s.deps.Store.GetAssetGeo(ctx, asset.ID); err == nil {
+			summary["geotagged"] = summary["geotagged"].(int) + 1
+		}
+		if asset.MediaKind == "photo" && preview.InfoForAsset(s.deps.Config.Cache.Dir, asset).Status == preview.StatusReady {
+			summary["preview_ready"] = summary["preview_ready"].(int) + 1
+		}
+	}
+	return summary, nil
+}
+
+func assetInScope(loc catalog.Location, storageName string, prefixes []string) bool {
+	if storageName != "" && loc.StorageName != storageName {
+		return false
+	}
+	if len(prefixes) == 0 {
+		return true
+	}
+	relativePath := strings.Trim(strings.TrimSpace(loc.RelativePath), "/")
+	for _, prefix := range prefixes {
+		prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+		if prefix != "" && (relativePath == prefix || strings.HasPrefix(relativePath, prefix+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func latestIndexingJobs(jobsList []jobs.Job, storageName string, prefixes []string) map[string]jobs.Job {
+	out := map[string]jobs.Job{}
+	kinds := map[string]struct{}{
+		"discovery":        {},
+		"hash":             {},
+		"metadata_enrich":  {},
+		"preview_generate": {},
+		"geo_snap":         {},
+	}
+	for _, job := range jobsList {
+		if _, ok := kinds[job.Kind]; !ok {
+			continue
+		}
+		if storageName != "" && !jobPayloadMatchesScope(job, storageName, prefixes) {
+			continue
+		}
+		current, exists := out[job.Kind]
+		if !exists || job.CreatedAt.After(current.CreatedAt) {
+			out[job.Kind] = job
+		}
+	}
+	return out
+}
+
+func jobPayloadMatchesScope(job jobs.Job, storageName string, prefixes []string) bool {
+	payload := jobPayloadMap(job)
+	if payloadStorage, _ := payload["storage"].(string); storageName != "" && payloadStorage != "" && payloadStorage != storageName {
+		return false
+	}
+	if len(prefixes) == 0 {
+		return true
+	}
+	payloadPrefixes := payloadStringSlice(payload["prefixes"])
+	if payloadPrefix, _ := payload["prefix"].(string); payloadPrefix != "" {
+		payloadPrefixes = append([]string{payloadPrefix}, payloadPrefixes...)
+	}
+	payloadPrefixes = compactStrings(payloadPrefixes)
+	if len(payloadPrefixes) == 0 {
+		return false
+	}
+	for _, wanted := range prefixes {
+		wanted = strings.Trim(wanted, "/")
+		for _, got := range payloadPrefixes {
+			got = strings.Trim(got, "/")
+			if wanted == got {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func jobHasPayloadString(job jobs.Job, key, value string) bool {
+	got, _ := jobPayloadMap(job)[key].(string)
+	return got == value
+}
+
+func jobPayloadMap(job jobs.Job) map[string]any {
+	data, err := json.Marshal(job.Payload)
+	if err != nil {
+		return map[string]any{}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return map[string]any{}
+	}
+	return payload
+}
+
+func payloadStringSlice(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func canCancelJob(job jobs.Job) bool {
+	return job.Status == jobs.StatusQueued || job.Status == jobs.StatusRunning || job.Status == jobs.StatusCancelRequested
+}
+
+type geoCluster struct {
+	items  []map[string]any
+	sumX   float64
+	sumY   float64
+	sumLon float64
+	sumLat float64
+	minLon float64
+	minLat float64
+	maxLon float64
+	maxLat float64
+}
+
+func clusterGeoJSONPoints(features []map[string]any, _ bbox, _ bool, zoom int, clusterDistancePx int) []map[string]any {
 	if len(features) <= 1 {
 		return features
 	}
-	if !hasBBox {
-		b = bbox{MinLon: -180, MinLat: -90, MaxLon: 180, MaxLat: 90}
+	zoom = minInt(maxInt(zoom, 1), 22)
+	if clusterDistancePx <= 0 {
+		clusterDistancePx = 48
 	}
-	divisions := 1 << minInt(maxInt(zoom, 1), 8)
-	type bucket struct {
-		count int
-		lon   float64
-		lat   float64
-		first map[string]any
-	}
-	buckets := map[string]*bucket{}
+	var clusters []*geoCluster
 	for _, feature := range features {
 		lon, lat, ok := geoJSONPoint(feature)
 		if !ok {
 			continue
 		}
-		x := int((lon - b.MinLon) / (b.MaxLon - b.MinLon + 0.0000001) * float64(divisions))
-		y := int((lat - b.MinLat) / (b.MaxLat - b.MinLat + 0.0000001) * float64(divisions))
-		key := fmt.Sprintf("%d:%d", x, y)
-		item := buckets[key]
-		if item == nil {
-			item = &bucket{first: feature}
-			buckets[key] = item
+		x, y := webMercatorWorldPixel(lon, lat, zoom)
+		var selected *geoCluster
+		for _, existing := range clusters {
+			if distance(x, y, existing.sumX/float64(len(existing.items)), existing.sumY/float64(len(existing.items))) <= float64(clusterDistancePx) {
+				selected = existing
+				break
+			}
 		}
-		item.count++
-		item.lon += lon
-		item.lat += lat
+		if selected == nil {
+			selected = &geoCluster{minLon: lon, maxLon: lon, minLat: lat, maxLat: lat}
+			clusters = append(clusters, selected)
+		}
+		addClusterFeature(selected, feature, lon, lat, x, y)
+	}
+	mergeClusters(clusters, float64(clusterDistancePx))
+	out := make([]map[string]any, 0, len(clusters))
+	for i, item := range clusters {
+		if len(item.items) == 0 {
+			continue
+		}
+		if len(item.items) == 1 {
+			out = append(out, item.items[0])
+			continue
+		}
+		out = append(out, clusterFeature(fmt.Sprintf("cluster:%d:%d", zoom, i), item))
+	}
+	return out
+}
+
+func addClusterFeature(item *geoCluster, feature map[string]any, lon, lat, x, y float64) {
+	item.items = append(item.items, feature)
+	item.sumX += x
+	item.sumY += y
+	item.sumLon += lon
+	item.sumLat += lat
+	item.minLon = minFloat(item.minLon, lon)
+	item.maxLon = maxFloat(item.maxLon, lon)
+	item.minLat = minFloat(item.minLat, lat)
+	item.maxLat = maxFloat(item.maxLat, lat)
+}
+
+func mergeClusters(clusters []*geoCluster, threshold float64) {
+	for {
+		merged := false
+		for i := 0; i < len(clusters) && !merged; i++ {
+			if len(clusters[i].items) == 0 {
+				continue
+			}
+			for j := i + 1; j < len(clusters); j++ {
+				if len(clusters[j].items) == 0 {
+					continue
+				}
+				leftX := clusters[i].sumX / float64(len(clusters[i].items))
+				leftY := clusters[i].sumY / float64(len(clusters[i].items))
+				rightX := clusters[j].sumX / float64(len(clusters[j].items))
+				rightY := clusters[j].sumY / float64(len(clusters[j].items))
+				if distance(leftX, leftY, rightX, rightY) > threshold {
+					continue
+				}
+				clusters[i].items = append(clusters[i].items, clusters[j].items...)
+				clusters[i].sumLon += clusters[j].sumLon
+				clusters[i].sumLat += clusters[j].sumLat
+				clusters[i].sumX += clusters[j].sumX
+				clusters[i].sumY += clusters[j].sumY
+				clusters[i].minLon = minFloat(clusters[i].minLon, clusters[j].minLon)
+				clusters[i].maxLon = maxFloat(clusters[i].maxLon, clusters[j].maxLon)
+				clusters[i].minLat = minFloat(clusters[i].minLat, clusters[j].minLat)
+				clusters[i].maxLat = maxFloat(clusters[i].maxLat, clusters[j].maxLat)
+				clusters[j].items = nil
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			break
+		}
+	}
+}
+
+func clusterIdenticalPoints(features []map[string]any) []map[string]any {
+	buckets := map[string][]map[string]any{}
+	for _, feature := range features {
+		lon, lat, ok := geoJSONPoint(feature)
+		if !ok {
+			continue
+		}
+		key := fmt.Sprintf("%.7f:%.7f", lon, lat)
+		buckets[key] = append(buckets[key], feature)
 	}
 	keys := make([]string, 0, len(buckets))
 	for key := range buckets {
@@ -1833,25 +2504,139 @@ func clusterGeoJSONPoints(features []map[string]any, b bbox, hasBBox bool, zoom 
 	sort.Strings(keys)
 	out := make([]map[string]any, 0, len(keys))
 	for _, key := range keys {
-		item := buckets[key]
-		if item.count == 1 {
-			out = append(out, item.first)
+		items := buckets[key]
+		if len(items) == 1 {
+			out = append(out, items[0])
 			continue
 		}
+		lon, lat, _ := geoJSONPoint(items[0])
 		out = append(out, map[string]any{
 			"type": "Feature",
 			"geometry": map[string]any{
 				"type":        "Point",
-				"coordinates": []float64{item.lon / float64(item.count), item.lat / float64(item.count)},
+				"coordinates": []float64{lon, lat},
 			},
 			"properties": map[string]any{
-				"kind":      "cluster",
-				"clustered": true,
-				"count":     item.count,
+				"kind":           "cluster",
+				"cluster_id":     key,
+				"clustered":      true,
+				"count":          len(items),
+				"photos_count":   countClusterKind(items, "photo"),
+				"videos_count":   countClusterKind(items, "video"),
+				"tracks_count":   countClusterKind(items, "track"),
+				"centroid":       map[string]float64{"lon": lon, "lat": lat},
+				"bbox":           map[string]float64{"min_lon": lon, "min_lat": lat, "max_lon": lon, "max_lat": lat},
+				"sample_assets":  clusterSamples(items),
+				"location_label": nil,
 			},
 		})
 	}
 	return out
+}
+
+func clusterFeature(id string, item *geoCluster) map[string]any {
+	count := len(item.items)
+	centerLon := item.sumLon / float64(count)
+	centerLat := item.sumLat / float64(count)
+	return map[string]any{
+		"type": "Feature",
+		"geometry": map[string]any{
+			"type":        "Point",
+			"coordinates": []float64{centerLon, centerLat},
+		},
+		"properties": map[string]any{
+			"kind":           "cluster",
+			"cluster_id":     id,
+			"clustered":      true,
+			"count":          count,
+			"photos_count":   countClusterKind(item.items, "photo"),
+			"videos_count":   countClusterKind(item.items, "video"),
+			"tracks_count":   countClusterKind(item.items, "track"),
+			"centroid":       map[string]float64{"lon": centerLon, "lat": centerLat},
+			"bbox":           map[string]float64{"min_lon": item.minLon, "min_lat": item.minLat, "max_lon": item.maxLon, "max_lat": item.maxLat},
+			"bbox_array":     []float64{item.minLon, item.minLat, item.maxLon, item.maxLat},
+			"sample_assets":  clusterSamples(item.items),
+			"location_label": nil,
+		},
+	}
+}
+
+func webMercatorWorldPixel(lon, lat float64, zoom int) (float64, float64) {
+	lat = maxFloat(minFloat(lat, 85.05112878), -85.05112878)
+	scale := 256 * math.Pow(2, float64(zoom))
+	x := (lon + 180) / 360 * scale
+	latRad := lat * math.Pi / 180
+	y := (1 - math.Log(math.Tan(latRad)+1/math.Cos(latRad))/math.Pi) / 2 * scale
+	return x, y
+}
+
+func distance(x1, y1, x2, y2 float64) float64 {
+	return math.Hypot(x1-x2, y1-y2)
+}
+
+func featureExtent(features []map[string]any) bbox {
+	out := bbox{MinLon: 180, MinLat: 90, MaxLon: -180, MaxLat: -90}
+	for _, feature := range features {
+		lon, lat, ok := geoJSONPoint(feature)
+		if !ok {
+			continue
+		}
+		out.MinLon = minFloat(out.MinLon, lon)
+		out.MaxLon = maxFloat(out.MaxLon, lon)
+		out.MinLat = minFloat(out.MinLat, lat)
+		out.MaxLat = maxFloat(out.MaxLat, lat)
+	}
+	if out.MaxLon < out.MinLon || out.MaxLat < out.MinLat {
+		return bbox{MinLon: -180, MinLat: -90, MaxLon: 180, MaxLat: 90}
+	}
+	paddingLon := maxFloat((out.MaxLon-out.MinLon)*0.05, 0.0001)
+	paddingLat := maxFloat((out.MaxLat-out.MinLat)*0.05, 0.0001)
+	out.MinLon -= paddingLon
+	out.MaxLon += paddingLon
+	out.MinLat -= paddingLat
+	out.MaxLat += paddingLat
+	return out
+}
+
+func countClusterKind(features []map[string]any, kind string) int {
+	count := 0
+	for _, feature := range features {
+		props, _ := feature["properties"].(map[string]any)
+		if props["kind"] == kind || props["asset_type"] == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func clusterSamples(features []map[string]any) []map[string]any {
+	samples := make([]map[string]any, 0, len(features))
+	for i, feature := range features {
+		if i >= 48 {
+			break
+		}
+		props, _ := feature["properties"].(map[string]any)
+		if props == nil {
+			continue
+		}
+		id, _ := props["id"].(string)
+		name, _ := props["name"].(string)
+		kind, _ := props["kind"].(string)
+		previewURL, _ := props["preview_url"].(string)
+		detailURL, _ := props["detail_url"].(string)
+		originalURL, _ := props["original_url"].(string)
+		geometry, _ := feature["geometry"].(map[string]any)
+		samples = append(samples, map[string]any{
+			"asset_id":     id,
+			"name":         name,
+			"media_kind":   kind,
+			"preview_url":  previewURL,
+			"detail_url":   detailURL,
+			"original_url": originalURL,
+			"coordinates":  geometry["coordinates"],
+		})
+	}
+	return samples
 }
 
 func geoJSONPoint(feature map[string]any) (float64, float64, bool) {
@@ -1883,6 +2668,20 @@ func assetLatLon(asset catalog.Asset) (float64, float64, bool) {
 
 func minInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
 		return a
 	}
 	return b

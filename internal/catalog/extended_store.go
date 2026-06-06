@@ -212,7 +212,7 @@ func (s *MemoryStore) GetAlbum(_ context.Context, albumID string) (Album, error)
 func (s *MemoryStore) ListAlbums(_ context.Context, query AlbumQuery) ([]Album, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []Album
+	out := []Album{}
 	for _, album := range s.albums {
 		if !query.Tree && album.ParentID != query.ParentID {
 			continue

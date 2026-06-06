@@ -26,7 +26,7 @@ Use three separate concepts:
 - storage location: one concrete URL where bytes currently exist;
 - content: byte identity once SHA-512 is known.
 
-SHA-512 is an indexed content key. It is not the sole primary key and should not be available during the first discovery pass.
+SHA-512 is an indexed content signal. It is not the sole primary key and should not be available during the first discovery pass. The current content identity uniqueness rule is SHA-512 plus file size, leaving room for future collision handling and alternate identity providers. When a moved/copied file later hashes to the same SHA-512 and size as known content, Cartolensia relinks the new storage location to the existing logical asset rather than keeping a duplicate logical asset.
 
 ## Discovery Stages
 
@@ -68,6 +68,8 @@ Stage 5: scoped dry-run readiness.
 - dry-run reports never mark missing files;
 - current dry-run behavior is report-only and does not insert assets;
 - hash, metadata, and previews are off by default and must be requested separately in future supervised runs.
+
+Real archive storage roots such as `/mnt/Models/rclone` get stricter guards for normal indexing too: no `storage=all`, no empty/root prefixes, no missing max limits, and no unsafe absolute prefixes. WebUI/API callers should send adapter-relative prefixes such as `Cartolensia-photos`, not host absolute paths.
 
 ## Safety Modes
 

@@ -150,6 +150,7 @@ export type TrackSummary = {
   duration_seconds?: number;
   elevation_min_m?: number;
   elevation_max_m?: number;
+  source_format?: string;
 };
 
 export type TrackDetail = {
@@ -268,7 +269,42 @@ export type Stats = {
   tracks: number;
   unhashed: number;
   hashed: number;
+  duplicate_groups: number;
+  duplicate_locations: number;
   total_bytes: number;
+};
+
+export type DuplicateGroup = {
+  content_id?: string;
+  sha512_hex: string;
+  size_bytes: number;
+  asset_count: number;
+  total_bytes: number;
+  assets: Array<{
+    asset_id: string;
+    display_name: string;
+    media_kind: string;
+    storage_name: string;
+    relative_path: string;
+    storage_url: string;
+    mtime: string;
+  }>;
+};
+
+export type DuplicatePage = {
+  groups: DuplicateGroup[];
+  page: { limit: number; offset: number; total: number };
+};
+
+export type MonthBucket = {
+  month: string;
+  count: number;
+  photos: number;
+  videos: number;
+  tracks: number;
+  total_bytes: number;
+  first_at?: string;
+  last_at?: string;
 };
 
 export type BackendStatus = {
@@ -279,6 +315,12 @@ export type BackendStatus = {
   preview_cache: string;
   auth_mode: string;
   auth: AuthStatus;
+  http?: {
+    addr: string;
+    tls_enabled: boolean;
+    tls_cert_configured: boolean;
+    tls_auto_self_signed: boolean;
+  };
   tools?: Record<string, unknown>;
 };
 
@@ -288,6 +330,93 @@ export type TranscodingCapabilities = {
   encoders: Array<{ name: string; description?: string; codec_family?: string; hardware?: string }>;
   hardware: Record<string, boolean>;
   safety: string;
+};
+
+export type StreamOption = {
+  id: string;
+  label: string;
+  available: boolean;
+  url?: string;
+  profile?: string;
+  session_endpoint?: string;
+  description?: string;
+  disabled_reason?: string;
+};
+
+export type StreamOptions = {
+  asset_id: string;
+  media_kind: string;
+  direct_url: string;
+  range: boolean;
+  storage?: string;
+  storage_mode?: string;
+  options: StreamOption[];
+};
+
+export type IndexingScope = {
+  storage: string;
+  prefixes: string[];
+  assets: number;
+  photos: number;
+  videos: number;
+  tracks: number;
+  hashed: number;
+  unhashed: number;
+  geotagged: number;
+  preview_ready: number;
+  total_bytes: number;
+  track_like_files: number;
+};
+
+export type IndexingStatus = {
+  scope: IndexingScope;
+  latest_jobs: Record<string, Job>;
+};
+
+export type IndexingStartResult = {
+  pipeline_id: string;
+  scope: IndexingScope;
+  queued_jobs: Job[];
+  options: Record<string, boolean>;
+  note?: string;
+};
+
+export type TranscodeSession = {
+  id: string;
+  asset_id: string;
+  profile: string;
+  playlist_url: string;
+  status: string;
+  created_at: string;
+  error?: string;
+  stderr_tail?: string;
+};
+
+export type TileSource = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  template: string;
+  attribution: string;
+  policy: string;
+  cache_dir?: string;
+};
+
+export type SettingsPayload = {
+  tabs: Array<{ id: string; label: string; runtime: boolean }>;
+  runtime_settings: Record<string, unknown>;
+  pending_settings?: Record<string, unknown>;
+  restart_required: Record<string, unknown>;
+  yaml_bound_fields: string[];
+  effective: Record<string, unknown>;
+};
+
+export type DBExport = {
+  id: string;
+  path: string;
+  size_bytes: number;
+  download_url: string;
+  created_at: string;
 };
 
 let csrfHeader = "X-CSRF-Token";
@@ -323,6 +452,56 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+function asArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeExplorer(value: ExplorerView | null | undefined): ExplorerView {
+  return {
+    current_path: value?.current_path ?? "",
+    parent_path: value?.parent_path,
+    folders: asArray(value?.folders),
+    files: asArray(value?.files),
+    file_count: value?.file_count ?? 0,
+    folder_count: value?.folder_count ?? 0,
+    total_bytes: value?.total_bytes ?? 0,
+    offset: value?.offset ?? 0,
+    limit: value?.limit ?? 0
+  };
+}
+
+function normalizeAsset(asset: Asset): Asset {
+  return {
+    ...asset,
+    metadata: asset.metadata ?? {},
+    locations: asArray(asset.locations)
+  };
+}
+
+function normalizeAlbumItems(value: AlbumItemPage | null | undefined): AlbumItemPage {
+  return {
+    items: asArray(value?.items).map((item) => ({ ...item, asset: normalizeAsset(item.asset) })),
+    page: value?.page ?? { limit: 0, offset: 0, total: 0 }
+  };
+}
+
+function normalizeFeatureCollection(value: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  return {
+    type: "FeatureCollection",
+    clustering: value?.clustering ?? "none",
+    zoom: value?.zoom ?? 10,
+    ...value,
+    features: asArray(value?.features as Array<Record<string, unknown>> | null | undefined)
+  };
+}
+
+function normalizeDuplicatePage(value: DuplicatePage | null | undefined): DuplicatePage {
+  return {
+    groups: asArray(value?.groups).map((group) => ({ ...group, assets: asArray(group.assets) })),
+    page: value?.page ?? { limit: 0, offset: 0, total: 0 }
+  };
+}
+
 export const api = {
   health: () => request<{ status: string }>("/api/v1/health"),
   me: () => request<AuthMe>("/api/v1/auth/me"),
@@ -342,43 +521,68 @@ export const api = {
       body: JSON.stringify({ name, scopes })
     }),
   status: () => request<BackendStatus>("/api/v1/backend/status"),
-  storages: () => request<StorageConfig[]>("/api/v1/storages"),
-  plugins: () => request<PluginManifest[]>("/api/v1/plugins"),
+  storages: async () => asArray(await request<StorageConfig[] | null>("/api/v1/storages")),
+  plugins: async () => asArray(await request<PluginManifest[] | null>("/api/v1/plugins")),
   plugin: (id: string) => request<PluginManifest>(`/api/v1/plugins/${encodeURIComponent(id)}`),
   pluginHealth: (id: string) => request<Record<string, unknown>>(`/api/v1/plugins/${encodeURIComponent(id)}/health`),
-  jobs: (query = "") => request<Job[]>(`/api/v1/jobs${query ? `?${query}` : ""}`),
+  jobs: async (query = "") => asArray(await request<Job[] | null>(`/api/v1/jobs${query ? `?${query}` : ""}`)),
   jobStats: () => request<JobStats>("/api/v1/jobs/stats"),
   job: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}`),
   jobLogs: (id: string) => request<{ logs: Job["logs"]; next_after_id: number }>(`/api/v1/jobs/${encodeURIComponent(id)}/logs`),
-  explorer: () => request<ExplorerRow[]>("/api/v1/explorer"),
-  explorerFolders: (path = "") =>
-    request<ExplorerView>(`/api/v1/explorer?view=folders&path=${encodeURIComponent(path)}&sort=name`),
-  asset: (id: string) => request<AssetDetail>(`/api/v1/assets/${encodeURIComponent(id)}`),
-  albums: () => request<Album[]>("/api/v1/albums?tree=true"),
+  explorer: async (query = "") => asArray(await request<ExplorerRow[] | null>(`/api/v1/explorer${query ? `?${query}` : ""}`)),
+  explorerFolders: (path = "", query = "") => {
+    const params = new URLSearchParams(query);
+    params.set("view", "folders");
+    params.set("path", path);
+    if (!params.has("sort")) params.set("sort", "name");
+    return request<ExplorerView | null>(`/api/v1/explorer?${params.toString()}`).then(normalizeExplorer);
+  },
+  asset: (id: string) =>
+    request<AssetDetail>(`/api/v1/assets/${encodeURIComponent(id)}`).then((detail) => ({
+      ...detail,
+      asset: normalizeAsset(detail.asset),
+      locations: asArray(detail.locations),
+      preview: detail.preview ?? { status: "not_implemented" },
+      content: detail.content ?? {},
+      timestamps: detail.timestamps ?? {},
+      metadata: detail.metadata ?? {}
+    })),
+  duplicates: (limit = 50, offset = 0) =>
+    request<DuplicatePage | null>(`/api/v1/duplicates?limit=${limit}&offset=${offset}`).then(normalizeDuplicatePage),
+  assetMonths: async (query = "") =>
+    asArray(await request<MonthBucket[] | null>(`/api/v1/assets/months${query ? `?${query}` : ""}`)),
+  albums: async () => asArray(await request<Album[] | null>("/api/v1/albums?tree=true")),
   createAlbum: (title: string, description = "", parentId = "") =>
     request<Album>("/api/v1/albums", {
       method: "POST",
       body: JSON.stringify({ title, description, parent_id: parentId })
     }),
-  albumItems: (albumId: string) => request<AlbumItemPage>(`/api/v1/albums/${encodeURIComponent(albumId)}/items`),
+  albumItems: (albumId: string) =>
+    request<AlbumItemPage | null>(`/api/v1/albums/${encodeURIComponent(albumId)}/items`).then(normalizeAlbumItems),
   addAlbumItems: (albumId: string, assetIds: string[]) =>
-    request<AlbumItemPage>(`/api/v1/albums/${encodeURIComponent(albumId)}/items`, {
+    request<AlbumItemPage | null>(`/api/v1/albums/${encodeURIComponent(albumId)}/items`, {
       method: "POST",
       body: JSON.stringify({ asset_ids: assetIds })
-    }),
+    }).then(normalizeAlbumItems),
   removeAlbumItem: (albumId: string, assetId: string) =>
     request<{ status: string }>(`/api/v1/albums/${encodeURIComponent(albumId)}/items/${encodeURIComponent(assetId)}`, {
       method: "DELETE"
     }),
-  tracks: () => request<TrackSummary[]>("/api/v1/tracks"),
-  gpsTracks: () => request<TrackSummary[]>("/api/v1/gps/tracks"),
-  gpsTrack: (id: string) => request<TrackDetail>(`/api/v1/gps/tracks/${encodeURIComponent(id)}`),
+  tracks: async () => asArray(await request<TrackSummary[] | null>("/api/v1/tracks")),
+  gpsTracks: async () => asArray(await request<TrackSummary[] | null>("/api/v1/gps/tracks")),
+  gpsTrack: (id: string) =>
+    request<TrackDetail>(`/api/v1/gps/tracks/${encodeURIComponent(id)}`).then((detail) => ({
+      ...detail,
+      points: asArray(detail.points)
+    })),
   gpsTrackPoints: (id: string, maxPoints = 500) =>
-    request<TrackDetail["points"]>(`/api/v1/gps/tracks/${encodeURIComponent(id)}/points?simplify=true&max_points=${maxPoints}`),
+    request<TrackDetail["points"] | null>(
+      `/api/v1/gps/tracks/${encodeURIComponent(id)}/points?simplify=true&max_points=${maxPoints}`
+    ).then(asArray),
   gpsTrackAssets: (id: string, offsetSeconds = 0) =>
     request<{ assets: Asset[]; page: { limit: number; offset: number; total: number } }>(
       `/api/v1/gps/tracks/${encodeURIComponent(id)}/assets?offset_seconds=${offsetSeconds}&include_geotagged=true&include_ungeotagged=true`
-    ),
+    ).then((page) => ({ ...page, assets: asArray(page.assets).map(normalizeAsset) })),
   snapTrackMedia: (id: string, offsetSeconds = 0) =>
     request<Job>(`/api/v1/gps/tracks/${encodeURIComponent(id)}/snap-media`, {
       method: "POST",
@@ -389,26 +593,105 @@ export const api = {
     request<TrackCandidate[]>(`/api/v1/sync/candidates?asset_id=${encodeURIComponent(assetId)}`),
   map: (params: Record<string, string | number | boolean> = {}) => {
     const query = new URLSearchParams({
-      bbox: "43.8,39.8,44.3,40.3",
       zoom: "10",
       cluster: "true"
     });
     Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
-    return request<Record<string, unknown>>(`/api/v1/map?${query.toString()}`);
+    return request<Record<string, unknown> | null>(`/api/v1/map?${query.toString()}`).then(normalizeFeatureCollection);
   },
   mapStatus: () => request<Record<string, unknown>>("/api/v1/map/status"),
+  tileSources: async () => asArray(await request<TileSource[] | null>("/api/v1/map/tile-sources")),
   stats: () => request<Stats>("/api/v1/stats"),
-  startDiscovery: () => request<Job>("/api/v1/discovery/start", { method: "POST" }),
-  startHash: () => request<Job>("/api/v1/hash/start", { method: "POST" }),
-  startMetadata: () =>
+  startDiscovery: (payload: {
+    storage: string;
+    prefixes: string[];
+    max_files: number;
+    max_bytes: number;
+    mark_missing?: boolean;
+    hash?: boolean;
+    metadata?: boolean;
+    previews?: boolean;
+  }) => request<Job>("/api/v1/discovery/start", { method: "POST", body: JSON.stringify(payload) }),
+  startIndexing: (payload: {
+    storage: string;
+    prefixes: string[];
+    max_files: number;
+    max_bytes: number;
+    include_extensions?: string[];
+    exclude_patterns?: string[];
+    index_files?: boolean;
+    hash?: boolean;
+    metadata?: boolean;
+    previews?: boolean;
+    parse_tracks?: boolean;
+    geotag_exif?: boolean;
+    snap_to_tracks?: boolean;
+    refresh_map?: boolean;
+  }) => request<IndexingStartResult>("/api/v1/indexing/start", { method: "POST", body: JSON.stringify(payload) }),
+  indexingLatest: (storage: string, prefixes: string[]) => {
+    const query = new URLSearchParams();
+    if (storage) query.set("storage", storage);
+    for (const prefix of prefixes) query.append("prefixes", prefix);
+    return request<IndexingStatus>(`/api/v1/indexing/latest?${query.toString()}`);
+  },
+  cancelIndexing: (pipelineId: string) =>
+    request<Record<string, unknown>>(`/api/v1/indexing/${encodeURIComponent(pipelineId)}/cancel`, { method: "POST" }),
+  startHash: (payload: {
+    scope?: string;
+    asset_id?: string;
+    asset_ids?: string[];
+    storage?: string;
+    prefix?: string;
+    prefixes?: string[];
+    album_id?: string;
+    max_files?: number;
+  } = {}) => request<Job>("/api/v1/hash/start", { method: "POST", body: JSON.stringify(payload) }),
+  startMetadata: (maxFiles = 50) =>
     request<Job>("/api/v1/metadata/enrich/start", {
       method: "POST",
-      body: JSON.stringify({ include_video: true, include_images: true, include_tracks: true, only_missing: false })
+      body: JSON.stringify({
+        include_video: true,
+        include_images: true,
+        include_tracks: true,
+        only_missing: false,
+        max_files: maxFiles
+      })
     }),
-  startPreviews: () =>
-    request<Job>("/api/v1/previews/start", { method: "POST", body: JSON.stringify({ only_missing: true }) }),
+  startMetadataScoped: (payload: {
+    storage?: string;
+    prefixes?: string[];
+    asset_ids?: string[];
+    max_files?: number;
+    only_missing?: boolean;
+  }) =>
+    request<Job>("/api/v1/metadata/enrich/start", {
+      method: "POST",
+      body: JSON.stringify({
+        include_video: true,
+        include_images: true,
+        include_tracks: true,
+        only_missing: payload.only_missing ?? false,
+        ...payload
+      })
+    }),
+  startPreviews: (maxFiles = 50) =>
+    request<Job>("/api/v1/previews/start", {
+      method: "POST",
+      body: JSON.stringify({ only_missing: true, media_kind: "photo", max_files: maxFiles })
+    }),
+  startPreviewsScoped: (payload: {
+    storage?: string;
+    prefixes?: string[];
+    asset_ids?: string[];
+    max_files?: number;
+    only_missing?: boolean;
+  }) =>
+    request<Job>("/api/v1/previews/start", {
+      method: "POST",
+      body: JSON.stringify({ only_missing: payload.only_missing ?? true, media_kind: "photo", ...payload })
+    }),
   previewStatus: () => request<{ cache_dir: string; stats: PreviewCacheStats }>("/api/v1/previews/status"),
-  previewCache: () => request<PreviewCacheEntry[]>("/api/v1/previews/cache?limit=50"),
+  previewCache: async () => asArray(await request<PreviewCacheEntry[] | null>("/api/v1/previews/cache?limit=50")),
   previewCleanup: (dryRun = true, maxBytes = 0) =>
     request<Record<string, unknown>>("/api/v1/previews/cleanup", {
       method: "POST",
@@ -425,8 +708,50 @@ export const api = {
   cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   retryJob: (id: string, force = false) =>
     request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, { method: "POST", body: JSON.stringify({ force }) }),
-  transcodingCapabilities: () => request<TranscodingCapabilities>("/api/v1/transcoding/capabilities"),
+  transcodingCapabilities: () =>
+    request<TranscodingCapabilities>("/api/v1/transcoding/capabilities").then((caps) => ({
+      ...caps,
+      encoders: asArray(caps.encoders),
+      hardware: caps.hardware ?? {}
+    })),
+  streamOptions: (assetId: string) => request<StreamOptions>(`/api/v1/media/${encodeURIComponent(assetId)}/stream-options`),
+  startTranscodeSession: (assetId: string, profile: string) =>
+    request<TranscodeSession>(`/api/v1/media/${encodeURIComponent(assetId)}/transcode-session`, {
+      method: "POST",
+      body: JSON.stringify({ profile })
+    }),
+  transcodeSessionStatus: (sessionId: string) =>
+    request<TranscodeSession>(`/api/v1/media/transcode-sessions/${encodeURIComponent(sessionId)}/status`),
+  stopTranscodeSession: (sessionId: string) =>
+    request<{ status: string }>(`/api/v1/media/transcode-sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   transcodingStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
-  vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status")
+  vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status"),
+  settings: () => request<SettingsPayload>("/api/v1/settings"),
+  pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
+  patchPendingSettings: (settings: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/settings/pending", {
+      method: "PATCH",
+      body: JSON.stringify(settings)
+    }),
+  clearPendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending", { method: "DELETE" }),
+  pluginSettings: (pluginId: string) =>
+    request<Record<string, unknown>>(`/api/v1/plugins/${encodeURIComponent(pluginId)}/settings`),
+  patchPluginSettings: (pluginId: string, settings: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/api/v1/plugins/${encodeURIComponent(pluginId)}/settings`, {
+      method: "PATCH",
+      body: JSON.stringify(settings)
+    }),
+  patchRuntimeSettings: (settings: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/settings/runtime", {
+      method: "PATCH",
+      body: JSON.stringify(settings)
+    }),
+  dbExport: () => request<DBExport>("/api/v1/admin/db/export", { method: "POST" }),
+  dbExports: async () => asArray(await request<DBExport[] | null>("/api/v1/admin/db/exports")),
+  dbImportPlan: (path: string) =>
+    request<Record<string, unknown>>("/api/v1/admin/db/import-plan", {
+      method: "POST",
+      body: JSON.stringify({ path, confirmation_phrase: "PLAN ONLY" })
+    })
 };

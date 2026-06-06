@@ -478,7 +478,7 @@ func MediaKind(ext, mimeType string) string {
 		return "photo"
 	case "mp4", "mov", "mkv", "avi", "webm", "m4v":
 		return "video"
-	case "gpx", "tcx", "fit", "kml":
+	case "gpx", "tcx", "fit", "kml", "kmz", "gpz":
 		return "track"
 	}
 	if strings.HasPrefix(mimeType, "image/") {

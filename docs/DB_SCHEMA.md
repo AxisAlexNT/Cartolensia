@@ -103,10 +103,12 @@ Current metadata keys used by the MVP are optional and additive:
 `contents`
 
 - `id uuid primary key`
-- `sha512 bytea unique not null`
+- `sha512 bytea not null`
 - `size_bytes bigint not null`
 - `first_hashed_at timestamptz not null default now()`
 - `collision_group_id uuid null`
+
+`migrations/007_content_identity.sql` replaces the early SHA-512-only uniqueness rule with a unique index on `(sha512, size_bytes)`. This keeps SHA-512 as a content signal without pretending it is the only identity dimension. Once a moved/copied file hashes to the same SHA-512 and size, the implementation can relink storage locations to the existing logical asset instead of creating a duplicate logical asset.
 
 `jobs`
 
@@ -364,7 +366,7 @@ Initial indexes:
 - `asset_locations(last_seen_at)`
 - `assets(media_kind)`
 - `assets(taken_at)`
-- `contents(sha512)`
+- `contents(sha512, size_bytes)`
 - `jobs(status, kind, created_at)`
 - `jobs(lease_expires_at) where status in ('running', 'cancel_requested')`
 - `jobs(next_run_at, created_at) where status = 'queued'`
@@ -397,3 +399,5 @@ Implemented migrations:
 - `migrations/003_auth_foundation.sql`: users, sessions, and API tokens for local auth bootstrap.
 - `migrations/004_job_lease_cancel_index.sql`: forward-only replacement of the lease-expiry index so it covers both `running` and `cancel_requested` jobs.
 - `migrations/005_ai_transcoding_contracts.sql`: AI/vector contract tables and transcoding preset/output placeholders without requiring pgvector or a transcoding engine.
+- `migrations/006_albums_map_tracks_dryrun_cache.sql`: albums, album items, asset geotags, GPS track summaries, scan runs, preview cache entries, plugin settings, and query indexes.
+- `migrations/007_content_identity.sql`: content uniqueness by SHA-512 plus size and moved-file relinking support.

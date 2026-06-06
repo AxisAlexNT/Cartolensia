@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
@@ -14,6 +15,9 @@ import (
 
 type GeneratePayload struct {
 	AssetIDs    []string `json:"asset_ids,omitempty"`
+	Storage     string   `json:"storage,omitempty"`
+	Prefix      string   `json:"prefix,omitempty"`
+	Prefixes    []string `json:"prefixes,omitempty"`
 	MediaKind   string   `json:"media_kind,omitempty"`
 	OnlyMissing bool     `json:"only_missing,omitempty"`
 	MaxFiles    int      `json:"max_files,omitempty"`
@@ -36,6 +40,12 @@ func DecodeGeneratePayload(raw any) GeneratePayload {
 	data, err := json.Marshal(raw)
 	if err == nil {
 		_ = json.Unmarshal(data, &payload)
+	}
+	payload.Storage = strings.TrimSpace(payload.Storage)
+	payload.Prefix = strings.TrimSpace(payload.Prefix)
+	payload.Prefixes = compactStrings(payload.Prefixes)
+	if payload.Prefix != "" {
+		payload.Prefixes = append([]string{payload.Prefix}, payload.Prefixes...)
 	}
 	return payload
 }
@@ -60,6 +70,10 @@ func (r Runner) Generate(ctx context.Context, job *jobs.Job) error {
 	targets := selectPreviewTargets(assets, payload, r.CacheDir)
 	total := int64(len(targets))
 	job.ProgressTotal = &total
+	if len(targets) == 0 {
+		reason := previewNoTargetsReason(assets, payload, r.CacheDir)
+		jobs.AddLog(job, "warn", reason)
+	}
 	if err := r.updateJob(ctx, *job); err != nil {
 		return err
 	}
@@ -124,6 +138,12 @@ func selectPreviewTargets(assets []catalog.Asset, payload GeneratePayload, cache
 				continue
 			}
 		}
+		if payload.Storage != "" && loc.StorageName != payload.Storage {
+			continue
+		}
+		if len(payload.Prefixes) > 0 && !relativePathInPrefixes(loc.RelativePath, payload.Prefixes) {
+			continue
+		}
 		if payload.MediaKind != "" && asset.MediaKind != payload.MediaKind {
 			continue
 		}
@@ -136,6 +156,56 @@ func selectPreviewTargets(assets []catalog.Asset, payload GeneratePayload, cache
 		}
 	}
 	return out
+}
+
+func previewNoTargetsReason(assets []catalog.Asset, payload GeneratePayload, cacheDir string) string {
+	scopedPhotos := 0
+	cached := 0
+	for _, asset := range assets {
+		loc, ok := catalog.FirstLocation(asset)
+		if !ok || loc.MediaKind != "photo" {
+			continue
+		}
+		if payload.Storage != "" && loc.StorageName != payload.Storage {
+			continue
+		}
+		if len(payload.Prefixes) > 0 && !relativePathInPrefixes(loc.RelativePath, payload.Prefixes) {
+			continue
+		}
+		scopedPhotos++
+		if InfoForAsset(cacheDir, asset).Status == StatusReady {
+			cached++
+		}
+	}
+	if scopedPhotos == 0 {
+		return "preview target count is 0: no photo assets match the selected scope"
+	}
+	if payload.OnlyMissing && cached == scopedPhotos {
+		return "preview target count is 0: all matching photo assets already have ready cached previews"
+	}
+	return "preview target count is 0: selection or filters matched no generateable assets"
+}
+
+func compactStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.Trim(strings.TrimSpace(value), "/")
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func relativePathInPrefixes(relativePath string, prefixes []string) bool {
+	relativePath = strings.Trim(strings.TrimSpace(relativePath), "/")
+	for _, prefix := range prefixes {
+		prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+		if prefix != "" && (relativePath == prefix || strings.HasPrefix(relativePath, prefix+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r Runner) updateJob(ctx context.Context, job jobs.Job) error {

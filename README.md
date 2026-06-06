@@ -20,7 +20,8 @@ Current implemented slices:
 * Virtual albums plugin MVP with nested albums, item membership, and map/explorer integration.
 * Server-side EXIF parsing for JPEG metadata and GPS extraction into typed geotag records.
 * GPX parsing, GPS track manager APIs, track/media lookup, conservative track-snapped geotags, map GeoJSON, live video-track sync link skeleton, ffprobe metadata extraction, and transcoding/AI/vector status contracts.
-* Photo/map plugin MVP in the WebUI using bundled OpenLayers vector layers; no CDN or remote tile dependency.
+* Photo/map plugin MVP in the WebUI using bundled OpenLayers vector layers and an optional Cartolensia OSM tile proxy/cache; no CDN.
+* Duplicate/content identity reporting based on SHA-512 plus size, with moved-file relinking once content equality is confirmed.
 * Persistent preview-cache index, preview-cache status endpoints, and dry-run cleanup controls.
 * Scoped discovery dry-run endpoint, scan-run report table, guarded `rclone_dryrun` example config, and future dry-run preflight script.
 * Synthetic fixture generation and bounded performance smoke scripts.
@@ -82,6 +83,24 @@ Run the backend against the development PostgreSQL service:
 
 ```bash
 go run ./cmd/cartolensia -config config/dev-postgres.yaml
+```
+
+Run with a configured TLS certificate/key:
+
+```yaml
+http:
+  addr: "127.0.0.1:18443"
+  tls_cert_file: "/path/to/cert.pem"
+  tls_key_file: "/path/to/key.pem"
+```
+
+For private local testing, Cartolensia can generate an in-memory self-signed certificate without writing key material to disk:
+
+```yaml
+http:
+  addr: "127.0.0.1:18443"
+  tls_auto_self_signed: true
+  tls_hosts: ["127.0.0.1", "localhost"]
 ```
 
 Run gated PostgreSQL integration tests against the development database:

@@ -2,9 +2,11 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,9 +25,162 @@ type Runner struct {
 	LeaseDuration time.Duration
 }
 
+type ScanPayload struct {
+	Storage           string   `json:"storage,omitempty"`
+	Prefix            string   `json:"prefix,omitempty"`
+	Prefixes          []string `json:"prefixes,omitempty"`
+	MaxFiles          int      `json:"max_files,omitempty"`
+	MaxBytes          int64    `json:"max_bytes,omitempty"`
+	IncludeExtensions []string `json:"include_extensions,omitempty"`
+	ExcludePatterns   []string `json:"exclude_patterns,omitempty"`
+	MarkMissing       bool     `json:"mark_missing,omitempty"`
+	Hash              bool     `json:"hash,omitempty"`
+	Metadata          bool     `json:"metadata,omitempty"`
+	Previews          bool     `json:"previews,omitempty"`
+}
+
+type HashPayload struct {
+	Scope    string   `json:"scope,omitempty"`
+	AssetID  string   `json:"asset_id,omitempty"`
+	AssetIDs []string `json:"asset_ids,omitempty"`
+	Storage  string   `json:"storage,omitempty"`
+	Prefix   string   `json:"prefix,omitempty"`
+	Prefixes []string `json:"prefixes,omitempty"`
+	AlbumID  string   `json:"album_id,omitempty"`
+	MaxFiles int      `json:"max_files,omitempty"`
+}
+
+func DecodeScanPayload(raw any) ScanPayload {
+	var payload ScanPayload
+	if raw == nil {
+		return payload
+	}
+	data, err := json.Marshal(raw)
+	if err == nil {
+		_ = json.Unmarshal(data, &payload)
+	}
+	payload.Storage = strings.TrimSpace(payload.Storage)
+	payload.Prefix = strings.TrimSpace(payload.Prefix)
+	payload.Prefixes = compactPayloadStrings(payload.Prefixes)
+	if payload.Prefix != "" {
+		payload.Prefixes = append([]string{payload.Prefix}, payload.Prefixes...)
+	}
+	payload.IncludeExtensions = normalizeExtensions(payload.IncludeExtensions)
+	payload.ExcludePatterns = compactPayloadStrings(payload.ExcludePatterns)
+	return payload
+}
+
+func DecodeHashPayload(raw any) HashPayload {
+	var payload HashPayload
+	if raw == nil {
+		return payload
+	}
+	data, err := json.Marshal(raw)
+	if err == nil {
+		_ = json.Unmarshal(data, &payload)
+	}
+	payload.Scope = strings.TrimSpace(payload.Scope)
+	payload.Storage = strings.TrimSpace(payload.Storage)
+	payload.Prefix = strings.TrimSpace(payload.Prefix)
+	payload.Prefixes = compactPayloadStrings(payload.Prefixes)
+	if payload.Prefix != "" {
+		payload.Prefixes = append([]string{payload.Prefix}, payload.Prefixes...)
+	}
+	payload.AssetID = strings.TrimSpace(payload.AssetID)
+	payload.AssetIDs = compactPayloadStrings(payload.AssetIDs)
+	if payload.AssetID != "" {
+		payload.AssetIDs = append([]string{payload.AssetID}, payload.AssetIDs...)
+	}
+	payload.AlbumID = strings.TrimSpace(payload.AlbumID)
+	return payload
+}
+
+func (p ScanPayload) bounded() bool {
+	return p.Storage != "" || len(p.Prefixes) > 0 || p.MaxFiles > 0 || p.MaxBytes > 0 ||
+		len(p.IncludeExtensions) > 0 || len(p.ExcludePatterns) > 0
+}
+
+func ValidateScanSafety(registry *storage.Registry, payload ScanPayload) error {
+	if registry == nil {
+		return fmt.Errorf("storage registry is not configured")
+	}
+	storages := registry.ListStorages()
+	if strings.EqualFold(payload.Storage, "all") {
+		if containsRealArchiveStorage(storages) {
+			return fmt.Errorf("storage=all is refused for real archive storage; choose one storage and a bounded adapter-relative prefix")
+		}
+		return nil
+	}
+	if payload.Storage != "" {
+		var selected []storage.Config
+		for _, storageConfig := range storages {
+			if storageConfig.Name == payload.Storage {
+				selected = append(selected, storageConfig)
+				break
+			}
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("unknown storage %q", payload.Storage)
+		}
+		storages = selected
+	}
+	if !containsRealArchiveStorage(storages) {
+		return nil
+	}
+	if payload.Storage == "" {
+		return fmt.Errorf("real archive discovery requires an explicit storage name")
+	}
+	if err := validateRealArchiveScanPayload(payload); err != nil {
+		return err
+	}
+	for _, storageConfig := range storages {
+		if !isRealArchiveRoot(storageConfig.Root) {
+			continue
+		}
+		adapter, err := registry.Adapter(storageConfig.Name)
+		if err != nil {
+			return err
+		}
+		if _, err := normalizeScanPrefixes(adapter, payload.Prefixes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidateHashSafety(registry *storage.Registry, payload HashPayload) error {
+	if registry == nil || !containsRealArchiveStorage(registry.ListStorages()) {
+		return nil
+	}
+	if len(payload.AssetIDs) > 0 {
+		return nil
+	}
+	if payload.Storage == "" || strings.EqualFold(payload.Storage, "all") {
+		return fmt.Errorf("hashing real archive assets requires explicit selected assets or storage plus prefix")
+	}
+	if len(payload.Prefixes) == 0 {
+		return fmt.Errorf("hashing real archive assets requires an adapter-relative prefix")
+	}
+	if payload.MaxFiles <= 0 {
+		return fmt.Errorf("hashing real archive assets requires max_files")
+	}
+	adapter, err := registry.Adapter(payload.Storage)
+	if err != nil {
+		return err
+	}
+	if _, err := normalizeScanPrefixes(adapter, payload.Prefixes); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 	if r.Registry == nil || r.Store == nil {
 		return jobs.Permanent(fmt.Errorf("discovery runner is not configured"))
+	}
+	payload := DecodeScanPayload(job.Payload)
+	if payload.MarkMissing {
+		return jobs.Permanent(fmt.Errorf("discovery mark_missing is not implemented and is not safe for bounded scans"))
 	}
 	if err := jobs.Start(job); err != nil {
 		return err
@@ -34,7 +189,41 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 	if err := r.updateJob(ctx, *job); err != nil {
 		return err
 	}
-	for _, storageConfig := range r.Registry.ListStorages() {
+	storages := r.Registry.ListStorages()
+	if strings.EqualFold(payload.Storage, "all") {
+		if containsRealArchiveStorage(storages) {
+			cause := jobs.Permanent(fmt.Errorf("storage=all is refused for real archive storage; choose one storage and a bounded adapter-relative prefix"))
+			_ = r.failJob(ctx, *job, cause)
+			return cause
+		}
+		payload.Storage = ""
+	}
+	if payload.Storage != "" {
+		var selected []storage.Config
+		for _, storageConfig := range storages {
+			if storageConfig.Name == payload.Storage {
+				selected = append(selected, storageConfig)
+				break
+			}
+		}
+		if len(selected) == 0 {
+			cause := jobs.Permanent(fmt.Errorf("unknown storage %q", payload.Storage))
+			_ = r.failJob(ctx, *job, cause)
+			return cause
+		}
+		storages = selected
+	}
+	if !payload.bounded() && containsRealArchiveStorage(storages) {
+		cause := jobs.Permanent(fmt.Errorf("unbounded discovery is refused for real archive storage; provide storage, adapter-relative prefixes, max_files, and max_bytes"))
+		_ = r.failJob(ctx, *job, cause)
+		return cause
+	}
+	if containsRealArchiveStorage(storages) && payload.Storage == "" {
+		cause := jobs.Permanent(fmt.Errorf("real archive discovery requires an explicit storage name"))
+		_ = r.failJob(ctx, *job, cause)
+		return cause
+	}
+	for _, storageConfig := range storages {
 		if err := r.checkCanceled(ctx, job); err != nil {
 			return err
 		}
@@ -42,7 +231,60 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 		if err != nil {
 			return jobs.Permanent(err)
 		}
-		files, err := adapter.ListRecursive(ctx)
+		var files []storage.FileInfo
+		if payload.bounded() {
+			if isRealArchiveRoot(storageConfig.Root) {
+				if err := validateRealArchiveScanPayload(payload); err != nil {
+					cause := jobs.Permanent(err)
+					_ = r.failJob(ctx, *job, cause)
+					return cause
+				}
+			}
+			prefixes, err := normalizeScanPrefixes(adapter, payload.Prefixes)
+			if err != nil {
+				cause := jobs.Permanent(err)
+				_ = r.failJob(ctx, *job, cause)
+				return cause
+			}
+			if len(prefixes) == 0 {
+				cause := jobs.Permanent(fmt.Errorf("bounded discovery prefixes are required"))
+				_ = r.failJob(ctx, *job, cause)
+				return cause
+			}
+			walked, report, err := adapter.ListRecursiveBounded(ctx, storage.WalkOptions{
+				Prefixes:          prefixes,
+				MaxFiles:          payload.MaxFiles,
+				MaxBytes:          payload.MaxBytes,
+				IncludeExtensions: payload.IncludeExtensions,
+				ExcludePatterns:   payload.ExcludePatterns,
+			})
+			if err != nil {
+				job.Counters.Errors++
+				jobs.AddLog(job, "error", err.Error())
+				cause := classifyStorageFailure(err)
+				_ = r.failJob(ctx, *job, cause)
+				return cause
+			}
+			files = walked
+			jobs.AddLog(job, "info", fmt.Sprintf("bounded scan storage %s prefixes %v: returned %d files, seen %d, complete=%t", storageConfig.Name, prefixes, report.FilesReturned, report.FilesSeen, report.Complete))
+			if !report.Complete {
+				jobs.AddLog(job, "warn", "bounded scan stopped at max_files or max_bytes limit; missing-file marking remains disabled")
+			}
+		} else {
+			if isRealArchiveRoot(storageConfig.Root) {
+				cause := jobs.Permanent(fmt.Errorf("unbounded discovery is refused for real archive storage"))
+				_ = r.failJob(ctx, *job, cause)
+				return cause
+			}
+			files, err = adapter.ListRecursive(ctx)
+			if err != nil {
+				job.Counters.Errors++
+				jobs.AddLog(job, "error", err.Error())
+				cause := classifyStorageFailure(err)
+				_ = r.failJob(ctx, *job, cause)
+				return cause
+			}
+		}
 		if err != nil {
 			job.Counters.Errors++
 			jobs.AddLog(job, "error", err.Error())
@@ -92,12 +334,80 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 	return r.completeJob(ctx, *job)
 }
 
+func containsRealArchiveStorage(storages []storage.Config) bool {
+	for _, storageConfig := range storages {
+		if isRealArchiveRoot(storageConfig.Root) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRealArchiveRoot(root string) bool {
+	cleanRoot := filepath.Clean(root)
+	realRoot := filepath.Clean("/mnt/Models/rclone")
+	return cleanRoot == realRoot || strings.HasPrefix(cleanRoot, realRoot+string(filepath.Separator))
+}
+
+func validateRealArchiveScanPayload(payload ScanPayload) error {
+	if strings.TrimSpace(payload.Storage) == "" || strings.EqualFold(payload.Storage, "all") {
+		return fmt.Errorf("real archive discovery requires one explicit storage name")
+	}
+	if len(payload.Prefixes) == 0 {
+		return fmt.Errorf("real archive discovery requires at least one adapter-relative prefix")
+	}
+	if payload.MaxFiles <= 0 {
+		return fmt.Errorf("real archive discovery requires max_files")
+	}
+	if payload.MaxBytes <= 0 {
+		return fmt.Errorf("real archive discovery requires max_bytes")
+	}
+	return nil
+}
+
+func normalizeScanPrefixes(adapter *storage.FSAdapter, prefixes []string) ([]string, error) {
+	out := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" || prefix == "." || prefix == "/" || prefix == ".." {
+			return nil, storage.ErrTraversal
+		}
+		if filepath.IsAbs(prefix) {
+			abs := filepath.Clean(prefix)
+			if evaluated, err := filepath.EvalSymlinks(abs); err == nil {
+				abs = evaluated
+			}
+			rel, err := filepath.Rel(adapter.Root(), abs)
+			if err != nil {
+				return nil, err
+			}
+			rel = filepath.ToSlash(rel)
+			if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || rel == "" {
+				return nil, storage.ErrTraversal
+			}
+			prefix = rel
+		}
+		rel, err := storage.NormalizeRelativePath(prefix)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rel)
+	}
+	return out, nil
+}
+
 func (r Runner) HashUnhashed(ctx context.Context, job *jobs.Job) error {
 	if r.Registry == nil || r.Store == nil {
 		return jobs.Permanent(fmt.Errorf("hash runner is not configured"))
 	}
+	payload := DecodeHashPayload(job.Payload)
 	if err := jobs.Start(job); err != nil {
 		return err
+	}
+	if err := r.validateHashSafety(payload); err != nil {
+		cause := jobs.Permanent(err)
+		_ = r.failJob(ctx, *job, cause)
+		return cause
 	}
 	jobs.AddLog(job, "info", "hash job started")
 	assets, err := r.Store.ListAssets(ctx)
@@ -105,12 +415,19 @@ func (r Runner) HashUnhashed(ctx context.Context, job *jobs.Job) error {
 		_ = r.failJob(ctx, *job, err)
 		return err
 	}
-	var targets []catalog.Asset
-	for _, asset := range assets {
-		loc, ok := catalog.FirstLocation(asset)
-		if ok && loc.HashStatus != catalog.HashStatusHashed {
-			targets = append(targets, asset)
-		}
+	targets, err := r.filterHashTargets(ctx, assets, payload)
+	if err != nil {
+		cause := jobs.Permanent(err)
+		_ = r.failJob(ctx, *job, cause)
+		return cause
+	}
+	if payload.MaxFiles > 0 && len(targets) > payload.MaxFiles {
+		targets = targets[:payload.MaxFiles]
+		jobs.AddLog(job, "warn", fmt.Sprintf("hash target list was limited to %d assets", payload.MaxFiles))
+	}
+	jobs.AddLog(job, "info", fmt.Sprintf("hash target count: %d", len(targets)))
+	if len(targets) == 0 {
+		jobs.AddLog(job, "warn", r.hashNoTargetsReason(assets, payload))
 	}
 	total := int64(len(targets))
 	job.ProgressTotal = &total
@@ -159,6 +476,116 @@ func (r Runner) HashUnhashed(ctx context.Context, job *jobs.Job) error {
 	}
 	jobs.AddLog(job, "info", "hash job completed")
 	return r.completeJob(ctx, *job)
+}
+
+func (r Runner) validateHashSafety(payload HashPayload) error {
+	return ValidateHashSafety(r.Registry, payload)
+}
+
+func (r Runner) filterHashTargets(ctx context.Context, assets []catalog.Asset, payload HashPayload) ([]catalog.Asset, error) {
+	assetFilter := map[string]struct{}{}
+	for _, assetID := range payload.AssetIDs {
+		assetFilter[assetID] = struct{}{}
+	}
+	if payload.AlbumID != "" {
+		limit := payload.MaxFiles
+		if limit <= 0 || limit > 500 {
+			limit = 500
+		}
+		page, err := r.Store.ListAlbumItems(ctx, catalog.AlbumItemQuery{AlbumID: payload.AlbumID, Limit: limit})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			assetFilter[item.Asset.ID] = struct{}{}
+		}
+	}
+	normalizedPrefixes := map[string][]string{}
+	if payload.Storage != "" && !strings.EqualFold(payload.Storage, "all") && len(payload.Prefixes) > 0 {
+		adapter, err := r.Registry.Adapter(payload.Storage)
+		if err != nil {
+			return nil, err
+		}
+		prefixes, err := normalizeScanPrefixes(adapter, payload.Prefixes)
+		if err != nil {
+			return nil, err
+		}
+		normalizedPrefixes[payload.Storage] = prefixes
+	}
+	var targets []catalog.Asset
+	for _, asset := range assets {
+		loc, ok := catalog.FirstLocation(asset)
+		if !ok || loc.HashStatus == catalog.HashStatusHashed {
+			continue
+		}
+		if len(assetFilter) > 0 {
+			if _, ok := assetFilter[asset.ID]; !ok {
+				continue
+			}
+		}
+		if payload.Storage != "" && !strings.EqualFold(payload.Storage, "all") && loc.StorageName != payload.Storage {
+			continue
+		}
+		if prefixes := normalizedPrefixes[loc.StorageName]; len(prefixes) > 0 && !relativePathInPrefixes(loc.RelativePath, prefixes) {
+			continue
+		}
+		targets = append(targets, asset)
+	}
+	return targets, nil
+}
+
+func (r Runner) hashNoTargetsReason(assets []catalog.Asset, payload HashPayload) string {
+	scoped := 0
+	hashed := 0
+	normalizedPrefixes := map[string][]string{}
+	if payload.Storage != "" && !strings.EqualFold(payload.Storage, "all") && len(payload.Prefixes) > 0 && r.Registry != nil {
+		if adapter, err := r.Registry.Adapter(payload.Storage); err == nil {
+			if prefixes, err := normalizeScanPrefixes(adapter, payload.Prefixes); err == nil {
+				normalizedPrefixes[payload.Storage] = prefixes
+			}
+		}
+	}
+	assetFilter := map[string]struct{}{}
+	for _, assetID := range payload.AssetIDs {
+		assetFilter[assetID] = struct{}{}
+	}
+	for _, asset := range assets {
+		loc, ok := catalog.FirstLocation(asset)
+		if !ok {
+			continue
+		}
+		if len(assetFilter) > 0 {
+			if _, ok := assetFilter[asset.ID]; !ok {
+				continue
+			}
+		}
+		if payload.Storage != "" && !strings.EqualFold(payload.Storage, "all") && loc.StorageName != payload.Storage {
+			continue
+		}
+		if prefixes := normalizedPrefixes[loc.StorageName]; len(prefixes) > 0 && !relativePathInPrefixes(loc.RelativePath, prefixes) {
+			continue
+		}
+		scoped++
+		if loc.HashStatus == catalog.HashStatusHashed {
+			hashed++
+		}
+	}
+	if scoped > 0 && scoped == hashed {
+		return fmt.Sprintf("hash target count is 0: all %d assets in scope are already hashed", scoped)
+	}
+	if scoped == 0 {
+		return "hash target count is 0: no assets match the selected scope"
+	}
+	return fmt.Sprintf("hash target count is 0: %d assets match scope but no unhashed files need work", scoped)
+}
+
+func relativePathInPrefixes(relativePath string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if relativePath == prefix || strings.HasPrefix(relativePath, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyStorageFailure(err error) error {

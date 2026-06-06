@@ -74,9 +74,28 @@ Scoped dry-run discovery is guarded separately:
 - `mark_missing` is rejected;
 - current dry-run behavior is report-only and does not index assets.
 
+When a configured storage root is `/mnt/Models/rclone` or under it, normal discovery and hashing have additional real-archive guardrails:
+
+- `storage=all` is rejected;
+- a concrete storage name is required;
+- a non-empty adapter-relative prefix is required;
+- `max_files` and `max_bytes` are required;
+- empty, root, dot, dot-dot, and archive-root-equivalent prefixes are rejected;
+- absolute archive prefixes are normalized only when they are safely inside the configured storage root.
+
+The guarded real-peek scripts use a temporary PostgreSQL Compose project, repo-local cache/runtime directories, and `strict_read_only` storage. They are not test fixtures and should stay supervised.
+
 ## Media And External Tools
 
-ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery or core startup. Transcoding capability APIs are inventory only; no transcoding job writes originals.
+ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery or core startup. Stream options expose direct original streaming by default. If ffmpeg is available, cache-scoped HLS transcode sessions can be started manually; generated HLS files stay under the configured Cartolensia cache directory and must never be written into original storage.
+
+The OpenStreetMap tile proxy is on-demand only. It caches tiles actively viewed by the browser under the Cartolensia cache directory, provides attribution metadata, and does not implement public-OSM region prefetching.
+
+Settings DB exports are metadata/config JSON files written under the configured Cartolensia cache export directory. Import planning is validation-only and does not perform destructive restore while the app is live.
+
+## HTTP/TLS
+
+Plain HTTP is the default and should be bound to localhost for development. HTTPS can use configured certificate/key files or an in-memory self-signed certificate via `http.tls_auto_self_signed`. Self-signed TLS is intended for private/local deployments and does not replace a real certificate for exposed services.
 
 ## AI And Dependency Provenance
 
@@ -98,3 +117,5 @@ Current added dependency notes:
 - API tokens are bearer secrets; store them carefully.
 - Sidecar plugin health probing is a stub and sidecar execution is not implemented.
 - Real archive scan procedures must be supervised and bounded until rescan/missing-file semantics are fully hardened.
+- The OSM tile cache depends on network availability unless the tiles have already been viewed and cached; future fully-offline tile packs are not implemented yet.
+- HLS playback support varies by browser; a future `hls.js` or progressive fragmented-MP4 fallback may be needed for universal browser playback.

@@ -54,3 +54,24 @@ func TestValidateRejectsWriteMode(t *testing.T) {
 		t.Fatal("expected unsupported mode error")
 	}
 }
+
+func TestValidateRequiresTLSCertAndKeyTogether(t *testing.T) {
+	cfg := Defaults()
+	cfg.HTTP.TLSCertFile = "cert.pem"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected partial TLS configuration error")
+	}
+	cfg.HTTP.TLSKeyFile = "key.pem"
+	if err := Validate(&cfg); err != nil {
+		t.Fatalf("expected complete TLS configuration to pass: %v", err)
+	}
+}
+
+func TestValidateAllowsAutoSelfSignedTLS(t *testing.T) {
+	cfg := Defaults()
+	cfg.HTTP.TLSAutoSelfSigned = true
+	cfg.HTTP.TLSHosts = []string{"cartolensia.local", "127.0.0.1"}
+	if err := Validate(&cfg); err != nil {
+		t.Fatalf("expected self-signed TLS configuration to pass: %v", err)
+	}
+}

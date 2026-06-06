@@ -36,6 +36,24 @@ Run the app against PostgreSQL:
 go run ./cmd/cartolensia -config config/dev-postgres.yaml
 ```
 
+Enable HTTPS with an existing certificate/key:
+
+```yaml
+http:
+  addr: "127.0.0.1:18443"
+  tls_cert_file: "/path/to/cert.pem"
+  tls_key_file: "/path/to/key.pem"
+```
+
+For private local testing only, use an in-memory self-signed certificate:
+
+```yaml
+http:
+  addr: "127.0.0.1:18443"
+  tls_auto_self_signed: true
+  tls_hosts: ["127.0.0.1", "localhost"]
+```
+
 Run gated DB integration tests:
 
 ```bash
@@ -83,12 +101,17 @@ Job APIs:
 
 Main job starters:
 
+- `POST /api/v1/indexing/start`
+- `GET /api/v1/indexing/latest`
+- `POST /api/v1/indexing/{pipeline_id}/cancel`
 - `POST /api/v1/discovery/start`
 - `POST /api/v1/discovery/dry-run`
 - `POST /api/v1/hash/start`
 - `POST /api/v1/metadata/enrich/start`
 - `POST /api/v1/previews/start`
 - `POST /api/v1/gps/tracks/{track_asset_id}/snap-media`
+
+Use the indexing pipeline from the WebUI for real-peek-style work. It preserves the same bounded storage/prefix scope across discovery, hash, metadata/EXIF, previews, GPS/KML/KMZ parsing, geotagging, and map refresh.
 
 Workers lease jobs, heartbeat while running, recover panics into failed jobs, and retry transient failures until `max_attempts`.
 
@@ -140,6 +163,64 @@ Example payload for fixture/synthetic storage:
 ```
 
 For a future real archive dry run, start from `config/rclone-dryrun.example.yaml` and `scripts/rclone-dry-run-preflight.sh`, but do not execute the script unless a supervised prompt explicitly authorizes it.
+
+## Real-Peek Helper Scripts
+
+The supervised real-peek workflow uses a temporary Compose project and a repo-local ignored runtime/cache directory:
+
+```bash
+CARTOLENSIA_REAL_PEEK_PREFIX='Cartolensia-photos' \
+CARTOLENSIA_REAL_PEEK_EXECUTE=1 \
+bash scripts/real-peek-start.sh
+```
+
+Important defaults:
+
+- storage name `rclone_peek`;
+- storage root `/mnt/Models/rclone`;
+- storage mode `strict_read_only`;
+- server bound to `127.0.0.1:18080`;
+- default `max_files=50`;
+- default `max_bytes=2147483648`;
+- missing marking disabled;
+- hash-after-index enabled for the bounded subset;
+- metadata/previews disabled unless their explicit environment toggles are set.
+
+Reset that temporary session only after inspection is complete:
+
+```bash
+bash scripts/real-peek-reset.sh
+```
+
+The reset script stops the app, removes the temporary PostgreSQL volume for project `cartolensia_realpeek`, and deletes `.cartolensia/runtime` plus `.cartolensia/realpeek-cache`. It does not touch `/mnt/Models/rclone`.
+
+## Map Tiles
+
+The WebUI uses OpenLayers. Vector asset/track layers work without network tiles. If the browser requests OSM base tiles, Cartolensia proxies them through:
+
+```text
+GET /api/v1/tiles/osm/{z}/{x}/{y}.png
+```
+
+The proxy validates tile coordinates, fetches on demand only, stores cache files under the configured Cartolensia cache directory, and provides no region prefetch endpoint against public OSM. Future offline tile packs should use user-provided PMTiles/MBTiles or a self-hosted tile service.
+
+## Settings And Exports
+
+The Settings page exposes runtime preferences, effective YAML-bound settings, restart-required fields, plugin status, and guarded DB metadata exports.
+
+Useful endpoints:
+
+- `GET /api/v1/settings`
+- `PATCH /api/v1/settings/runtime`
+- `POST /api/v1/admin/db/export`
+- `GET /api/v1/admin/db/exports`
+- `POST /api/v1/admin/db/import-plan`
+
+Exports are metadata/config JSON files written under the configured Cartolensia cache export directory. They are not destructive restore scripts.
+
+## Video Streaming
+
+Original video streaming uses `/api/v1/media/{asset_id}/original` with HTTP Range support. When `ffmpeg` is available, `/api/v1/media/{asset_id}/stream-options` exposes cache-scoped HLS transcode session profiles. Session output is written only under the configured Cartolensia cache directory and can be stopped through `DELETE /api/v1/media/transcode-sessions/{session_id}/stop`.
 
 ## Verification Commands
 
