@@ -38,13 +38,14 @@ Validation rules:
 
 ## Planned Built-In Stubs
 
-- `core.explorer`: file/folder browsing surface.
-- `core.discovery`: discovery and hash job orchestration.
-- `media.map`: map browsing placeholder.
-- `tracks.manager`: GPS track manager placeholder.
-- `video.transcode`: transcoding manager placeholder.
-- `ai.base`: AI hardware and model manager placeholder.
-- `ai.classification`: classification workflow placeholder.
+- `albums`: database-backed virtual album grouping skeleton.
+- `mapview`: map-first media browsing and clustering skeleton.
+- `gpstracks`: track ingestion, linking, and live video-track sync skeleton.
+- `transcoding`: safe transcoding manager skeleton; never writes into originals.
+- `ai-base`: AI runtime and future VectorStore skeleton.
+- `ai-classification`: transport/place classification workflow skeleton, depends on `ai-base`.
+
+The current backend exposes these through `GET /api/v1/plugins`. `POST /api/v1/plugins/rescan` reloads built-in and filesystem manifests from `plugins/<id>/plugin.yaml`.
 
 ## Future Runtime Types
 

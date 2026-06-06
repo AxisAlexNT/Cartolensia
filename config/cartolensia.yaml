@@ -1,0 +1,23 @@
+http:
+  addr: ":8080"
+
+database:
+  url: ""
+
+cache:
+  dir: ".cartolensia/cache"
+
+storages:
+  - name: fixture
+    kind: fs
+    root: "./testdata/media_fixture"
+    mode: strict_read_only
+
+plugins:
+  enabled:
+    - albums
+    - mapview
+    - gpstracks
+    - transcoding
+    - ai-base
+    - ai-classification

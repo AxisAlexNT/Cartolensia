@@ -1,0 +1,14 @@
+.git
+.agents
+.codex
+.cartolensia
+.env
+.env.*
+!.env.example
+node_modules
+webui/node_modules
+webui/dist
+tmp
+temp
+logs
+*.log

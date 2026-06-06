@@ -1,0 +1,23 @@
+http:
+  addr: "127.0.0.1:18080"
+
+database:
+  url: "postgres://cartolensia:cartolensia_dev_password@127.0.0.1:55432/cartolensia?sslmode=disable"
+
+cache:
+  dir: ".cartolensia/cache"
+
+storages:
+  - name: fixture
+    kind: fs
+    root: "./testdata/media_fixture"
+    mode: strict_read_only
+
+plugins:
+  enabled:
+    - albums
+    - mapview
+    - gpstracks
+    - transcoding
+    - ai-base
+    - ai-classification

@@ -5,7 +5,7 @@ APP_NAME := cartolensia
 WEBUI_DIR := webui
 GOCACHE ?= /tmp/cartolensia-go-build
 
-.PHONY: help check-tools backend-run backend-test webui-install webui-build compose-up compose-down smoke
+.PHONY: help check-tools backend-run backend-test webui-install webui-build compose-up compose-down smoke dev-db reset-dev-db
 
 help:
 > @printf 'Targets:\n'
@@ -39,5 +39,11 @@ compose-up:
 compose-down:
 > docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 
+dev-db:
+> bash scripts/dev-db.sh
+
+reset-dev-db:
+> bash scripts/reset-dev-db.sh
+
 smoke:
-> @bash scripts/run-smoke.sh
+> @bash scripts/smoke-test.sh

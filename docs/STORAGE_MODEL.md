@@ -76,3 +76,23 @@ The only intended storage for implementation testing is:
 - mode: `strict_read_only`.
 
 Do not access `/mnt/Models/rclone` during the MVP preparation or the first unattended implementation run.
+
+## Implemented MVP Behavior
+
+- `internal/storage` parses and normalizes `fs://<storage>/<relative-path>` URLs.
+- Relative paths are slash-normalized and must stay inside the configured root.
+- Empty paths, absolute paths, `..`, and traversal attempts are rejected.
+- Recursive discovery skips symlink entries and non-file directories.
+- File metadata includes URL, relative path, file name, extension, MIME, size, mtime, and media kind.
+- Write, delete, move, and mkdir operations return a read-only error.
+- Original streaming opens files only through the registry and serves them read-only with HTTP Range support through the Go HTTP stack.
+
+## Non-Media Files
+
+Discovery scans storage roots but indexes only media-like kinds for the MVP:
+
+- photos/images;
+- videos;
+- GPS/track files.
+
+Fixture helper files such as README and manifest JSON are intentionally skipped.

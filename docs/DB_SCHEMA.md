@@ -30,6 +30,13 @@ The MVP must start without optional extensions.
 - `value_json jsonb not null`
 - `updated_at timestamptz not null default now()`
 
+`config_snapshots`
+
+- `id uuid primary key`
+- `source text not null`
+- `effective_config jsonb not null`
+- `created_at timestamptz not null default now()`
+
 `storage_backends`
 
 - `id uuid primary key`
@@ -61,9 +68,11 @@ The MVP must start without optional extensions.
 - `file_name text not null`
 - `extension text not null`
 - `mime_type text not null`
+- `media_kind text not null`
 - `size_bytes bigint not null`
 - `mtime timestamptz not null`
 - `content_id uuid null references contents(id)`
+- `hash_status text not null default 'unhashed'`
 - `last_seen_at timestamptz not null default now()`
 - `missing_at timestamptz null`
 
@@ -81,6 +90,7 @@ The MVP must start without optional extensions.
 - `kind text not null`
 - `status text not null`
 - `payload_json jsonb not null default '{}'::jsonb`
+- `counters_json jsonb not null default '{}'::jsonb`
 - `progress_current bigint not null default 0`
 - `progress_total bigint null`
 - `attempts int not null default 0`
@@ -107,8 +117,34 @@ The MVP must start without optional extensions.
 - `name text not null`
 - `version text not null`
 - `enabled boolean not null default true`
+- `runtime text not null default 'builtin'`
+- `status text not null default 'stub'`
 - `manifest_json jsonb not null`
 - `loaded_at timestamptz not null default now()`
+
+`track_points`
+
+- `id bigserial primary key`
+- `track_asset_id uuid null references assets(id) on delete cascade`
+- `recorded_at timestamptz not null`
+- `lat double precision not null`
+- `lon double precision not null`
+- `elevation_m double precision null`
+- `speed_mps double precision null`
+- `source text not null default 'gpx'`
+
+`asset_track_links`
+
+- `id uuid primary key`
+- `asset_id uuid not null references assets(id) on delete cascade`
+- `track_asset_id uuid not null references assets(id) on delete cascade`
+- `match_status text not null default 'candidate'`
+- `overlap_start timestamptz null`
+- `overlap_end timestamptz null`
+- `time_offset_ms bigint not null default 0`
+- `confidence double precision null`
+- `created_at timestamptz not null default now()`
+- `updated_at timestamptz not null default now()`
 
 ## Indexes
 
@@ -124,6 +160,8 @@ Initial indexes:
 - `jobs(status, kind, created_at)`
 - `jobs(lease_expires_at) where status = 'running'`
 - `job_logs(job_id, created_at desc)`
+- `track_points(track_asset_id, recorded_at)`
+- `asset_track_links(asset_id)`
 
 Future geospatial indexes:
 
@@ -136,3 +174,5 @@ Future geospatial indexes:
 - Migrations must be deterministic and idempotence-tested through the migration runner.
 - Do not use destructive migrations without an explicit rollback or backup strategy.
 - Extension creation should use `CREATE EXTENSION IF NOT EXISTS` only for optional capabilities and tolerate absence where PostgreSQL permissions do not allow installation.
+
+The implemented migration is `migrations/001_core.sql`.

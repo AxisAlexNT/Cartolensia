@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"log"
@@ -11,37 +10,38 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-)
 
-const version = "dev"
+	"github.com/AxisAlexNT/Cartolensia/internal/app"
+)
 
 func main() {
 	versionFlag := flag.Bool("version", false, "print version and exit")
-	addr := flag.String("addr", envOrDefault("CARTOLENSIA_HTTP_ADDR", ":8080"), "HTTP listen address")
+	configPath := flag.String("config", "", "config file path")
 	flag.Parse()
 
 	if *versionFlag {
-		log.Printf("cartolensia %s", version)
+		log.Printf("cartolensia %s", app.Version)
 		return
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"version": version})
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cartolensia, err := app.New(ctx, *configPath)
+	if err != nil {
+		log.Fatalf("startup failed: %v", err)
+	}
+	defer cartolensia.Close()
 
 	server := &http.Server{
-		Addr:              *addr,
-		Handler:           mux,
+		Addr:              cartolensia.Config.HTTP.Addr,
+		Handler:           cartolensia.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("cartolensia listening on %s", *addr)
+		log.Printf("cartolensia listening on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
 		errCh <- server.ListenAndServe()
 	}()
 
@@ -60,20 +60,5 @@ func main() {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server failed: %v", err)
 		}
-	}
-}
-
-func envOrDefault(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		log.Printf("write response failed: %v", err)
 	}
 }

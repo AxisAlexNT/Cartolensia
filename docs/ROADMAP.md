@@ -9,16 +9,23 @@
 
 ## Phase 1: Core Vertical Slice
 
-- Config loader.
-- Embedded migrations.
-- Strict read-only filesystem storage.
-- Plugin manifest loader and dependency sort.
-- Persistent job queue.
-- Fixture discovery.
-- Streaming SHA-512 hashing.
-- REST API.
-- Vue Explorer, Jobs, and Settings shell.
-- Smoke workflow.
+- Config loader. Implemented.
+- PostgreSQL migrations and config snapshots. Implemented.
+- Strict read-only filesystem storage. Implemented.
+- Plugin manifest loader and dependency sort. Implemented.
+- Persistent job queue in PostgreSQL and memory fallback. Implemented for synchronous jobs.
+- Fixture discovery. Implemented.
+- Streaming SHA-512 hashing. Implemented.
+- REST API. Implemented for MVP endpoints.
+- Vue Explorer, Discovery, Storages, Plugins, Stats, and plugin stubs. Implemented.
+- Smoke workflow. Implemented.
+
+Remaining Phase 1 hardening:
+
+- asynchronous worker loop with durable leases;
+- richer PostgreSQL integration tests;
+- auth interface stub;
+- embedded migrations via Go `embed` instead of filesystem migration loading.
 
 ## Phase 2: Media Usability
 

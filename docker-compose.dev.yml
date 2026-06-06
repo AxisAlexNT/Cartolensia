@@ -1,6 +1,12 @@
 services:
+  app:
+    profiles:
+      - app
+    volumes:
+      - ./testdata/media_fixture:/app/testdata/media_fixture:ro
+
   postgres:
     ports:
-      - "${CARTOLENSIA_POSTGRES_PORT:-5432}:5432"
+      - "${CARTOLENSIA_POSTGRES_PORT:-55432}:5432"
     environment:
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
