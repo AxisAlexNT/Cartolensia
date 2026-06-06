@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
+	exifmeta "github.com/AxisAlexNT/Cartolensia/internal/exif"
 	"github.com/AxisAlexNT/Cartolensia/internal/gpx"
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/media"
@@ -178,11 +179,36 @@ func (r Runner) enrichImage(ctx context.Context, asset catalog.Asset, loc catalo
 	if err != nil {
 		return nil
 	}
-	return r.Store.UpdateAssetMetadata(ctx, asset.ID, nil, map[string]any{
+	metadata := map[string]any{
 		"width":                 cfg.Width,
 		"height":                cfg.Height,
 		"metadata_extracted_at": time.Now().UTC().Format(time.RFC3339),
-	})
+	}
+	var takenAt *time.Time
+	if _, err := file.Seek(0, 0); err == nil {
+		result, err := exifmeta.Extract(file)
+		if err == nil {
+			for key, value := range result.Metadata {
+				metadata[key] = value
+			}
+			takenAt = result.TakenAt
+			if result.GPS != nil {
+				metadata["lat"] = result.GPS.Lat
+				metadata["lon"] = result.GPS.Lon
+				confidence := 1.0
+				_, _ = r.Store.UpsertAssetGeo(ctx, catalog.AssetGeo{
+					AssetID:    asset.ID,
+					Lat:        result.GPS.Lat,
+					Lon:        result.GPS.Lon,
+					Source:     "exif",
+					Confidence: &confidence,
+					TakenAt:    takenAt,
+					Metadata:   map[string]any{"source": "exif"},
+				}, false)
+			}
+		}
+	}
+	return r.Store.UpdateAssetMetadata(ctx, asset.ID, takenAt, metadata)
 }
 
 func (r Runner) enrichVideo(ctx context.Context, asset catalog.Asset, loc catalog.Location) error {
@@ -262,6 +288,21 @@ func (r Runner) enrichGPX(ctx context.Context, asset catalog.Asset, loc catalog.
 		metadata["elevation_min_m"] = *analysis.ElevationMinM
 		metadata["elevation_max_m"] = *analysis.ElevationMaxM
 	}
+	_ = r.Store.UpsertGPSTrackSummary(ctx, catalog.TrackSummary{
+		TrackAssetID: asset.ID,
+		Name:         asset.DisplayName,
+		PointCount:   analysis.PointCount,
+		StartTime:    analysis.StartTime,
+		EndTime:      analysis.EndTime,
+		MinLat:       analysis.MinLat,
+		MinLon:       analysis.MinLon,
+		MaxLat:       analysis.MaxLat,
+		MaxLon:       analysis.MaxLon,
+		DistanceM:    analysis.DistanceM,
+		DurationSec:  analysis.DurationSeconds,
+		ElevationMin: analysis.ElevationMinM,
+		ElevationMax: analysis.ElevationMaxM,
+	}, map[string]any{"source": "gpx"})
 	var takenAt *time.Time
 	if analysis.StartTime != nil {
 		t := analysis.StartTime.UTC()

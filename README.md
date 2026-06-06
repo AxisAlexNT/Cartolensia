@@ -16,8 +16,13 @@ Current implemented slices:
 * Fast discovery, lazy SHA-512 hashing, explicit metadata enrichment, and preview generation jobs.
 * PostgreSQL-backed job leases, heartbeats, cancellation, retries, logs, stats, and worker panic recovery.
 * Local admin bootstrap, login/logout, password change, sessions, API tokens, token scopes, HttpOnly cookies, and CSRF protection for cookie-authenticated write requests.
-* Explorer folder grouping, asset detail, original read-only streaming, and preview endpoints.
-* GPX parsing, track APIs, map GeoJSON, live video-track sync link skeleton, ffprobe metadata extraction, and transcoding/AI/vector status contracts.
+* Explorer folder grouping, DB-backed asset filtering, asset detail, original read-only streaming, and preview endpoints.
+* Virtual albums plugin MVP with nested albums, item membership, and map/explorer integration.
+* Server-side EXIF parsing for JPEG metadata and GPS extraction into typed geotag records.
+* GPX parsing, GPS track manager APIs, track/media lookup, conservative track-snapped geotags, map GeoJSON, live video-track sync link skeleton, ffprobe metadata extraction, and transcoding/AI/vector status contracts.
+* Photo/map plugin MVP in the WebUI using bundled OpenLayers vector layers; no CDN or remote tile dependency.
+* Persistent preview-cache index, preview-cache status endpoints, and dry-run cleanup controls.
+* Scoped discovery dry-run endpoint, scan-run report table, guarded `rclone_dryrun` example config, and future dry-run preflight script.
 * Synthetic fixture generation and bounded performance smoke scripts.
 
 ## Core ideas
@@ -91,6 +96,14 @@ Generate a synthetic fixture outside the repo and run a bounded performance smok
 CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/generate-synthetic-fixture.sh
 CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/perf-smoke.sh
 ```
+
+Run the bounded worker stress entrypoint:
+
+```bash
+bash scripts/worker-stress-test.sh
+```
+
+Future real-archive dry-run preparation is documented in `docs/REAL_ARCHIVE_DRY_RUN.md`. Do not run `scripts/rclone-dry-run-preflight.sh` unless a supervised prompt explicitly approves it and sets the required environment variables.
 
 ## Auth Modes
 

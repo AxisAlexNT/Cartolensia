@@ -84,9 +84,11 @@ Job APIs:
 Main job starters:
 
 - `POST /api/v1/discovery/start`
+- `POST /api/v1/discovery/dry-run`
 - `POST /api/v1/hash/start`
 - `POST /api/v1/metadata/enrich/start`
 - `POST /api/v1/previews/start`
+- `POST /api/v1/gps/tracks/{track_asset_id}/snap-media`
 
 Workers lease jobs, heartbeat while running, recover panics into failed jobs, and retry transient failures until `max_attempts`.
 
@@ -104,6 +106,40 @@ The scripts generate dummy files only. Remove the temporary root when done:
 ```bash
 rm -rf /tmp/cartolensia_synthetic_media
 ```
+
+Run bounded worker/job stress checks:
+
+```bash
+bash scripts/worker-stress-test.sh
+```
+
+DB-backed worker stress remains gated:
+
+```bash
+CARTOLENSIA_RUN_DB_TESTS=1 CARTOLENSIA_TEST_DATABASE_URL=postgres://... bash scripts/worker-stress-test.sh
+```
+
+## Dry-Run Reports
+
+Scoped discovery dry runs are report-only and require non-empty prefixes. Defaults are conservative: `max_files <= 50`, `max_bytes` defaults to 2 GiB, and missing marking is rejected.
+
+Example payload for fixture/synthetic storage:
+
+```json
+{
+  "storage": "fixture",
+  "prefixes": ["photos"],
+  "max_files": 50,
+  "max_bytes": 2147483648,
+  "include_extensions": ["jpg", "jpeg", "png"],
+  "hash": false,
+  "metadata": false,
+  "previews": false,
+  "mark_missing": false
+}
+```
+
+For a future real archive dry run, start from `config/rclone-dryrun.example.yaml` and `scripts/rclone-dry-run-preflight.sh`, but do not execute the script unless a supervised prompt explicitly authorizes it.
 
 ## Verification Commands
 

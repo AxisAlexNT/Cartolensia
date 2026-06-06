@@ -20,8 +20,9 @@ Runtime migrations are embedded into the Go binary from `migrations/*.sql`. Disk
 - `internal/database`: pgx-backed PostgreSQL connection, migrations, config snapshots, plugin/storage upserts, catalog store, jobs, logs, stats, and capability detection.
 - `internal/storage`: universal `fs://storage/path` URLs, strict read-only filesystem adapter, traversal prevention, MIME/media-kind detection, and safe open/list/stat behavior.
 - `internal/catalog`: logical assets, storage locations, content/hash status, folder-style Explorer grouping, stats, and store contract.
-- `internal/discovery`: fast fixture-safe discovery and lazy SHA-512 hashing handlers with cancellation checks. Discovery intentionally avoids heavy media parsing; metadata enrichment is a separate job.
-- `internal/metadata`: explicit metadata enrichment jobs for images, videos, and GPX tracks. Image dimensions use Go decoders, video metadata uses optional ffprobe, and GPX enrichment computes point counts, bbox, duration, distance, and elevation where possible.
+- `internal/discovery`: fast fixture-safe discovery, bounded prefix dry-run reports, and lazy SHA-512 hashing handlers with cancellation checks. Discovery intentionally avoids heavy media parsing; metadata enrichment is a separate job.
+- `internal/exif`: small server-side EXIF wrapper around `github.com/rwcarlsen/goexif` with safe no-EXIF handling and conservative timezone policy.
+- `internal/metadata`: explicit metadata enrichment jobs for images, videos, GPX tracks, and track-snapped geotags. Image dimensions use Go decoders, JPEG EXIF can populate metadata and typed `asset_geo`, video metadata uses optional ffprobe, and GPX enrichment computes point counts, bbox, duration, distance, and elevation where possible.
 - `internal/jobs`: job model, state transitions, counters, progress, logs, cancellation, leases, and retry scheduling.
 - `internal/workers`: async worker loop, lease acquisition, heartbeats, panic recovery, and graceful stop.
 - `internal/auth`: local admin bootstrap, password hashing, password rotation, session/API-token auth, token scopes, CSRF flow, persisted auth store contracts, and explicit `dev_no_auth` development mode.
@@ -59,20 +60,42 @@ Implemented endpoints:
 - `POST /api/v1/jobs/{id}/cancel`
 - `POST /api/v1/jobs/{id}/retry`
 - `POST /api/v1/discovery/start`
+- `POST /api/v1/discovery/dry-run`
+- `GET /api/v1/discovery/dry-run/{job_id}/report`
 - `POST /api/v1/hash/start`
 - `POST /api/v1/metadata/enrich/start`
 - `POST /api/v1/previews/start`
+- `GET /api/v1/previews/status`
+- `GET /api/v1/previews/cache`
+- `POST /api/v1/previews/cleanup`
 - `GET /api/v1/assets`
 - `GET /api/v1/assets/{id}`
+- `GET /api/v1/albums`
+- `POST /api/v1/albums`
+- `GET /api/v1/albums/{id}`
+- `PATCH /api/v1/albums/{id}`
+- `DELETE /api/v1/albums/{id}`
+- `GET /api/v1/albums/{id}/items`
+- `POST /api/v1/albums/{id}/items`
+- `DELETE /api/v1/albums/{id}/items/{asset_id}`
 - `GET /api/v1/explorer`
 - `GET /api/v1/tracks`
 - `GET /api/v1/tracks/{track_asset_id}`
+- `GET /api/v1/gps/tracks`
+- `GET /api/v1/gps/tracks/{track_asset_id}`
+- `PATCH /api/v1/gps/tracks/{track_asset_id}`
+- `GET /api/v1/gps/tracks/{track_asset_id}/points`
+- `GET /api/v1/gps/tracks/{track_asset_id}/assets`
+- `POST /api/v1/gps/tracks/{track_asset_id}/snap-media`
 - `GET /api/v1/sync/candidates?asset_id=...`
 - `GET /api/v1/sync/links`
 - `POST /api/v1/sync/links`
 - `DELETE /api/v1/sync/links/{id}`
 - `GET /api/v1/videos/{asset_id}/track-sync?time_ms=...`
 - `GET /api/v1/map?bbox=minLon,minLat,maxLon,maxLat&zoom=...`
+- `GET /api/v1/map/status`
+- `GET /api/v1/map/assets`
+- `GET /api/v1/map/tracks`
 - `GET /api/v1/transcoding/status`
 - `GET /api/v1/transcoding/capabilities`
 - `GET /api/v1/transcoding/presets`
@@ -98,8 +121,9 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Discovery page with scan and hash actions;
 - Jobs page with counts, detail/log view, cancel, and retry controls;
 - Metadata page with explicit enrichment and preview generation actions;
-- GPS Tracks page backed by parsed GPX track points and enriched distance/duration metadata;
-- Map page backed by GeoJSON from the map API with simple SVG rendering and point clustering status;
+- Albums page for virtual album creation, item management, and map handoff;
+- GPS Tracks page backed by parsed GPX track points and enriched distance/duration metadata, including media lookup and snap-media controls;
+- Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, clustering, album filters, media filters, and track filters;
 - Storages page;
 - Plugins page and plugin detail health/status surface;
 - Stats page;
@@ -117,6 +141,8 @@ Browser route state is saved in `localStorage`.
 - Path traversal and absolute paths are rejected before filesystem access.
 - `..` path segments are rejected before cleaning, including encoded URL traversal attempts.
 - Symlinks are skipped during recursive discovery and opening a symlink that escapes the root is rejected.
+- Scoped discovery dry-run uses required non-empty prefixes, max-files/max-bytes defaults, strict read-only storage, no missing marking, and report-only behavior.
+- Scan-run reports and preview-cache records are stored in PostgreSQL/memory metadata only; generated previews stay under the configured cache root.
 - Write-like endpoints pass through auth and authorization hooks; `dev_no_auth` is the default fixture mode.
 - `local` auth mode requires configured admin email and a password supplied through an environment variable or ignored bootstrap file. No production password is hardcoded.
 - Cookie-authenticated write requests require a CSRF header obtained from `GET /api/v1/auth/csrf`. Bearer API tokens bypass CSRF but must carry sufficient scopes.

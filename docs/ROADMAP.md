@@ -35,29 +35,30 @@
 
 Remaining Phase 1 hardening:
 
-- DB-backed sustained worker stress tests beyond fixture integration tests.
+- DB-backed sustained worker stress tests beyond fixture integration tests. Partially implemented via `scripts/worker-stress-test.sh`; DB stress remains gated by environment variables.
 - Rescan/missing-file state transitions for explicitly bounded scopes.
-- Richer map rendering with real map tiles/OpenLayers.
-- Persistent preview-cache index/table if cache management needs cross-process introspection.
+- Real map tiles. OpenLayers vector rendering is implemented without tile dependencies.
 
 ## Phase 2: Media Usability
 
 - Original streaming with robust Range and HEAD support. Implemented for read-only filesystem storage.
 - Image previews generated on demand and by queued job into a cache outside originals. Implemented for Go-decodable images.
-- Metadata enrichment job for image dimensions, ffprobe video metadata, and GPX analysis. Implemented.
+- Persistent preview-cache index/table and status/cleanup APIs. Implemented.
+- Metadata enrichment job for image dimensions, JPEG EXIF metadata/GPS, ffprobe video metadata, and GPX analysis. Implemented.
 - Job dashboard APIs and WebUI controls for stats/detail/logs/cancel/retry. Implemented.
-- Explorer/asset list filtering, sorting, pagination headers. Implemented over current store result sets.
+- Explorer/asset list filtering, sorting, pagination headers. Implemented; PostgreSQL asset queries use DB-backed filtering for common cases.
 - Missing-file detection and rescan behavior. Future work.
 - Video poster generation. Future work.
 
 ## Phase 3: Map And Tracks Foundation
 
+- Virtual Albums plugin MVP. Implemented.
 - Track ingestion from GPX. Implemented.
 - Track analysis with bbox, distance, duration, elevation, and simplification. Implemented.
-- Basic map GeoJSON API with bbox/time/media filters and deterministic point clustering. Implemented.
-- Basic SVG map WebUI without external tile dependency. Implemented.
+- GPS Track Manager plugin MVP with detail, point queries, media lookup, offset control, and snap-media job. Implemented.
+- Photo/map plugin MVP with GeoJSON APIs, album/media/source/track filters, deterministic point clustering, typed `asset_geo`, and OpenLayers WebUI. Implemented.
 - Live video-track sync candidates, manual links, deletion, and marker interpolation API. Implemented.
-- Real map tiles/OpenLayers and richer geotag editing. Future work.
+- Real map tiles and richer geotag editing. Future work.
 
 ## Phase 4: Plugin Expansion
 
@@ -80,4 +81,5 @@ Remaining Phase 1 hardening:
 - Better duplicate workflows without destructive defaults.
 - Observability and admin status pages.
 - Offline resource packaging.
+- Scoped dry-run readiness for future tiny real-archive tests. Implemented with report-only API, scan-run records, guarded config/script examples, and strict default limits.
 - Performance tests on synthetic large datasets. Implemented as bounded scripts; more metrics remain future work.

@@ -1,7 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import Map from "ol/Map";
+import View from "ol/View";
+import GeoJSON from "ol/format/GeoJSON";
+import VectorLayer from "ol/layer/Vector";
+import VectorSource from "ol/source/Vector";
+import { fromLonLat } from "ol/proj";
+import { Circle as CircleStyle, Fill, Stroke, Style } from "ol/style";
+import "ol/ol.css";
 import {
   api,
+  type Album,
+  type AlbumItemPage,
   type APIToken,
   type AssetDetail,
   type BackendStatus,
@@ -10,9 +20,13 @@ import {
   type Job,
   type JobStats,
   type PluginManifest,
+  type PreviewCacheEntry,
+  type PreviewCacheStats,
   type Principal,
+  type ScanRun,
   type Stats,
   type StorageConfig,
+  type TrackDetail,
   type TrackSummary,
   type TranscodingCapabilities
 } from "./api";
@@ -58,10 +72,35 @@ const tokenScopes = ref("read,jobs:write");
 const tokenSecret = ref("");
 const apiTokens = ref<APIToken[]>([]);
 const tracks = ref<TrackSummary[]>([]);
+const selectedTrack = ref<TrackDetail | null>(null);
+const trackAssets = ref<AssetDetail["asset"][]>([]);
+const trackOffsetSeconds = ref(0);
 const mapData = ref<Record<string, unknown> | null>(null);
+const mapStatus = ref<Record<string, unknown> | null>(null);
+const mapMediaKind = ref("");
+const mapCluster = ref(true);
+const mapAlbumId = ref("");
+const mapTrackId = ref("");
+const mapElement = ref<HTMLDivElement | null>(null);
+let olMap: Map | null = null;
+const mapSource = new VectorSource();
 const transcodingCapabilities = ref<TranscodingCapabilities | null>(null);
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const vectorStatus = ref<Record<string, unknown> | null>(null);
+const albums = ref<Album[]>([]);
+const selectedAlbumId = ref("");
+const albumItems = ref<AlbumItemPage | null>(null);
+const newAlbumTitle = ref("");
+const newAlbumDescription = ref("");
+const selectedAssets = ref<Set<string>>(new Set());
+const previewCacheStats = ref<PreviewCacheStats | null>(null);
+const previewCache = ref<PreviewCacheEntry[]>([]);
+const dryRunStorage = ref("");
+const dryRunPrefix = ref("photos");
+const dryRunMaxFiles = ref(50);
+const dryRunMaxBytes = ref(2147483648);
+const dryRunExtensions = ref("jpg,jpeg,png,gpx");
+const dryRunReport = ref<ScanRun | null>(null);
 
 const activePlugin = computed(() => {
   const id = active.value.toLowerCase().replaceAll(" ", "-");
@@ -89,7 +128,24 @@ async function refresh() {
   error.value = "";
   try {
     await refreshAuth();
-    const [explorerRows, jobRows, jobStatData, storageRows, pluginRows, statData, backendStatus, trackRows, geojson, transcodeCaps, ai, vector] = await Promise.all([
+    const [
+      explorerRows,
+      jobRows,
+      jobStatData,
+      storageRows,
+      pluginRows,
+      statData,
+      backendStatus,
+      trackRows,
+      geojson,
+      mapStatusData,
+      albumRows,
+      previewStatus,
+      previewEntries,
+      transcodeCaps,
+      ai,
+      vector
+    ] = await Promise.all([
       api.explorer(),
       api.jobs(),
       api.jobStats(),
@@ -97,8 +153,12 @@ async function refresh() {
       api.plugins(),
       api.stats(),
       api.status(),
-      api.tracks(),
-      api.map(),
+      api.gpsTracks(),
+      api.map(mapQuery()),
+      api.mapStatus(),
+      api.albums(),
+      api.previewStatus(),
+      api.previewCache(),
       api.transcodingCapabilities(),
       api.aiStatus(),
       api.vectorStatus()
@@ -113,6 +173,16 @@ async function refresh() {
     backend.value = backendStatus;
     tracks.value = trackRows;
     mapData.value = geojson;
+    mapStatus.value = mapStatusData;
+    albums.value = albumRows;
+    previewCacheStats.value = previewStatus.stats;
+    previewCache.value = previewEntries;
+    if (!selectedAlbumId.value && albumRows.length > 0) {
+      selectedAlbumId.value = albumRows[0].id;
+    }
+    if (selectedAlbumId.value) {
+      albumItems.value = await api.albumItems(selectedAlbumId.value).catch(() => null);
+    }
     transcodingCapabilities.value = transcodeCaps;
     aiStatus.value = ai;
     vectorStatus.value = vector;
@@ -170,6 +240,80 @@ async function startMetadata() {
 
 async function startPreviews() {
   await api.startPreviews();
+  await refresh();
+}
+
+async function cleanupPreviews(dryRun = true) {
+  await api.previewCleanup(dryRun);
+  await refresh();
+}
+
+async function startDryRun() {
+  const storage = dryRunStorage.value || storages.value[0]?.name || "";
+  const prefixes = dryRunPrefix.value.split(",").map((item) => item.trim()).filter(Boolean);
+  const include_extensions = dryRunExtensions.value.split(",").map((item) => item.trim()).filter(Boolean);
+  const result = await api.dryRunDiscovery({
+    storage,
+    prefixes,
+    max_files: dryRunMaxFiles.value,
+    max_bytes: dryRunMaxBytes.value,
+    include_extensions
+  });
+  dryRunReport.value = result.scan_run;
+  await refresh();
+  dryRunReport.value = await api.dryRunReport(result.job.id).catch(() => result.scan_run);
+}
+
+async function createAlbum() {
+  const title = newAlbumTitle.value.trim();
+  if (!title) return;
+  const album = await api.createAlbum(title, newAlbumDescription.value);
+  selectedAlbumId.value = album.id;
+  newAlbumTitle.value = "";
+  newAlbumDescription.value = "";
+  await refresh();
+}
+
+async function selectAlbum(id: string) {
+  selectedAlbumId.value = id;
+  mapAlbumId.value = id;
+  albumItems.value = await api.albumItems(id);
+}
+
+function toggleAssetSelection(id: string) {
+  const next = new Set(selectedAssets.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedAssets.value = next;
+}
+
+async function addSelectedToAlbum() {
+  if (!selectedAlbumId.value || selectedAssets.value.size === 0) return;
+  await api.addAlbumItems(selectedAlbumId.value, Array.from(selectedAssets.value));
+  selectedAssets.value = new Set();
+  await selectAlbum(selectedAlbumId.value);
+}
+
+async function removeAlbumItem(assetId: string) {
+  if (!selectedAlbumId.value) return;
+  await api.removeAlbumItem(selectedAlbumId.value, assetId);
+  await selectAlbum(selectedAlbumId.value);
+}
+
+async function openTrack(id: string) {
+  selectedTrack.value = await api.gpsTrack(id);
+  mapTrackId.value = id;
+  trackAssets.value = [];
+  setActive("GPS Tracks");
+}
+
+async function findTrackAssets(id: string) {
+  const result = await api.gpsTrackAssets(id, trackOffsetSeconds.value);
+  trackAssets.value = result.assets;
+}
+
+async function snapTrackMedia(id: string) {
+  await api.snapTrackMedia(id, trackOffsetSeconds.value);
   await refresh();
 }
 
@@ -238,6 +382,88 @@ const mapFeatures = computed(() => {
   return Array.isArray(features) ? (features as Array<Record<string, unknown>>) : [];
 });
 
+function mapQuery(): Record<string, string | number | boolean> {
+  const query: Record<string, string | number | boolean> = { cluster: mapCluster.value };
+  if (mapMediaKind.value) query.media_kind = mapMediaKind.value;
+  if (mapAlbumId.value) query.album_id = mapAlbumId.value;
+  if (mapTrackId.value) query.track_id = mapTrackId.value;
+  return query;
+}
+
+async function refreshMap() {
+  mapData.value = await api.map(mapQuery());
+  await nextTick();
+  renderOpenLayers();
+}
+
+function ensureOpenLayersMap() {
+  if (!mapElement.value) return;
+  if (!olMap) {
+    const vectorLayer = new VectorLayer({
+      source: mapSource,
+      style: (feature) => {
+        const kind = String(feature.get("kind") ?? feature.get("asset_type") ?? "");
+        if (kind === "track") {
+          return new Style({ stroke: new Stroke({ color: "#1a7f37", width: 3 }) });
+        }
+        if (kind === "cluster") {
+          return new Style({
+            image: new CircleStyle({
+              radius: 12,
+              fill: new Fill({ color: "#bf8700" }),
+              stroke: new Stroke({ color: "#ffffff", width: 2 })
+            })
+          });
+        }
+        return new Style({
+          image: new CircleStyle({
+            radius: 7,
+            fill: new Fill({ color: "#0969da" }),
+            stroke: new Stroke({ color: "#ffffff", width: 2 })
+          })
+        });
+      }
+    });
+    olMap = new Map({
+      target: mapElement.value,
+      layers: [vectorLayer],
+      view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 9 })
+    });
+    olMap.on("singleclick", (event) => {
+      olMap?.forEachFeatureAtPixel(event.pixel, (feature) => {
+        const id = feature.get("id");
+        const kind = feature.get("kind");
+        if (typeof id === "string" && kind !== "track" && kind !== "cluster") void openAsset(id);
+        if (typeof id === "string" && kind === "track") void openTrack(id);
+      });
+    });
+  } else {
+    olMap.setTarget(mapElement.value);
+  }
+}
+
+function renderOpenLayers() {
+  ensureOpenLayersMap();
+  if (!olMap || !mapData.value) return;
+  const features = new GeoJSON().readFeatures(mapData.value, { featureProjection: "EPSG:3857" });
+  mapSource.clear();
+  mapSource.addFeatures(features);
+  if (features.length > 0) {
+    const extent = mapSource.getExtent();
+    if (extent) {
+      olMap.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom: 14, duration: 150 });
+    }
+  }
+  olMap.updateSize();
+}
+
+watch([active, mapData], async () => {
+  if (active.value === "Map") {
+    await nextTick();
+    renderOpenLayers();
+  }
+});
+
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -250,7 +476,11 @@ function formatBytes(value: number): string {
   return `${size.toFixed(1)} ${unit}`;
 }
 
-onMounted(refresh);
+onMounted(async () => {
+  await refresh();
+  await nextTick();
+  renderOpenLayers();
+});
 </script>
 
 <template>
@@ -293,7 +523,12 @@ onMounted(refresh);
         <section v-if="active === 'Explorer'" class="panel">
           <header class="panel-head">
             <h2>Explorer</h2>
-            <span>{{ explorer?.folder_count ?? 0 }} folders · {{ explorer?.file_count ?? rows.length }} files</span>
+            <div class="actions">
+              <span>{{ explorer?.folder_count ?? 0 }} folders · {{ explorer?.file_count ?? rows.length }} files</span>
+              <button v-if="selectedAssets.size > 0 && selectedAlbumId" type="button" @click="addSelectedToAlbum">
+                Add {{ selectedAssets.size }} to album
+              </button>
+            </div>
           </header>
           <div class="breadcrumbs">
             <button v-for="crumb in breadcrumbs" :key="crumb.path" type="button" @click="openFolder(crumb.path)">
@@ -303,6 +538,7 @@ onMounted(refresh);
           <table>
             <thead>
               <tr>
+                <th></th>
                 <th>Name</th>
                 <th>Kind</th>
                 <th>Size</th>
@@ -312,6 +548,7 @@ onMounted(refresh);
             </thead>
             <tbody>
               <tr v-for="folder in explorer?.folders ?? []" :key="folder.path" class="folder-row">
+                <td></td>
                 <td>
                   <button type="button" class="link-button" @click="openFolder(folder.path)">
                     {{ folder.name }}
@@ -323,6 +560,13 @@ onMounted(refresh);
                 <td>{{ folder.path }}</td>
               </tr>
               <tr v-for="row in explorer?.files ?? rows" :key="row.asset_id">
+                <td>
+                  <input
+                    type="checkbox"
+                    :checked="selectedAssets.has(row.asset_id)"
+                    @change="toggleAssetSelection(row.asset_id)"
+                  />
+                </td>
                 <td>
                   <button type="button" class="link-button" @click="openAsset(row.asset_id)">
                     {{ row.name }}
@@ -347,6 +591,35 @@ onMounted(refresh);
               <button type="button" @click="startPreviews">Generate Previews</button>
             </div>
           </header>
+          <form class="control-grid" @submit.prevent="startDryRun">
+            <label>
+              Storage
+              <select v-model="dryRunStorage">
+                <option value="">Default storage</option>
+                <option v-for="storage in storages" :key="storage.name" :value="storage.name">
+                  {{ storage.name }} · {{ storage.mode }}
+                </option>
+              </select>
+            </label>
+            <label>
+              Prefixes
+              <input v-model="dryRunPrefix" type="text" />
+            </label>
+            <label>
+              Max files
+              <input v-model.number="dryRunMaxFiles" type="number" min="1" max="50" />
+            </label>
+            <label>
+              Max bytes
+              <input v-model.number="dryRunMaxBytes" type="number" min="1" />
+            </label>
+            <label>
+              Include extensions
+              <input v-model="dryRunExtensions" type="text" />
+            </label>
+            <button type="submit">Start Dry Run</button>
+          </form>
+          <pre v-if="dryRunReport" class="geojson">{{ JSON.stringify(dryRunReport.report, null, 2) }}</pre>
           <div class="job-list">
             <article v-for="job in jobs" :key="job.id" class="job">
               <div class="job-row">
@@ -406,6 +679,7 @@ onMounted(refresh);
             <div class="actions">
               <button type="button" @click="startMetadata">Enrich Metadata</button>
               <button type="button" @click="startPreviews">Generate Previews</button>
+              <button type="button" @click="cleanupPreviews(true)">Dry Run Cleanup</button>
             </div>
           </header>
           <div class="metrics">
@@ -413,7 +687,23 @@ onMounted(refresh);
             <article><strong>{{ stats?.videos ?? 0 }}</strong><span>Videos</span></article>
             <article><strong>{{ stats?.tracks ?? 0 }}</strong><span>Tracks</span></article>
             <article><strong>{{ backend?.preview_cache ?? "" }}</strong><span>Preview cache</span></article>
+            <article><strong>{{ previewCacheStats?.entries ?? 0 }}</strong><span>Cache entries</span></article>
+            <article><strong>{{ formatBytes(previewCacheStats?.bytes ?? 0) }}</strong><span>Cache bytes</span></article>
           </div>
+          <table>
+            <thead><tr><th>Status</th><th>Asset</th><th>Variant</th><th>Size</th><th>Accessed</th></tr></thead>
+            <tbody>
+              <tr v-for="entry in previewCache" :key="entry.id">
+                <td>{{ entry.status }}</td>
+                <td>
+                  <button type="button" class="link-button" @click="openAsset(entry.asset_id)">{{ entry.asset_id }}</button>
+                </td>
+                <td>{{ entry.variant }} · {{ entry.width }}×{{ entry.height }}</td>
+                <td>{{ formatBytes(entry.size_bytes) }}</td>
+                <td>{{ entry.last_accessed_at ?? "" }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
 
         <section v-else-if="active === 'Asset Detail'" class="panel">
@@ -495,16 +785,97 @@ onMounted(refresh);
           </div>
         </section>
 
+        <section v-else-if="active === 'Albums'" class="panel">
+          <header class="panel-head">
+            <h2>Albums</h2>
+            <button v-if="selectedAlbumId" type="button" @click="setActive('Map')">Show on map</button>
+          </header>
+          <form class="control-grid" @submit.prevent="createAlbum">
+            <label>
+              Title
+              <input v-model="newAlbumTitle" type="text" />
+            </label>
+            <label>
+              Description
+              <input v-model="newAlbumDescription" type="text" />
+            </label>
+            <button type="submit">Create Album</button>
+          </form>
+          <div class="split-view">
+            <aside>
+              <button
+                v-for="album in albums"
+                :key="album.id"
+                type="button"
+                :class="{ active: album.id === selectedAlbumId }"
+                @click="selectAlbum(album.id)"
+              >
+                {{ album.title }} · {{ album.item_count }}
+              </button>
+            </aside>
+            <section>
+              <div class="actions">
+                <button v-if="selectedAssets.size > 0 && selectedAlbumId" type="button" @click="addSelectedToAlbum">
+                  Add selected assets
+                </button>
+                <button v-if="selectedAlbumId" type="button" @click="startMetadata">Enrich album assets</button>
+                <button v-if="selectedAlbumId" type="button" @click="startPreviews">Generate previews</button>
+              </div>
+              <table>
+                <thead><tr><th>Name</th><th>Kind</th><th>Size</th><th>Actions</th></tr></thead>
+                <tbody>
+                  <tr v-for="item in albumItems?.items ?? []" :key="item.asset.id">
+                    <td>
+                      <button type="button" class="link-button" @click="openAsset(item.asset.id)">
+                        {{ item.asset.display_name }}
+                      </button>
+                    </td>
+                    <td>{{ item.asset.media_kind }}</td>
+                    <td>{{ formatBytes(item.asset.locations[0]?.size_bytes ?? 0) }}</td>
+                    <td><button type="button" @click="removeAlbumItem(item.asset.id)">Remove</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
         <section v-else-if="active === 'GPS Tracks'" class="panel">
           <header class="panel-head">
             <h2>GPS Tracks</h2>
             <span>{{ tracks.length }} tracks</span>
           </header>
+          <div v-if="selectedTrack" class="track-detail">
+            <div class="metrics">
+              <article><strong>{{ selectedTrack.summary.point_count }}</strong><span>Points</span></article>
+              <article><strong>{{ selectedTrack.summary.distance_m ? `${(selectedTrack.summary.distance_m / 1000).toFixed(2)} km` : "" }}</strong><span>Distance</span></article>
+              <article><strong>{{ selectedTrack.summary.duration_seconds ? `${Math.round(selectedTrack.summary.duration_seconds / 60)} min` : "" }}</strong><span>Duration</span></article>
+            </div>
+            <div class="actions">
+              <label class="inline-label">
+                Offset seconds
+                <input v-model.number="trackOffsetSeconds" type="number" />
+              </label>
+              <button type="button" @click="findTrackAssets(selectedTrack.summary.track_asset_id)">Find media</button>
+              <button type="button" @click="snapTrackMedia(selectedTrack.summary.track_asset_id)">Snap media</button>
+              <button type="button" @click="setActive('Map')">Show on map</button>
+            </div>
+            <table v-if="trackAssets.length > 0">
+              <thead><tr><th>Asset</th><th>Kind</th><th>Taken</th></tr></thead>
+              <tbody>
+                <tr v-for="asset in trackAssets" :key="asset.id">
+                  <td><button type="button" class="link-button" @click="openAsset(asset.id)">{{ asset.display_name }}</button></td>
+                  <td>{{ asset.media_kind }}</td>
+                  <td>{{ asset.taken_at ?? "" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <table>
             <thead><tr><th>Name</th><th>Points</th><th>Start</th><th>End</th><th>Distance</th></tr></thead>
             <tbody>
               <tr v-for="track in tracks" :key="track.track_asset_id">
-                <td>{{ track.name }}</td>
+                <td><button type="button" class="link-button" @click="openTrack(track.track_asset_id)">{{ track.name }}</button></td>
                 <td>{{ track.point_count }}</td>
                 <td>{{ track.start_time ?? "" }}</td>
                 <td>{{ track.end_time ?? "" }}</td>
@@ -517,23 +888,42 @@ onMounted(refresh);
         <section v-else-if="active === 'Map'" class="panel">
           <header class="panel-head">
             <h2>Map</h2>
-            <span>{{ mapFeatures.length }} features</span>
+            <div class="actions">
+              <span>{{ mapFeatures.length }} features · {{ mapStatus?.base_tiles ?? "no tiles" }}</span>
+              <button type="button" @click="refreshMap">Apply</button>
+            </div>
           </header>
-          <svg class="map-canvas" viewBox="0 0 800 420" role="img" aria-label="Map features">
-            <rect x="0" y="0" width="800" height="420" />
-            <g v-for="(feature, index) in mapFeatures" :key="index">
-              <circle
-                v-if="(feature.geometry as any)?.type === 'Point'"
-                :cx="(((feature.geometry as any).coordinates[0] - 43.8) / 0.5) * 800"
-                :cy="420 - ((((feature.geometry as any).coordinates[1] - 39.8) / 0.5) * 420)"
-                r="6"
-              />
-              <polyline
-                v-else-if="(feature.geometry as any)?.type === 'LineString'"
-                :points="(feature.geometry as any).coordinates.map((coord: number[]) => `${((coord[0] - 43.8) / 0.5) * 800},${420 - (((coord[1] - 39.8) / 0.5) * 420)}`).join(' ')"
-              />
-            </g>
-          </svg>
+          <div class="control-grid">
+            <label>
+              Media kind
+              <select v-model="mapMediaKind">
+                <option value="">All</option>
+                <option value="photo">Photos</option>
+                <option value="video">Videos</option>
+              </select>
+            </label>
+            <label>
+              Album
+              <select v-model="mapAlbumId">
+                <option value="">All albums</option>
+                <option v-for="album in albums" :key="album.id" :value="album.id">{{ album.title }}</option>
+              </select>
+            </label>
+            <label>
+              Track
+              <select v-model="mapTrackId">
+                <option value="">All tracks</option>
+                <option v-for="track in tracks" :key="track.track_asset_id" :value="track.track_asset_id">
+                  {{ track.name }}
+                </option>
+              </select>
+            </label>
+            <label class="checkbox-label">
+              <input v-model="mapCluster" type="checkbox" />
+              Clusters
+            </label>
+          </div>
+          <div ref="mapElement" class="ol-map" role="img" aria-label="OpenLayers map"></div>
           <pre class="geojson">{{ JSON.stringify(mapData, null, 2) }}</pre>
         </section>
 

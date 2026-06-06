@@ -120,20 +120,237 @@ type TrackCandidate struct {
 	Reason         string       `json:"reason,omitempty"`
 }
 
+type Page struct {
+	Limit  int `json:"limit"`
+	Offset int `json:"offset"`
+	Total  int `json:"total"`
+}
+
+type AssetQuery struct {
+	Q          string
+	MediaKind  string
+	HashStatus string
+	Storage    string
+	Extension  string
+	TakenFrom  *time.Time
+	TakenTo    *time.Time
+	AlbumID    string
+	TrackID    string
+	GeoSource  string
+	Limit      int
+	Offset     int
+	Sort       string
+	WithTotal  bool
+}
+
+type AssetPage struct {
+	Assets []Asset `json:"assets"`
+	Page   Page    `json:"page"`
+}
+
+type Album struct {
+	ID          string    `json:"id"`
+	ParentID    string    `json:"parent_id,omitempty"`
+	Slug        string    `json:"slug"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	SortOrder   int       `json:"sort_order"`
+	ItemCount   int       `json:"item_count"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type AlbumQuery struct {
+	ParentID string
+	Tree     bool
+	Limit    int
+	Offset   int
+}
+
+type AlbumItem struct {
+	AlbumID   string    `json:"album_id"`
+	Asset     Asset     `json:"asset"`
+	Note      string    `json:"note"`
+	SortOrder int       `json:"sort_order"`
+	AddedAt   time.Time `json:"added_at"`
+}
+
+type AlbumItemQuery struct {
+	AlbumID string
+	Limit   int
+	Offset  int
+}
+
+type AlbumItemPage struct {
+	Items []AlbumItem `json:"items"`
+	Page  Page        `json:"page"`
+}
+
+type AssetGeo struct {
+	AssetID      string         `json:"asset_id"`
+	Lat          float64        `json:"lat"`
+	Lon          float64        `json:"lon"`
+	Source       string         `json:"source"`
+	Confidence   *float64       `json:"confidence,omitempty"`
+	TakenAt      *time.Time     `json:"taken_at,omitempty"`
+	TrackAssetID string         `json:"track_asset_id,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+}
+
+type GeoQuery struct {
+	BBox      *BBox
+	Source    string
+	MediaKind string
+	AlbumID   string
+	TrackID   string
+	TimeFrom  *time.Time
+	TimeTo    *time.Time
+	Limit     int
+	Offset    int
+	Clusters  bool
+	Zoom      int
+}
+
+type GeoAsset struct {
+	Asset Asset    `json:"asset"`
+	Geo   AssetGeo `json:"geo"`
+}
+
+type BBox struct {
+	MinLon float64 `json:"min_lon"`
+	MinLat float64 `json:"min_lat"`
+	MaxLon float64 `json:"max_lon"`
+	MaxLat float64 `json:"max_lat"`
+}
+
+type GPSTrackQuery struct {
+	Q        string
+	BBox     *BBox
+	TimeFrom *time.Time
+	TimeTo   *time.Time
+	Limit    int
+	Offset   int
+	Sort     string
+}
+
+type TrackPointQuery struct {
+	TrackAssetID string
+	TimeFrom     *time.Time
+	TimeTo       *time.Time
+	Simplify     bool
+	MaxPoints    int
+}
+
+type TrackAssetQuery struct {
+	TrackAssetID       string
+	OffsetSeconds      int64
+	MediaKind          string
+	IncludeGeotagged   bool
+	IncludeUngeotagged bool
+	Limit              int
+	Offset             int
+}
+
+type ScanRun struct {
+	ID                string         `json:"id"`
+	JobID             string         `json:"job_id,omitempty"`
+	StorageName       string         `json:"storage_name"`
+	Mode              string         `json:"mode"`
+	Prefixes          []string       `json:"prefixes"`
+	MaxFiles          int            `json:"max_files"`
+	MaxBytes          int64          `json:"max_bytes"`
+	HashRequested     bool           `json:"hash_requested"`
+	MetadataRequested bool           `json:"metadata_requested"`
+	PreviewsRequested bool           `json:"previews_requested"`
+	MarkMissing       bool           `json:"mark_missing"`
+	DryRun            bool           `json:"dry_run"`
+	StartedAt         *time.Time     `json:"started_at,omitempty"`
+	FinishedAt        *time.Time     `json:"finished_at,omitempty"`
+	Report            map[string]any `json:"report"`
+	CreatedAt         time.Time      `json:"created_at"`
+}
+
+type ScanRunQuery struct {
+	StorageName string
+	Limit       int
+	Offset      int
+}
+
+type PreviewCacheEntry struct {
+	ID             string     `json:"id"`
+	AssetID        string     `json:"asset_id"`
+	ContentID      string     `json:"content_id,omitempty"`
+	Variant        string     `json:"variant"`
+	Width          int        `json:"width"`
+	Height         int        `json:"height"`
+	Format         string     `json:"format"`
+	CachePath      string     `json:"cache_path"`
+	Status         string     `json:"status"`
+	SizeBytes      int64      `json:"size_bytes"`
+	CreatedAt      time.Time  `json:"created_at"`
+	LastAccessedAt *time.Time `json:"last_accessed_at,omitempty"`
+	Error          string     `json:"error,omitempty"`
+}
+
+type PreviewCacheQuery struct {
+	AssetID string
+	Status  string
+	Limit   int
+	Offset  int
+}
+
+type PreviewCacheStats struct {
+	Entries    int   `json:"entries"`
+	Ready      int   `json:"ready"`
+	Failed     int   `json:"failed"`
+	Bytes      int64 `json:"bytes"`
+	OldestUnix int64 `json:"oldest_unix,omitempty"`
+}
+
 type Store interface {
 	UpsertDiscoveredFile(context.Context, storage.FileInfo) (UpsertResult, error)
 	ListAssets(context.Context) ([]Asset, error)
 	GetAsset(context.Context, string) (Asset, error)
+	QueryAssets(context.Context, AssetQuery) (AssetPage, error)
 	UpdateAssetMetadata(context.Context, string, *time.Time, map[string]any) error
 	UpdateLocationHash(context.Context, string, string, int64) error
 	Stats(context.Context) (Stats, error)
 	UpsertTrackPoints(context.Context, string, []TrackPoint) error
 	ListTracks(context.Context) ([]TrackSummary, error)
 	GetTrack(context.Context, string) (TrackDetail, error)
+	UpsertGPSTrackSummary(context.Context, TrackSummary, map[string]any) error
+	ListGPSTracks(context.Context, GPSTrackQuery) ([]TrackSummary, error)
+	UpdateGPSTrackMetadata(context.Context, string, string, string) error
+	QueryTrackPoints(context.Context, TrackPointQuery) ([]TrackPoint, error)
+	QueryTrackAssets(context.Context, TrackAssetQuery) (AssetPage, error)
 	TrackCandidates(context.Context, string) ([]TrackCandidate, error)
 	SaveTrackLink(context.Context, TrackLink) (TrackLink, error)
 	ListTrackLinks(context.Context, string) ([]TrackLink, error)
 	DeleteTrackLink(context.Context, string) error
+	CreateAlbum(context.Context, Album) (Album, error)
+	UpdateAlbum(context.Context, Album) (Album, error)
+	DeleteAlbum(context.Context, string) error
+	GetAlbum(context.Context, string) (Album, error)
+	ListAlbums(context.Context, AlbumQuery) ([]Album, error)
+	AddAlbumItems(context.Context, string, []string) error
+	RemoveAlbumItem(context.Context, string, string) error
+	ListAlbumItems(context.Context, AlbumItemQuery) (AlbumItemPage, error)
+	UpsertAssetGeo(context.Context, AssetGeo, bool) (AssetGeo, error)
+	GetAssetGeo(context.Context, string) (AssetGeo, error)
+	QueryAssetGeo(context.Context, GeoQuery) ([]GeoAsset, error)
+	CreateScanRun(context.Context, ScanRun) (ScanRun, error)
+	UpdateScanRunReport(context.Context, string, map[string]any) error
+	FinishScanRun(context.Context, string, map[string]any) error
+	GetScanRunByJob(context.Context, string) (ScanRun, error)
+	ListScanRuns(context.Context, ScanRunQuery) ([]ScanRun, error)
+	UpsertPreviewCacheEntry(context.Context, PreviewCacheEntry) (PreviewCacheEntry, error)
+	GetPreviewCacheEntry(context.Context, string, string, int, int, string) (PreviewCacheEntry, error)
+	ListPreviewCacheEntries(context.Context, PreviewCacheQuery) ([]PreviewCacheEntry, error)
+	MarkPreviewAccessed(context.Context, string) error
+	PreviewCacheStats(context.Context) (PreviewCacheStats, error)
+	CleanupPreviewCacheEntries(context.Context, time.Time, int64) ([]PreviewCacheEntry, error)
 	EnqueueJob(context.Context, jobs.Job) (jobs.Job, error)
 	UpdateJob(context.Context, jobs.Job) error
 	ListJobs(context.Context) ([]jobs.Job, error)
@@ -155,6 +372,12 @@ type MemoryStore struct {
 	locationByAsset map[string]string
 	trackPoints     map[string][]TrackPoint
 	trackLinks      map[string]TrackLink
+	albums          map[string]Album
+	albumItems      map[string]map[string]AlbumItem
+	assetGeo        map[string]AssetGeo
+	gpsTracks       map[string]TrackSummary
+	scanRuns        map[string]ScanRun
+	previewEntries  map[string]PreviewCacheEntry
 	jobs            map[string]jobs.Job
 }
 
@@ -165,6 +388,12 @@ func NewMemoryStore() *MemoryStore {
 		locationByAsset: make(map[string]string),
 		trackPoints:     make(map[string][]TrackPoint),
 		trackLinks:      make(map[string]TrackLink),
+		albums:          make(map[string]Album),
+		albumItems:      make(map[string]map[string]AlbumItem),
+		assetGeo:        make(map[string]AssetGeo),
+		gpsTracks:       make(map[string]TrackSummary),
+		scanRuns:        make(map[string]ScanRun),
+		previewEntries:  make(map[string]PreviewCacheEntry),
 		jobs:            make(map[string]jobs.Job),
 	}
 }

@@ -66,6 +66,14 @@ Original media is immutable in the implemented adapter.
 
 Preview files are generated only under Cartolensia cache/work directories. Preview cache cleanup verifies deletion targets stay inside the cache root.
 
+Scoped dry-run discovery is guarded separately:
+
+- storage must exist and be `strict_read_only`;
+- prefixes are required and cannot be empty/root;
+- default `max_files` is 50;
+- `mark_missing` is rejected;
+- current dry-run behavior is report-only and does not index assets.
+
 ## Media And External Tools
 
 ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery or core startup. Transcoding capability APIs are inventory only; no transcoding job writes originals.
@@ -75,6 +83,12 @@ ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery
 AI/vector APIs are status and contract stubs. The backend does not download models, run inference, or require PyTorch. Future AI plugins should declare model namespace/version, modality, provenance, and permissions in manifests.
 
 Do not copy third-party source into the repository. Add dependencies only through normal package managers and document why they are needed.
+
+Current added dependency notes:
+
+- `ol` is bundled through npm for OpenLayers map rendering; local package metadata reports `BSD-2-Clause`.
+- `github.com/rwcarlsen/goexif` is used for server-side JPEG EXIF parsing; the cached module license is BSD-style and compatible with the project policy.
+- EXIF parsing errors are non-fatal and are recorded as metadata; timezone-less EXIF datetimes are stored as raw metadata instead of being blindly promoted to `taken_at`.
 
 ## Known Limitations
 

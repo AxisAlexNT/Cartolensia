@@ -39,6 +39,31 @@ type Info struct {
 	Message   string `json:"message,omitempty"`
 }
 
+func IndexEntry(asset catalog.Asset, info Info, variant string) catalog.PreviewCacheEntry {
+	if variant == "" {
+		variant = "default"
+	}
+	entry := catalog.PreviewCacheEntry{
+		AssetID:   asset.ID,
+		Variant:   variant,
+		Width:     256,
+		Height:    256,
+		Format:    "jpg",
+		CachePath: info.CachePath,
+		Status:    string(info.Status),
+		Error:     info.Message,
+	}
+	if loc, ok := catalog.FirstLocation(asset); ok {
+		entry.ContentID = loc.ContentID
+	}
+	if info.CachePath != "" {
+		if stat, err := os.Stat(info.CachePath); err == nil {
+			entry.SizeBytes = stat.Size()
+		}
+	}
+	return entry
+}
+
 func CacheKey(asset catalog.Asset) string {
 	seed := asset.ID
 	for _, loc := range asset.Locations {

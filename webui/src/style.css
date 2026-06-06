@@ -165,8 +165,44 @@ td {
 }
 
 .actions {
+  align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.control-grid {
+  align-items: end;
+  border-bottom: 1px solid #d8dee4;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  padding: 12px 16px;
+}
+
+.control-grid label,
+.inline-label {
+  color: #57606a;
+  display: grid;
+  font-size: 13px;
+  gap: 4px;
+}
+
+.control-grid input,
+.control-grid select,
+.inline-label input {
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  font: inherit;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.checkbox-label {
+  align-items: center;
+  display: flex !important;
+  flex-direction: row;
+  min-height: 34px;
 }
 
 .breadcrumbs {
@@ -305,6 +341,13 @@ td {
   width: 100%;
 }
 
+.ol-map {
+  background: #eef2f4;
+  height: min(56vw, 520px);
+  min-height: 340px;
+  width: 100%;
+}
+
 .map-canvas rect {
   fill: #eef2f4;
 }
@@ -327,6 +370,40 @@ td {
   display: grid;
   gap: 16px;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  padding: 16px;
+}
+
+.split-view {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  min-height: 360px;
+}
+
+.split-view aside {
+  border-right: 1px solid #d8dee4;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+}
+
+.split-view aside button {
+  background: transparent;
+  border-color: #d8dee4;
+  color: #24292f;
+  text-align: left;
+}
+
+.split-view aside button.active {
+  background: #ddf4ff;
+  border-color: #54aeef;
+  color: #0969da;
+}
+
+.track-detail {
+  border-bottom: 1px solid #d8dee4;
+  display: grid;
+  gap: 12px;
   padding: 16px;
 }
 

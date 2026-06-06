@@ -81,12 +81,20 @@ func (r Runner) Generate(ctx context.Context, job *jobs.Job) error {
 			if genErr == nil {
 				genErr = closeErr
 			}
+			if info.Status == "" {
+				info.Status = StatusFailed
+				info.Message = genErr.Error()
+			}
 			jobs.AddLog(job, "warn", fmt.Sprintf("%s: preview failed: %v", asset.DisplayName, genErr))
 		} else if info.Status == StatusReady {
 			job.Counters.Created++
 		} else {
 			job.Counters.Updated++
 			jobs.AddLog(job, "info", fmt.Sprintf("%s: preview %s", asset.DisplayName, info.Status))
+		}
+		if _, err := r.Store.UpsertPreviewCacheEntry(ctx, IndexEntry(asset, info, payload.Variant)); err != nil {
+			job.Counters.Errors++
+			jobs.AddLog(job, "warn", fmt.Sprintf("%s: preview cache index update failed: %v", asset.DisplayName, err))
 		}
 		job.ProgressCurrent++
 		if err := r.updateJob(ctx, *job); err != nil {

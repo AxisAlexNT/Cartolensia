@@ -48,6 +48,7 @@ Stage 2: lazy hash.
 Stage 3: explicit metadata enrichment.
 
 - image dimensions through Go decoders where supported;
+- server-side JPEG EXIF parsing where available, including camera metadata and GPS coordinates;
 - video metadata through optional ffprobe;
 - GPX point ingest, bbox, distance, duration, elevation, and time span;
 - additive metadata JSON patches only.
@@ -57,7 +58,16 @@ Stage 4: optional preview generation.
 - cache under Cartolensia cache/work directory only;
 - no sidecars and no writes near originals;
 - cache keys derived from asset/content IDs and requested dimensions;
+- persistent `preview_cache_entries` records track generated/unsupported/failed statuses;
 - unsupported formats return clean statuses.
+
+Stage 5: scoped dry-run readiness.
+
+- dry-run requests require a storage name and non-empty prefixes;
+- default max files is 50 and default max bytes is 2 GiB;
+- dry-run reports never mark missing files;
+- current dry-run behavior is report-only and does not insert assets;
+- hash, metadata, and previews are off by default and must be requested separately in future supervised runs.
 
 ## Safety Modes
 
@@ -105,6 +115,7 @@ Do not access `/mnt/Models/rclone` during the MVP preparation or the first unatt
 - Built-in preview generation supports decodable image formats provided by Go's standard image decoders and writes JPEG cache files. Unsupported formats such as dummy text fixtures and HEIC return a clean unsupported response.
 - Preview cache cleanup only walks the `previews/` subtree under the configured cache root and verifies each deletion target stays inside that root.
 - Metadata/preview/hash jobs check cancellation between files.
+- Bounded dry-run walking uses adapter-relative prefixes and stops when max-files or max-bytes limits are reached.
 
 ## Synthetic Scale Fixtures
 

@@ -1,0 +1,33 @@
+# Example only. Do not use this file as the default development config.
+# Future real-archive dry runs must be manually approved and must start with a
+# tiny non-empty prefix and max_files <= 50.
+
+source: rclone-dryrun-example
+
+server:
+  addr: "127.0.0.1:18080"
+
+database:
+  url: ""
+
+cache:
+  dir: "/tmp/cartolensia-rclone-dryrun-cache"
+
+auth:
+  mode: "local"
+  admin_email: "admin@example.invalid"
+  admin_password_env: "CARTOLENSIA_ADMIN_PASSWORD"
+
+storages:
+  - name: "rclone_dryrun"
+    kind: "fs"
+    root: "/mnt/Models/rclone"
+    mode: "strict_read_only"
+
+workers:
+  enabled: true
+  worker_id: "rclone-dryrun-local"
+  poll_interval: "500ms"
+  lease_duration: "30s"
+  heartbeat_interval: "5s"
+  max_concurrency: 1

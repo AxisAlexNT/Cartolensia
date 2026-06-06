@@ -140,6 +140,10 @@ func New(ctx context.Context, configPath string) (*App, error) {
 			runner := discovery.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
 			return runner.Scan(ctx, job)
 		})
+		manager.Register("discovery_dry_run", func(ctx context.Context, job *jobs.Job) error {
+			runner := discovery.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
+			return runner.DryRun(ctx, job)
+		})
 		manager.Register("hash", func(ctx context.Context, job *jobs.Job) error {
 			runner := discovery.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
 			return runner.HashUnhashed(ctx, job)
@@ -147,6 +151,10 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		manager.Register("metadata_enrich", func(ctx context.Context, job *jobs.Job) error {
 			runner := metadata.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
 			return runner.Enrich(ctx, job)
+		})
+		manager.Register("geo_snap", func(ctx context.Context, job *jobs.Job) error {
+			runner := metadata.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
+			return runner.SnapToTrack(ctx, job)
 		})
 		manager.Register("preview_generate", func(ctx context.Context, job *jobs.Job) error {
 			runner := preview.Runner{Registry: app.Registry, Store: app.Store, CacheDir: app.Config.Cache.Dir, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}

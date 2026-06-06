@@ -18,7 +18,6 @@ import (
 	"github.com/AxisAlexNT/Cartolensia/internal/config"
 	"github.com/AxisAlexNT/Cartolensia/internal/database"
 	"github.com/AxisAlexNT/Cartolensia/internal/discovery"
-	"github.com/AxisAlexNT/Cartolensia/internal/gpx"
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/media"
 	"github.com/AxisAlexNT/Cartolensia/internal/metadata"
@@ -94,19 +93,29 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/jobs/stats", s.handleJobStats)
 	s.mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
 	s.mux.HandleFunc("/api/v1/discovery/start", s.handleDiscoveryStart)
+	s.mux.HandleFunc("/api/v1/discovery/dry-run", s.handleDiscoveryDryRun)
+	s.mux.HandleFunc("/api/v1/discovery/dry-run/", s.handleDiscoveryDryRunByJob)
 	s.mux.HandleFunc("/api/v1/hash/start", s.handleHashStart)
 	s.mux.HandleFunc("/api/v1/metadata/enrich/start", s.handleMetadataEnrichStart)
 	s.mux.HandleFunc("/api/v1/previews/start", s.handlePreviewsStart)
+	s.mux.HandleFunc("/api/v1/previews/status", s.handlePreviewStatus)
+	s.mux.HandleFunc("/api/v1/previews/cache", s.handlePreviewCache)
+	s.mux.HandleFunc("/api/v1/previews/cleanup", s.handlePreviewCleanup)
 	s.mux.HandleFunc("/api/v1/assets", s.handleAssets)
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
+	s.mux.HandleFunc("/api/v1/albums", s.handleAlbums)
+	s.mux.HandleFunc("/api/v1/albums/", s.handleAlbumByID)
 	s.mux.HandleFunc("/api/v1/explorer", s.handleExplorer)
 	s.mux.HandleFunc("/api/v1/tracks", s.handleTracks)
 	s.mux.HandleFunc("/api/v1/tracks/", s.handleTrackByID)
+	s.mux.HandleFunc("/api/v1/gps/tracks", s.handleGPSTracks)
+	s.mux.HandleFunc("/api/v1/gps/tracks/", s.handleGPSTrackByID)
 	s.mux.HandleFunc("/api/v1/sync/candidates", s.handleSyncCandidates)
 	s.mux.HandleFunc("/api/v1/sync/links", s.handleSyncLinks)
 	s.mux.HandleFunc("/api/v1/sync/links/", s.handleSyncLinkByID)
 	s.mux.HandleFunc("/api/v1/videos/", s.handleVideoByID)
 	s.mux.HandleFunc("/api/v1/map", s.handleMap)
+	s.mux.HandleFunc("/api/v1/map/", s.handleMapSubroute)
 	s.mux.HandleFunc("/api/v1/transcoding/status", s.handleTranscodingStatus)
 	s.mux.HandleFunc("/api/v1/transcoding/capabilities", s.handleTranscodingCapabilities)
 	s.mux.HandleFunc("/api/v1/transcoding/presets", s.handleTranscodingPresets)
@@ -663,17 +672,18 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	assets, err := s.deps.Store.ListAssets(r.Context())
+	query, err := assetQueryFromURL(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	page, err := s.deps.Store.QueryAssets(r.Context(), query)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	assets = filterAssets(assets, r.URL.Query())
-	sortAssets(assets, r.URL.Query().Get("sort"))
-	total := len(assets)
-	assets = paginateAssets(assets, r.URL.Query())
-	w.Header().Set("X-Total-Count", strconv.Itoa(total))
-	writeJSON(w, http.StatusOK, assets)
+	w.Header().Set("X-Total-Count", strconv.Itoa(page.Page.Total))
+	writeJSON(w, http.StatusOK, page.Assets)
 }
 
 func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
@@ -1081,11 +1091,6 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	bbox, hasBBox, err := parseBBox(query.Get("bbox"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
 	zoom, _ := strconv.Atoi(query.Get("zoom"))
 	if zoom <= 0 {
 		zoom = 10
@@ -1094,113 +1099,19 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
 	}
-	mediaKind := query.Get("media_kind")
-	timeFrom, _ := time.Parse(time.RFC3339, query.Get("time_from"))
-	timeTo, _ := time.Parse(time.RFC3339, query.Get("time_to"))
-	selectedTrackIDs := csvSet(query.Get("track_ids"))
-	selectedAssetIDs := csvSet(query.Get("asset_ids"))
-	clusterPoints := query.Get("cluster") == "1" || strings.EqualFold(query.Get("cluster"), "true")
-	features := make([]map[string]any, 0)
-	tracks, err := s.deps.Store.ListTracks(r.Context())
+	trackFeatures, err := s.mapTrackFeatures(r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	for _, summary := range tracks {
-		if len(selectedTrackIDs) > 0 {
-			if _, ok := selectedTrackIDs[summary.TrackAssetID]; !ok {
-				continue
-			}
-		}
-		if !trackTimeMatches(summary, timeFrom, timeTo) {
-			continue
-		}
-		if hasBBox && !trackIntersectsBBox(summary, bbox) {
-			continue
-		}
-		detail, err := s.deps.Store.GetTrack(r.Context(), summary.TrackAssetID)
-		if err != nil {
-			continue
-		}
-		points := detail.Points
-		if maxTrackPoints := maxTrackPointsForZoom(zoom); len(points) > maxTrackPoints {
-			points = gpx.Simplify(points, maxTrackPoints)
-		}
-		coords := make([][]float64, 0, len(points))
-		for _, point := range points {
-			if hasBBox && !pointInBBox(point.Lon, point.Lat, bbox) {
-				continue
-			}
-			coords = append(coords, []float64{point.Lon, point.Lat})
-		}
-		if len(coords) == 0 {
-			continue
-		}
-		features = append(features, map[string]any{
-			"type": "Feature",
-			"geometry": map[string]any{
-				"type":        "LineString",
-				"coordinates": coords,
-			},
-			"properties": map[string]any{
-				"id":          summary.TrackAssetID,
-				"name":        summary.Name,
-				"kind":        "track",
-				"point_count": summary.PointCount,
-				"simplified":  len(points) < summary.PointCount,
-			},
-		})
-	}
-	assets, err := s.deps.Store.ListAssets(r.Context())
+	assetFeatures, clustering, err := s.mapAssetFeatures(r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	var pointFeatures []map[string]any
-	for _, asset := range assets {
-		if mediaKind != "" && asset.MediaKind != mediaKind {
-			continue
-		}
-		if len(selectedAssetIDs) > 0 {
-			if _, ok := selectedAssetIDs[asset.ID]; !ok {
-				continue
-			}
-		}
-		if !assetTimeMatches(asset, timeFrom, timeTo) {
-			continue
-		}
-		lat, lon, ok := assetLatLon(asset)
-		if !ok || (hasBBox && !pointInBBox(lon, lat, bbox)) {
-			continue
-		}
-		pointFeatures = append(pointFeatures, map[string]any{
-			"type": "Feature",
-			"geometry": map[string]any{
-				"type":        "Point",
-				"coordinates": []float64{lon, lat},
-			},
-			"properties": map[string]any{
-				"id":         asset.ID,
-				"name":       asset.DisplayName,
-				"kind":       asset.MediaKind,
-				"clustered":  false,
-				"asset_type": "asset",
-			},
-		})
-		if len(pointFeatures) >= limit {
-			break
-		}
-	}
-	if clusterPoints {
-		pointFeatures = clusterGeoJSONPoints(pointFeatures, bbox, hasBBox, zoom)
-	}
-	features = append(features, pointFeatures...)
+	features := append(trackFeatures, assetFeatures...)
 	if len(features) > limit {
 		features = features[:limit]
-	}
-	clustering := "raw"
-	if clusterPoints {
-		clustering = "grid"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"type": "FeatureCollection", "features": features, "clustering": clustering, "zoom": zoom, "limit": limit})
 }
@@ -1379,6 +1290,7 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID s
 	}
 	info, err := preview.GenerateImage(r.Context(), s.deps.Config.Cache.Dir, asset, file)
 	closeErr := file.Close()
+	entry, indexErr := s.deps.Store.UpsertPreviewCacheEntry(r.Context(), preview.IndexEntry(asset, info, "default"))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, info)
 		return
@@ -1394,6 +1306,9 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID s
 	if info.Status != preview.StatusReady {
 		writeJSON(w, http.StatusNotImplemented, info)
 		return
+	}
+	if indexErr == nil {
+		_ = s.deps.Store.MarkPreviewAccessed(r.Context(), entry.ID)
 	}
 	previewFile, err := os.Open(info.CachePath)
 	if err != nil {

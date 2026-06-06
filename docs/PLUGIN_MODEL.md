@@ -1,6 +1,6 @@
 # Plugin Model
 
-Cartolensia is plugin-oriented, but the MVP should keep plugin execution simple and safe. The first plugin implementation is manifest discovery, dependency validation, and built-in stub registration.
+Cartolensia is plugin-oriented, but the MVP keeps plugin execution simple and safe. The current plugin implementation is manifest discovery, dependency validation, built-in registration, and core-owned MVP surfaces for albums, map browsing, GPS tracks, transcoding status, and AI/vector status.
 
 ## MVP Plugin Runtime
 
@@ -45,11 +45,11 @@ Validation rules:
 - supported runtimes are currently `builtin` and `sidecar_http`.
 - `sidecar_http` requires `sidecar_http.base_url`; `health_path` defaults to `/health`.
 
-## Planned Built-In Stubs
+## Built-In Plugin Status
 
-- `albums`: database-backed virtual album grouping skeleton.
-- `mapview`: map-first media browsing and clustering skeleton.
-- `gpstracks`: track ingestion, linking, and live video-track sync skeleton.
+- `albums`: implemented MVP for virtual albums, nested album metadata, album item membership, asset detail add/list workflows, and album map filters. Album deletion is metadata-only and never deletes assets.
+- `mapview`: implemented MVP for GeoJSON map APIs backed by `asset_geo` and track points, deterministic grid clustering, album/media/track filters, and OpenLayers WebUI rendering.
+- `gpstracks`: implemented MVP for GPX track summaries, point queries, media overlap lookup, and conservative track-snapped geotags.
 - `transcoding`: safe transcoding manager skeleton; never writes into originals.
 - `ai-base`: AI runtime and future VectorStore skeleton.
 - `ai-classification`: transport/place classification workflow skeleton, depends on `ai-base`.

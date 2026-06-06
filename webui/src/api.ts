@@ -166,6 +166,65 @@ export type TrackDetail = {
   }>;
 };
 
+export type Album = {
+  id: string;
+  parent_id?: string;
+  slug: string;
+  title: string;
+  description: string;
+  sort_order: number;
+  item_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AlbumItemPage = {
+  items: Array<{ album_id: string; asset: Asset; note: string; sort_order: number; added_at: string }>;
+  page: { limit: number; offset: number; total: number };
+};
+
+export type PreviewCacheStats = {
+  entries: number;
+  ready: number;
+  failed: number;
+  bytes: number;
+  oldest_unix?: number;
+};
+
+export type PreviewCacheEntry = {
+  id: string;
+  asset_id: string;
+  content_id?: string;
+  variant: string;
+  width: number;
+  height: number;
+  format: string;
+  cache_path: string;
+  status: string;
+  size_bytes: number;
+  created_at: string;
+  last_accessed_at?: string;
+  error?: string;
+};
+
+export type ScanRun = {
+  id: string;
+  job_id?: string;
+  storage_name: string;
+  mode: string;
+  prefixes: string[];
+  max_files: number;
+  max_bytes: number;
+  hash_requested: boolean;
+  metadata_requested: boolean;
+  previews_requested: boolean;
+  mark_missing: boolean;
+  dry_run: boolean;
+  report: Record<string, unknown>;
+  created_at: string;
+  finished_at?: string;
+};
+
 export type TrackCandidate = {
   track: TrackSummary;
   overlap_start?: string;
@@ -295,12 +354,49 @@ export const api = {
   explorerFolders: (path = "") =>
     request<ExplorerView>(`/api/v1/explorer?view=folders&path=${encodeURIComponent(path)}&sort=name`),
   asset: (id: string) => request<AssetDetail>(`/api/v1/assets/${encodeURIComponent(id)}`),
+  albums: () => request<Album[]>("/api/v1/albums?tree=true"),
+  createAlbum: (title: string, description = "", parentId = "") =>
+    request<Album>("/api/v1/albums", {
+      method: "POST",
+      body: JSON.stringify({ title, description, parent_id: parentId })
+    }),
+  albumItems: (albumId: string) => request<AlbumItemPage>(`/api/v1/albums/${encodeURIComponent(albumId)}/items`),
+  addAlbumItems: (albumId: string, assetIds: string[]) =>
+    request<AlbumItemPage>(`/api/v1/albums/${encodeURIComponent(albumId)}/items`, {
+      method: "POST",
+      body: JSON.stringify({ asset_ids: assetIds })
+    }),
+  removeAlbumItem: (albumId: string, assetId: string) =>
+    request<{ status: string }>(`/api/v1/albums/${encodeURIComponent(albumId)}/items/${encodeURIComponent(assetId)}`, {
+      method: "DELETE"
+    }),
   tracks: () => request<TrackSummary[]>("/api/v1/tracks"),
+  gpsTracks: () => request<TrackSummary[]>("/api/v1/gps/tracks"),
+  gpsTrack: (id: string) => request<TrackDetail>(`/api/v1/gps/tracks/${encodeURIComponent(id)}`),
+  gpsTrackPoints: (id: string, maxPoints = 500) =>
+    request<TrackDetail["points"]>(`/api/v1/gps/tracks/${encodeURIComponent(id)}/points?simplify=true&max_points=${maxPoints}`),
+  gpsTrackAssets: (id: string, offsetSeconds = 0) =>
+    request<{ assets: Asset[]; page: { limit: number; offset: number; total: number } }>(
+      `/api/v1/gps/tracks/${encodeURIComponent(id)}/assets?offset_seconds=${offsetSeconds}&include_geotagged=true&include_ungeotagged=true`
+    ),
+  snapTrackMedia: (id: string, offsetSeconds = 0) =>
+    request<Job>(`/api/v1/gps/tracks/${encodeURIComponent(id)}/snap-media`, {
+      method: "POST",
+      body: JSON.stringify({ offset_seconds: offsetSeconds })
+    }),
   track: (id: string) => request<TrackDetail>(`/api/v1/tracks/${encodeURIComponent(id)}`),
   syncCandidates: (assetId: string) =>
     request<TrackCandidate[]>(`/api/v1/sync/candidates?asset_id=${encodeURIComponent(assetId)}`),
-  map: (bbox = "43.8,39.8,44.3,40.3", zoom = 10) =>
-    request<Record<string, unknown>>(`/api/v1/map?bbox=${encodeURIComponent(bbox)}&zoom=${zoom}&cluster=true`),
+  map: (params: Record<string, string | number | boolean> = {}) => {
+    const query = new URLSearchParams({
+      bbox: "43.8,39.8,44.3,40.3",
+      zoom: "10",
+      cluster: "true"
+    });
+    Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
+    return request<Record<string, unknown>>(`/api/v1/map?${query.toString()}`);
+  },
+  mapStatus: () => request<Record<string, unknown>>("/api/v1/map/status"),
   stats: () => request<Stats>("/api/v1/stats"),
   startDiscovery: () => request<Job>("/api/v1/discovery/start", { method: "POST" }),
   startHash: () => request<Job>("/api/v1/hash/start", { method: "POST" }),
@@ -311,6 +407,21 @@ export const api = {
     }),
   startPreviews: () =>
     request<Job>("/api/v1/previews/start", { method: "POST", body: JSON.stringify({ only_missing: true }) }),
+  previewStatus: () => request<{ cache_dir: string; stats: PreviewCacheStats }>("/api/v1/previews/status"),
+  previewCache: () => request<PreviewCacheEntry[]>("/api/v1/previews/cache?limit=50"),
+  previewCleanup: (dryRun = true, maxBytes = 0) =>
+    request<Record<string, unknown>>("/api/v1/previews/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ dry_run: dryRun, max_bytes: maxBytes })
+    }),
+  dryRunDiscovery: (payload: {
+    storage: string;
+    prefixes: string[];
+    max_files?: number;
+    max_bytes?: number;
+    include_extensions?: string[];
+  }) => request<{ job: Job; scan_run: ScanRun }>("/api/v1/discovery/dry-run", { method: "POST", body: JSON.stringify(payload) }),
+  dryRunReport: (jobId: string) => request<ScanRun>(`/api/v1/discovery/dry-run/${encodeURIComponent(jobId)}/report`),
   cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   retryJob: (id: string, force = false) =>
     request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, { method: "POST", body: JSON.stringify({ force }) }),

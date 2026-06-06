@@ -15,14 +15,25 @@ Do not run these steps without an explicit approval turn.
 ## Suggested Future Procedure
 
 1. Start PostgreSQL and the app.
-2. Add a temporary storage config for the real archive with `strict_read_only`.
-3. Run a tiny bounded scan, for example one explicitly chosen prefix and `max_files` once scoped scan limits are implemented.
-4. Inspect `/api/v1/storages`, `/api/v1/jobs`, `/api/v1/assets`, `/api/v1/explorer`, and `/api/v1/stats`.
-5. Cancel the job if anything looks unexpected.
-6. Run hashing only on a very small selected subset.
-7. Run metadata enrichment only on a small selected subset.
-8. Verify preview cache files are under Cartolensia cache/work directory, never beside originals.
-9. Increase scope gradually only after each bounded run is reviewed.
+2. Copy and review `config/rclone-dryrun.example.yaml`; do not make it the default config.
+3. Confirm the storage name is `rclone_dryrun`, mode is `strict_read_only`, and cache dir is outside the archive.
+4. Start the app with that config only during a supervised session.
+5. Use one explicitly chosen non-empty prefix and `max_files <= 50`.
+6. Run the guarded preflight script only after setting all required flags:
+
+```bash
+CARTOLENSIA_ALLOW_RCLONE_DRY_RUN=1 \
+CARTOLENSIA_RCLONE_DRY_RUN_PREFIX='some/non-empty/prefix' \
+CARTOLENSIA_EXECUTE_RCLONE_DRY_RUN=1 \
+bash scripts/rclone-dry-run-preflight.sh
+```
+
+7. Inspect `/api/v1/storages`, `/api/v1/jobs`, `/api/v1/discovery/dry-run/{job_id}/report`, `/api/v1/assets`, `/api/v1/explorer`, and `/api/v1/stats`.
+8. Cancel the job if anything looks unexpected.
+9. Run hashing only on a very small selected subset.
+10. Run metadata enrichment only on a small selected subset.
+11. Verify preview cache files are under Cartolensia cache/work directory, never beside originals.
+12. Increase scope gradually only after each bounded run is reviewed.
 
 ## Stop Conditions
 
@@ -34,9 +45,9 @@ Stop immediately if:
 - cache files appear under the archive root;
 - missing-file marking affects paths outside the intended scope.
 
-## Current Limitation
+## Current Behavior
 
-The current implementation updates `last_seen_at` for discovered files but does not yet implement automatic scoped missing-file marking. That is intentional. A bounded real archive dry run should avoid any missing/deletion workflow until rescan semantics are implemented and tested.
+The implemented dry-run endpoint is report-only: it records a job and scan-run report, counts files that would be considered, and does not index assets. Normal discovery updates `last_seen_at` for discovered files, but automatic scoped missing-file marking is still intentionally deferred. A bounded real archive dry run must avoid any missing/deletion workflow until rescan semantics are implemented and tested.
 
 ## Explicitly Not Done In This Run
 

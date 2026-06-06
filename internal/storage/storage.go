@@ -45,6 +45,23 @@ type FileInfo struct {
 	MTime        time.Time `json:"mtime"`
 }
 
+type WalkOptions struct {
+	Prefixes          []string
+	MaxFiles          int
+	MaxBytes          int64
+	IncludeExtensions []string
+	ExcludePatterns   []string
+}
+
+type WalkReport struct {
+	FilesSeen      int            `json:"files_seen"`
+	FilesReturned  int            `json:"files_returned"`
+	FilesSkipped   int            `json:"files_skipped"`
+	BytesSeen      int64          `json:"bytes_seen"`
+	Complete       bool           `json:"complete"`
+	SkippedReasons map[string]int `json:"skipped_reasons"`
+}
+
 func NewRegistry(configs []Config) (*Registry, error) {
 	reg := &Registry{adapters: map[string]*FSAdapter{}}
 	for _, cfg := range configs {
@@ -169,6 +186,109 @@ func (a *FSAdapter) ListRecursive(ctx context.Context) ([]FileInfo, error) {
 	return files, nil
 }
 
+func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) ([]FileInfo, WalkReport, error) {
+	report := WalkReport{Complete: true, SkippedReasons: map[string]int{}}
+	if opts.MaxFiles <= 0 {
+		opts.MaxFiles = 50
+	}
+	if opts.MaxBytes <= 0 {
+		opts.MaxBytes = 2 << 30
+	}
+	include := extensionSet(opts.IncludeExtensions)
+	var files []FileInfo
+	var stopped error = stopWalkError{}
+	for _, prefix := range opts.Prefixes {
+		rel, err := NormalizeRelativePath(prefix)
+		if err != nil {
+			return nil, report, err
+		}
+		full, err := a.safePath(rel)
+		if err != nil {
+			return nil, report, err
+		}
+		stat, err := os.Stat(full)
+		if err != nil {
+			return nil, report, err
+		}
+		walkOne := func(current string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.Type()&fs.ModeSymlink != 0 {
+				report.FilesSkipped++
+				report.SkippedReasons["symlink"]++
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			relative, err := filepath.Rel(a.root, current)
+			if err != nil {
+				return err
+			}
+			relative = filepath.ToSlash(relative)
+			info, err := a.Stat(relative)
+			if err != nil {
+				report.FilesSkipped++
+				report.SkippedReasons["stat_error"]++
+				return nil
+			}
+			report.FilesSeen++
+			if !extensionAllowed(info.Extension, include) {
+				report.FilesSkipped++
+				report.SkippedReasons["extension"]++
+				return nil
+			}
+			if excludedByPattern(info.RelativePath, opts.ExcludePatterns) {
+				report.FilesSkipped++
+				report.SkippedReasons["pattern"]++
+				return nil
+			}
+			if report.FilesReturned >= opts.MaxFiles || report.BytesSeen+info.SizeBytes > opts.MaxBytes {
+				report.Complete = false
+				report.SkippedReasons["limit"]++
+				return stopped
+			}
+			files = append(files, info)
+			report.FilesReturned++
+			report.BytesSeen += info.SizeBytes
+			return nil
+		}
+		if !stat.IsDir() {
+			parent := filepath.Dir(full)
+			entry, err := os.ReadDir(parent)
+			if err != nil {
+				return nil, report, err
+			}
+			name := filepath.Base(full)
+			for _, item := range entry {
+				if item.Name() == name {
+					err = walkOne(full, item, nil)
+					break
+				}
+			}
+		} else {
+			err = filepath.WalkDir(full, walkOne)
+		}
+		if errors.Is(err, stopped) {
+			break
+		}
+		if err != nil {
+			return nil, report, err
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].StorageURL < files[j].StorageURL
+	})
+	return files, report, nil
+}
+
 func (a *FSAdapter) Open(relativePath string) (*os.File, FileInfo, error) {
 	full, err := a.safePath(relativePath)
 	if err != nil {
@@ -183,6 +303,48 @@ func (a *FSAdapter) Open(relativePath string) (*os.File, FileInfo, error) {
 		return nil, FileInfo{}, err
 	}
 	return file, info, nil
+}
+
+type stopWalkError struct{}
+
+func (stopWalkError) Error() string { return "bounded walk stopped" }
+
+func extensionSet(values []string) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+	out := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "."))
+		if value != "" {
+			out[value] = struct{}{}
+		}
+	}
+	return out
+}
+
+func extensionAllowed(ext string, include map[string]struct{}) bool {
+	if len(include) == 0 {
+		return true
+	}
+	_, ok := include[strings.ToLower(strings.TrimPrefix(ext, "."))]
+	return ok
+}
+
+func excludedByPattern(relativePath string, patterns []string) bool {
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if ok, _ := path.Match(pattern, relativePath); ok {
+			return true
+		}
+		if ok, _ := path.Match(pattern, path.Base(relativePath)); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *FSAdapter) Stat(relativePath string) (FileInfo, error) {
