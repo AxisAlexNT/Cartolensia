@@ -25,4 +25,30 @@ func TestParseGPXTrackPoints(t *testing.T) {
 	if points[1].Lat != 40.2 || points[1].Lon != 44.3 {
 		t.Fatalf("unexpected second point: %#v", points[1])
 	}
+	analysis := Analyze(points)
+	if analysis.PointCount != 2 || analysis.DistanceM <= 0 || analysis.DurationSeconds == nil {
+		t.Fatalf("unexpected analysis: %#v", analysis)
+	}
+}
+
+func TestParseGPXRouteWaypointAndMissingTime(t *testing.T) {
+	const data = `<?xml version="1.0"?>
+<gpx version="1.1" creator="test">
+  <rte><name>Route</name><rtept lat="40.0" lon="44.0"><ele>1</ele></rtept></rte>
+  <wpt lat="40.1" lon="44.1"><time>2024-06-01 10:00:00</time></wpt>
+</gpx>`
+	points, err := Parse(strings.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("expected route point and waypoint, got %#v", points)
+	}
+	if !points[0].RecordedAt.IsZero() {
+		t.Fatalf("missing time should be tolerated as zero, got %s", points[0].RecordedAt)
+	}
+	simplified := Simplify(points, 1)
+	if len(simplified) != 1 {
+		t.Fatalf("unexpected simplification: %#v", simplified)
+	}
 }

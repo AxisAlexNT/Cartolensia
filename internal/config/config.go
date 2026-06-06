@@ -60,13 +60,17 @@ type WorkerConfig struct {
 }
 
 type AuthConfig struct {
-	Mode             string `json:"mode" yaml:"mode"`
-	AdminEmail       string `json:"admin_email,omitempty" yaml:"admin_email"`
-	AdminDisplayName string `json:"admin_display_name,omitempty" yaml:"admin_display_name"`
-	AdminPasswordEnv string `json:"admin_password_env,omitempty" yaml:"admin_password_env"`
-	SessionTTL       string `json:"session_ttl,omitempty" yaml:"session_ttl"`
-	APITokenTTL      string `json:"api_token_ttl,omitempty" yaml:"api_token_ttl"`
-	CookieName       string `json:"cookie_name,omitempty" yaml:"cookie_name"`
+	Mode                    string `json:"mode" yaml:"mode"`
+	AdminEmail              string `json:"admin_email,omitempty" yaml:"admin_email"`
+	AdminDisplayName        string `json:"admin_display_name,omitempty" yaml:"admin_display_name"`
+	AdminPasswordEnv        string `json:"admin_password_env,omitempty" yaml:"admin_password_env"`
+	AdminPasswordFile       string `json:"admin_password_file,omitempty" yaml:"admin_password_file"`
+	RotateBootstrapPassword bool   `json:"rotate_bootstrap_password,omitempty" yaml:"rotate_bootstrap_password"`
+	SessionTTL              string `json:"session_ttl,omitempty" yaml:"session_ttl"`
+	APITokenTTL             string `json:"api_token_ttl,omitempty" yaml:"api_token_ttl"`
+	CookieName              string `json:"cookie_name,omitempty" yaml:"cookie_name"`
+	CookieSecure            bool   `json:"cookie_secure,omitempty" yaml:"cookie_secure"`
+	CSRFHeader              string `json:"csrf_header,omitempty" yaml:"csrf_header"`
 }
 
 func Load(path string) (Config, error) {
@@ -129,6 +133,7 @@ func Defaults() Config {
 			SessionTTL:       "24h",
 			APITokenTTL:      "2160h",
 			CookieName:       "cartolensia_session",
+			CSRFHeader:       "X-CSRF-Token",
 		},
 	}
 }
@@ -169,6 +174,9 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Auth.CookieName == "" {
 		cfg.Auth.CookieName = "cartolensia_session"
+	}
+	if cfg.Auth.CSRFHeader == "" {
+		cfg.Auth.CSRFHeader = "X-CSRF-Token"
 	}
 	if cfg.Auth.Mode != "dev_no_auth" && cfg.Auth.Mode != "local" {
 		return fmt.Errorf("unsupported auth mode %q", cfg.Auth.Mode)
@@ -251,6 +259,12 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("CARTOLENSIA_ADMIN_PASSWORD_ENV"); value != "" {
 		cfg.Auth.AdminPasswordEnv = value
 	}
+	if value := os.Getenv("CARTOLENSIA_ADMIN_PASSWORD_FILE"); value != "" {
+		cfg.Auth.AdminPasswordFile = value
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_ROTATE_BOOTSTRAP_PASSWORD"); value != "" {
+		cfg.Auth.RotateBootstrapPassword = value == "1" || strings.EqualFold(value, "true")
+	}
 	if value := os.Getenv("CARTOLENSIA_AUTH_SESSION_TTL"); value != "" {
 		cfg.Auth.SessionTTL = value
 	}
@@ -259,5 +273,11 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("CARTOLENSIA_AUTH_COOKIE_NAME"); value != "" {
 		cfg.Auth.CookieName = value
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_COOKIE_SECURE"); value != "" {
+		cfg.Auth.CookieSecure = value == "1" || strings.EqualFold(value, "true")
+	}
+	if value := os.Getenv("CARTOLENSIA_AUTH_CSRF_HEADER"); value != "" {
+		cfg.Auth.CSRFHeader = value
 	}
 }

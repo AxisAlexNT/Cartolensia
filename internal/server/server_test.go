@@ -13,6 +13,7 @@ import (
 	"github.com/AxisAlexNT/Cartolensia/internal/auth"
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 	"github.com/AxisAlexNT/Cartolensia/internal/config"
+	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
 	"github.com/AxisAlexNT/Cartolensia/internal/plugins"
 	"github.com/AxisAlexNT/Cartolensia/internal/storage"
 )
@@ -48,6 +49,11 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		t.Fatalf("hash status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata/enrich/start", strings.NewReader(`{"include_video":true,"include_images":true,"include_tracks":true}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("metadata status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"assets":4`) || !strings.Contains(rec.Body.String(), `"hashed":4`) {
 		t.Fatalf("stats status %d body %s", rec.Code, rec.Body.String())
@@ -65,6 +71,23 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	}
 	if len(rows) == 0 {
 		t.Fatal("expected explorer rows")
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets?media_kind=photo&limit=1&sort=name", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Total-Count") != "2" {
+		t.Fatalf("filtered assets status %d total %s body %s", rec.Code, rec.Header().Get("X-Total-Count"), rec.Body.String())
+	}
+	var filteredAssets []catalog.Asset
+	if err := json.Unmarshal(rec.Body.Bytes(), &filteredAssets); err != nil {
+		t.Fatal(err)
+	}
+	if len(filteredAssets) != 1 || filteredAssets[0].MediaKind != "photo" {
+		t.Fatalf("unexpected filtered assets: %#v", filteredAssets)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/explorer?media_kind=video&limit=1", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Total-Count") != "1" || !strings.Contains(rec.Body.String(), `"media_kind":"video"`) {
+		t.Fatalf("filtered explorer status %d total %s body %s", rec.Code, rec.Header().Get("X-Total-Count"), rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/explorer?view=folders", nil))
@@ -186,10 +209,111 @@ func TestLocalAuthEndpoints(t *testing.T) {
 		t.Fatalf("me status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	csrfReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/csrf", nil)
+	csrfReq.AddCookie(cookies[0])
+	srv.ServeHTTP(rec, csrfReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("csrf status %d body %s", rec.Code, rec.Body.String())
+	}
+	var csrf struct {
+		Header string `json:"header"`
+		Token  string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &csrf); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	protectedNoCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/start", nil)
+	protectedNoCSRF.AddCookie(cookies[0])
+	srv.ServeHTTP(rec, protectedNoCSRF)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected csrf failure, got %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	protectedWithCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/start", nil)
+	protectedWithCSRF.AddCookie(cookies[0])
+	protectedWithCSRF.Header.Set(csrf.Header, csrf.Token)
+	srv.ServeHTTP(rec, protectedWithCSRF)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected csrf-protected discovery accepted, got %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	createToken := httptest.NewRequest(http.MethodPost, "/api/v1/auth/tokens", strings.NewReader(`{"name":"test","scopes":["jobs:write"]}`))
 	createToken.AddCookie(cookies[0])
+	createToken.Header.Set(csrf.Header, csrf.Token)
 	srv.ServeHTTP(rec, createToken)
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"secret"`) {
 		t.Fatalf("token status %d body %s", rec.Code, rec.Body.String())
 	}
+	var tokenResult struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tokenResult); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	pluginRescan := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/rescan", nil)
+	pluginRescan.Header.Set("Authorization", "Bearer "+tokenResult.Secret)
+	srv.ServeHTTP(rec, pluginRescan)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected token scope denial, got %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	changePassword := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(`{"old_password":"password","new_password":"new-password"}`))
+	changePassword.AddCookie(cookies[0])
+	changePassword.Header.Set(csrf.Header, csrf.Token)
+	srv.ServeHTTP(rec, changePassword)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("password status %d body %s", rec.Code, rec.Body.String())
+	}
 }
+
+func TestJobOperationsEndpoints(t *testing.T) {
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := catalog.NewMemoryStore()
+	job := jobs.New("metadata_enrich", nil)
+	jobs.AddLog(&job, "error", "transient failure")
+	job.Status = jobs.StatusRunning
+	if err := jobs.Fail(&job, jobs.Transient(errTestFailure{})); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.EnqueueJob(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       config.Defaults(),
+		Plugins:      plugins.BuiltIns(),
+		Registry:     registry,
+		Store:        store,
+		StoreBackend: "memory",
+	})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/stats", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"failed":1`) {
+		t.Fatalf("stats status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+queued.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), queued.ID) {
+		t.Fatalf("detail status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+queued.ID+"/logs?limit=1", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"logs"`) {
+		t.Fatalf("logs status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+queued.ID+"/retry", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"queued"`) {
+		t.Fatalf("retry status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+type errTestFailure struct{}
+
+func (errTestFailure) Error() string { return "boom" }

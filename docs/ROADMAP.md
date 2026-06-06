@@ -35,39 +35,44 @@
 
 Remaining Phase 1 hardening:
 
-- richer asset metadata extraction;
-- preview generation workers for videos and unsupported image formats;
-- richer map rendering with real map tiles/OpenLayers;
-- durable job dashboard filters and retry controls.
+- DB-backed sustained worker stress tests beyond fixture integration tests.
+- Rescan/missing-file state transitions for explicitly bounded scopes.
+- Richer map rendering with real map tiles/OpenLayers.
+- Persistent preview-cache index/table if cache management needs cross-process introspection.
 
 ## Phase 2: Media Usability
 
-- Original streaming with robust Range support.
-- Image previews generated on demand into a cache outside originals.
-- ffprobe metadata extraction where available.
-- Missing-file detection and rescan behavior.
-- Improved folder and table filtering beyond the current folder MVP.
+- Original streaming with robust Range and HEAD support. Implemented for read-only filesystem storage.
+- Image previews generated on demand and by queued job into a cache outside originals. Implemented for Go-decodable images.
+- Metadata enrichment job for image dimensions, ffprobe video metadata, and GPX analysis. Implemented.
+- Job dashboard APIs and WebUI controls for stats/detail/logs/cancel/retry. Implemented.
+- Explorer/asset list filtering, sorting, pagination headers. Implemented over current store result sets.
+- Missing-file detection and rescan behavior. Future work.
+- Video poster generation. Future work.
 
 ## Phase 3: Map And Tracks Foundation
 
-- Track ingestion.
-- Basic map view with OpenLayers.
-- Geotag display and inferred-location flags.
-- Time filters and track/media overlap queries.
+- Track ingestion from GPX. Implemented.
+- Track analysis with bbox, distance, duration, elevation, and simplification. Implemented.
+- Basic map GeoJSON API with bbox/time/media filters and deterministic point clustering. Implemented.
+- Basic SVG map WebUI without external tile dependency. Implemented.
+- Live video-track sync candidates, manual links, deletion, and marker interpolation API. Implemented.
+- Real map tiles/OpenLayers and richer geotag editing. Future work.
 
 ## Phase 4: Plugin Expansion
 
-- Sidecar HTTP plugin contract.
+- Sidecar HTTP plugin manifest contract and health stub. Implemented.
 - WebUI plugin asset mounting.
 - Plugin-specific settings backed by PostgreSQL.
-- Capability and health reporting per plugin.
+- Capability and health reporting per plugin. Implemented as core/built-in status and sidecar stub.
 
 ## Phase 5: Transcoding And AI Foundations
 
-- Transcoding job model and preset storage.
-- Hardware capability detection.
-- AI runtime inventory and worker contract.
-- Embedding and classifier interfaces.
+- Transcoding preset/output schema contracts. Implemented.
+- ffmpeg/ffprobe encoder and hardware capability detection. Implemented as inventory only.
+- AI/vector status APIs and accelerator hints. Implemented without AI dependencies.
+- Embedding schema contract without required pgvector. Implemented.
+- Actual transcoding jobs, model execution, embeddings, and classification. Future work.
 
 ## Phase 6: Large Archive Hardening
 
@@ -75,4 +80,4 @@ Remaining Phase 1 hardening:
 - Better duplicate workflows without destructive defaults.
 - Observability and admin status pages.
 - Offline resource packaging.
-- Performance tests on synthetic large datasets.
+- Performance tests on synthetic large datasets. Implemented as bounded scripts; more metrics remain future work.

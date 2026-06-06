@@ -195,6 +195,7 @@ db.sqlite3-journal
 media/
 !internal/media/
 !internal/media/**
+testdata/synthetic_media/
 
 
 # -----------------------------------------------------------------------------

@@ -3,6 +3,7 @@ package preview
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -72,5 +73,31 @@ func TestGenerateImagePreviewUnsupportedFormat(t *testing.T) {
 	}
 	if info.Status != StatusUnsupported {
 		t.Fatalf("expected unsupported, got %#v", info)
+	}
+}
+
+func TestCleanupStaysInsideCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	previewDir := filepath.Join(cacheDir, "previews", "aa")
+	if err := os.MkdirAll(previewDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(previewDir, "old.jpg")
+	if err := os.WriteFile(oldPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().UTC().Add(-48 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := Cleanup(cacheDir, 0, time.Hour, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected one removed preview, got %#v", removed)
+	}
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected old preview removed, stat err=%v", err)
 	}
 }

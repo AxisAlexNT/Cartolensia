@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"sort"
 	"strings"
@@ -86,6 +87,10 @@ type TrackSummary struct {
 	MinLon       *float64   `json:"min_lon,omitempty"`
 	MaxLat       *float64   `json:"max_lat,omitempty"`
 	MaxLon       *float64   `json:"max_lon,omitempty"`
+	DistanceM    float64    `json:"distance_m,omitempty"`
+	DurationSec  *float64   `json:"duration_seconds,omitempty"`
+	ElevationMin *float64   `json:"elevation_min_m,omitempty"`
+	ElevationMax *float64   `json:"elevation_max_m,omitempty"`
 }
 
 type TrackDetail struct {
@@ -107,10 +112,12 @@ type TrackLink struct {
 }
 
 type TrackCandidate struct {
-	Track        TrackSummary `json:"track"`
-	OverlapStart *time.Time   `json:"overlap_start,omitempty"`
-	OverlapEnd   *time.Time   `json:"overlap_end,omitempty"`
-	Confidence   float64      `json:"confidence"`
+	Track          TrackSummary `json:"track"`
+	OverlapStart   *time.Time   `json:"overlap_start,omitempty"`
+	OverlapEnd     *time.Time   `json:"overlap_end,omitempty"`
+	OverlapSeconds float64      `json:"overlap_seconds"`
+	Confidence     float64      `json:"confidence"`
+	Reason         string       `json:"reason,omitempty"`
 }
 
 type Store interface {
@@ -126,6 +133,7 @@ type Store interface {
 	TrackCandidates(context.Context, string) ([]TrackCandidate, error)
 	SaveTrackLink(context.Context, TrackLink) (TrackLink, error)
 	ListTrackLinks(context.Context, string) ([]TrackLink, error)
+	DeleteTrackLink(context.Context, string) error
 	EnqueueJob(context.Context, jobs.Job) (jobs.Job, error)
 	UpdateJob(context.Context, jobs.Job) error
 	ListJobs(context.Context) ([]jobs.Job, error)
@@ -386,7 +394,7 @@ func (s *MemoryStore) TrackCandidates(_ context.Context, assetID string) ([]Trac
 		if confidence > 1 {
 			confidence = 1
 		}
-		out = append(out, TrackCandidate{Track: summary, OverlapStart: &overlapStart, OverlapEnd: &overlapEnd, Confidence: confidence})
+		out = append(out, TrackCandidate{Track: summary, OverlapStart: &overlapStart, OverlapEnd: &overlapEnd, OverlapSeconds: overlapEnd.Sub(overlapStart).Seconds(), Confidence: confidence, Reason: "overlapping asset and track time intervals"})
 	}
 	return out, nil
 }
@@ -426,6 +434,16 @@ func (s *MemoryStore) ListTrackLinks(_ context.Context, assetID string) ([]Track
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (s *MemoryStore) DeleteTrackLink(_ context.Context, linkID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.trackLinks[linkID]; !ok {
+		return ErrNotFound
+	}
+	delete(s.trackLinks, linkID)
+	return nil
 }
 
 func (s *MemoryStore) EnqueueJob(_ context.Context, job jobs.Job) (jobs.Job, error) {
@@ -946,21 +964,22 @@ func summarizeTrack(asset Asset, points []TrackPoint) TrackSummary {
 		lat := point.Lat
 		lon := point.Lon
 		if i == 0 {
-			start := point.RecordedAt
-			end := point.RecordedAt
-			summary.StartTime = &start
-			summary.EndTime = &end
+			if !point.RecordedAt.IsZero() {
+				start := point.RecordedAt
+				end := point.RecordedAt
+				summary.StartTime = &start
+				summary.EndTime = &end
+			}
 			summary.MinLat = &lat
 			summary.MaxLat = &lat
 			summary.MinLon = &lon
 			summary.MaxLon = &lon
-			continue
 		}
-		if summary.StartTime == nil || point.RecordedAt.Before(*summary.StartTime) {
+		if !point.RecordedAt.IsZero() && (summary.StartTime == nil || point.RecordedAt.Before(*summary.StartTime)) {
 			t := point.RecordedAt
 			summary.StartTime = &t
 		}
-		if summary.EndTime == nil || point.RecordedAt.After(*summary.EndTime) {
+		if !point.RecordedAt.IsZero() && (summary.EndTime == nil || point.RecordedAt.After(*summary.EndTime)) {
 			t := point.RecordedAt
 			summary.EndTime = &t
 		}
@@ -980,8 +999,34 @@ func summarizeTrack(asset Asset, points []TrackPoint) TrackSummary {
 			v := point.Lon
 			summary.MaxLon = &v
 		}
+		if point.ElevationM != nil {
+			ele := *point.ElevationM
+			if summary.ElevationMin == nil || ele < *summary.ElevationMin {
+				summary.ElevationMin = &ele
+			}
+			if summary.ElevationMax == nil || ele > *summary.ElevationMax {
+				summary.ElevationMax = &ele
+			}
+		}
+		if i > 0 {
+			summary.DistanceM += haversineMeters(points[i-1].Lat, points[i-1].Lon, point.Lat, point.Lon)
+		}
+	}
+	if summary.StartTime != nil && summary.EndTime != nil && summary.EndTime.After(*summary.StartTime) {
+		duration := summary.EndTime.Sub(*summary.StartTime).Seconds()
+		summary.DurationSec = &duration
 	}
 	return summary
+}
+
+func haversineMeters(lat1, lon1, lat2, lon2 float64) float64 {
+	const radiusM = 6371008.8
+	phi1 := lat1 * math.Pi / 180
+	phi2 := lat2 * math.Pi / 180
+	dPhi := (lat2 - lat1) * math.Pi / 180
+	dLambda := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dPhi/2)*math.Sin(dPhi/2) + math.Cos(phi1)*math.Cos(phi2)*math.Sin(dLambda/2)*math.Sin(dLambda/2)
+	return 2 * radiusM * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 func assetInterval(asset Asset) (time.Time, time.Time, bool) {

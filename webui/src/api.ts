@@ -53,6 +53,8 @@ export type Asset = {
   id: string;
   media_kind: string;
   display_name: string;
+  taken_at?: string;
+  metadata?: Record<string, unknown>;
   first_seen_at: string;
   updated_at: string;
   locations: Array<{
@@ -78,6 +80,7 @@ export type PreviewInfo = {
   status: string;
   url?: string;
   cache_key?: string;
+  cache_path?: string;
   message?: string;
 };
 
@@ -86,11 +89,24 @@ export type Principal = {
   name: string;
   email?: string;
   role: string;
+  auth_method?: string;
+  scopes?: string[];
 };
 
 export type AuthMe = {
   principal: Principal;
-  auth_mode: string;
+  auth: AuthStatus;
+};
+
+export type AuthStatus = {
+  mode: string;
+  warning?: string;
+  session_cookie_name?: string;
+  session_cookie_secure?: boolean;
+  csrf_required?: boolean;
+  csrf_header?: string;
+  oidc_enabled?: boolean;
+  oauth_enabled?: boolean;
 };
 
 export type LoginResult = {
@@ -130,6 +146,10 @@ export type TrackSummary = {
   min_lon?: number;
   max_lat?: number;
   max_lon?: number;
+  distance_m?: number;
+  duration_seconds?: number;
+  elevation_min_m?: number;
+  elevation_max_m?: number;
 };
 
 export type TrackDetail = {
@@ -167,7 +187,18 @@ export type Job = {
   lease_expires_at?: string;
   cancel_requested_at?: string;
   next_run_at?: string;
-  logs?: Array<{ level: string; message: string; created_at: string }>;
+  logs?: Array<{ id?: number; level: string; message: string; created_at: string }>;
+};
+
+export type JobStats = {
+  queued: number;
+  running: number;
+  cancel_requested: number;
+  failed: number;
+  succeeded: number;
+  cancelled: number;
+  active_worker_ids: string[];
+  last_errors: Array<Record<string, unknown>>;
 };
 
 export type Stats = {
@@ -188,13 +219,43 @@ export type BackendStatus = {
   stats: Stats;
   preview_cache: string;
   auth_mode: string;
+  auth: AuthStatus;
+  tools?: Record<string, unknown>;
 };
 
+export type TranscodingCapabilities = {
+  ffmpeg: { available: boolean; path?: string; version?: string };
+  ffprobe: { available: boolean; path?: string; version?: string };
+  encoders: Array<{ name: string; description?: string; codec_family?: string; hardware?: string }>;
+  hardware: Record<string, boolean>;
+  safety: string;
+};
+
+let csrfHeader = "X-CSRF-Token";
+let csrfToken = "";
+
+async function refreshCSRF(): Promise<void> {
+  const response = await fetch("/api/v1/auth/csrf", { credentials: "same-origin" });
+  if (!response.ok) return;
+  const body = (await response.json()) as { required?: boolean; header?: string; token?: string };
+  if (body.required && body.header && body.token) {
+    csrfHeader = body.header;
+    csrfToken = body.token;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = init?.method?.toUpperCase() ?? "GET";
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (init?.headers) Object.assign(headers, init.headers as Record<string, string>);
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && path !== "/api/v1/auth/login" && path !== "/api/v1/auth/csrf") {
+    await refreshCSRF().catch(() => undefined);
+    if (csrfToken) headers[csrfHeader] = csrfToken;
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
-    ...init
+    ...init,
+    headers
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -206,9 +267,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<{ status: string }>("/api/v1/health"),
   me: () => request<AuthMe>("/api/v1/auth/me"),
+  csrf: refreshCSRF,
   login: (email: string, password: string) =>
     request<LoginResult>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
   logout: () => request<{ status: string }>("/api/v1/auth/logout", { method: "POST" }),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    request<{ status: string }>("/api/v1/auth/password", {
+      method: "POST",
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
+    }),
   tokens: () => request<APIToken[]>("/api/v1/auth/tokens"),
   createToken: (name: string, scopes: string[]) =>
     request<{ token: APIToken; secret: string }>("/api/v1/auth/tokens", {
@@ -218,7 +285,12 @@ export const api = {
   status: () => request<BackendStatus>("/api/v1/backend/status"),
   storages: () => request<StorageConfig[]>("/api/v1/storages"),
   plugins: () => request<PluginManifest[]>("/api/v1/plugins"),
-  jobs: () => request<Job[]>("/api/v1/jobs"),
+  plugin: (id: string) => request<PluginManifest>(`/api/v1/plugins/${encodeURIComponent(id)}`),
+  pluginHealth: (id: string) => request<Record<string, unknown>>(`/api/v1/plugins/${encodeURIComponent(id)}/health`),
+  jobs: (query = "") => request<Job[]>(`/api/v1/jobs${query ? `?${query}` : ""}`),
+  jobStats: () => request<JobStats>("/api/v1/jobs/stats"),
+  job: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}`),
+  jobLogs: (id: string) => request<{ logs: Job["logs"]; next_after_id: number }>(`/api/v1/jobs/${encodeURIComponent(id)}/logs`),
   explorer: () => request<ExplorerRow[]>("/api/v1/explorer"),
   explorerFolders: (path = "") =>
     request<ExplorerView>(`/api/v1/explorer?view=folders&path=${encodeURIComponent(path)}&sort=name`),
@@ -228,9 +300,22 @@ export const api = {
   syncCandidates: (assetId: string) =>
     request<TrackCandidate[]>(`/api/v1/sync/candidates?asset_id=${encodeURIComponent(assetId)}`),
   map: (bbox = "43.8,39.8,44.3,40.3", zoom = 10) =>
-    request<Record<string, unknown>>(`/api/v1/map?bbox=${encodeURIComponent(bbox)}&zoom=${zoom}`),
+    request<Record<string, unknown>>(`/api/v1/map?bbox=${encodeURIComponent(bbox)}&zoom=${zoom}&cluster=true`),
   stats: () => request<Stats>("/api/v1/stats"),
   startDiscovery: () => request<Job>("/api/v1/discovery/start", { method: "POST" }),
   startHash: () => request<Job>("/api/v1/hash/start", { method: "POST" }),
-  cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" })
+  startMetadata: () =>
+    request<Job>("/api/v1/metadata/enrich/start", {
+      method: "POST",
+      body: JSON.stringify({ include_video: true, include_images: true, include_tracks: true, only_missing: false })
+    }),
+  startPreviews: () =>
+    request<Job>("/api/v1/previews/start", { method: "POST", body: JSON.stringify({ only_missing: true }) }),
+  cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  retryJob: (id: string, force = false) =>
+    request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, { method: "POST", body: JSON.stringify({ force }) }),
+  transcodingCapabilities: () => request<TranscodingCapabilities>("/api/v1/transcoding/capabilities"),
+  transcodingStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/status"),
+  aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
+  vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status")
 };

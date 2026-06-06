@@ -283,6 +283,30 @@ func (db *DB) UserByEmail(ctx context.Context, email string) (auth.User, error) 
 	return user, err
 }
 
+func (db *DB) UserByID(ctx context.Context, userID string) (auth.User, error) {
+	var user auth.User
+	err := db.pool.QueryRow(ctx, `
+		select id::text, email, display_name, coalesce(password_hash, ''), role, disabled_at
+		from users where id=$1
+	`, userID).Scan(&user.ID, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Role, &user.DisabledAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.User{}, auth.ErrNotFound
+	}
+	return user, err
+}
+
+func (db *DB) UpdatePassword(ctx context.Context, userID, passwordHash string) error {
+	cmd, err := db.pool.Exec(ctx, `update users set password_hash=$2, updated_at=now() where id=$1`, userID, passwordHash)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return auth.ErrNotFound
+	}
+	_, _ = db.pool.Exec(ctx, `delete from sessions where user_id=$1`, userID)
+	return nil
+}
+
 func (db *DB) CreateSession(ctx context.Context, sessionID, userID string, tokenHash []byte, expiresAt time.Time) error {
 	_, err := db.pool.Exec(ctx, `
 		insert into sessions(id, user_id, token_hash, expires_at)
@@ -310,6 +334,7 @@ func (db *DB) PrincipalBySessionHash(ctx context.Context, tokenHash []byte, now 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
+	principal.AuthMethod = auth.AuthMethodSession
 	return principal, err
 }
 
@@ -318,15 +343,24 @@ func (db *DB) DeleteSessionByHash(ctx context.Context, tokenHash []byte) error {
 	return err
 }
 
+func (db *DB) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	cmd, err := db.pool.Exec(ctx, `delete from sessions where expires_at <= $1`, now)
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
+}
+
 func (db *DB) PrincipalByAPITokenHash(ctx context.Context, tokenHash []byte, now time.Time) (auth.Principal, error) {
 	var principal auth.Principal
+	var scopes []string
 	err := db.pool.QueryRow(ctx, `
 		update api_tokens set last_used_at=$2
 		where token_hash=$1
 			and revoked_at is null
 			and (expires_at is null or expires_at > $2)
-		returning user_id::text
-	`, tokenHash, now).Scan(&principal.ID)
+		returning user_id::text, scopes
+	`, tokenHash, now).Scan(&principal.ID, &scopes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
@@ -339,6 +373,8 @@ func (db *DB) PrincipalByAPITokenHash(ctx context.Context, tokenHash []byte, now
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
+	principal.AuthMethod = auth.AuthMethodAPIToken
+	principal.Scopes = scopes
 	return principal, err
 }
 
@@ -582,10 +618,10 @@ func (db *DB) UpsertTrackPoints(ctx context.Context, trackAssetID string, points
 func (db *DB) ListTracks(ctx context.Context) ([]catalog.TrackSummary, error) {
 	rows, err := db.pool.Query(ctx, `
 		select a.id::text, a.display_name, count(tp.id)::int,
-			min(tp.recorded_at), max(tp.recorded_at), min(tp.lat), min(tp.lon), max(tp.lat), max(tp.lon)
+			min(tp.recorded_at), max(tp.recorded_at), min(tp.lat), min(tp.lon), max(tp.lat), max(tp.lon), a.metadata_json::text
 		from assets a
 		join track_points tp on tp.track_asset_id=a.id
-		group by a.id, a.display_name
+		group by a.id, a.display_name, a.metadata_json
 		order by min(tp.recorded_at), a.display_name
 	`)
 	if err != nil {
@@ -595,12 +631,49 @@ func (db *DB) ListTracks(ctx context.Context) ([]catalog.TrackSummary, error) {
 	var out []catalog.TrackSummary
 	for rows.Next() {
 		var summary catalog.TrackSummary
-		if err := rows.Scan(&summary.TrackAssetID, &summary.Name, &summary.PointCount, &summary.StartTime, &summary.EndTime, &summary.MinLat, &summary.MinLon, &summary.MaxLat, &summary.MaxLon); err != nil {
+		var metadataText string
+		if err := rows.Scan(&summary.TrackAssetID, &summary.Name, &summary.PointCount, &summary.StartTime, &summary.EndTime, &summary.MinLat, &summary.MinLon, &summary.MaxLat, &summary.MaxLon, &metadataText); err != nil {
 			return nil, err
 		}
+		applyTrackMetadata(&summary, metadataText)
 		out = append(out, summary)
 	}
 	return out, rows.Err()
+}
+
+func applyTrackMetadata(summary *catalog.TrackSummary, metadataText string) {
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataText), &metadata); err != nil {
+		return
+	}
+	if value, ok := metadataFloat(metadata, "distance_m"); ok {
+		summary.DistanceM = value
+	}
+	if value, ok := metadataFloat(metadata, "duration_seconds"); ok {
+		summary.DurationSec = &value
+	}
+	if value, ok := metadataFloat(metadata, "elevation_min_m"); ok {
+		summary.ElevationMin = &value
+	}
+	if value, ok := metadataFloat(metadata, "elevation_max_m"); ok {
+		summary.ElevationMax = &value
+	}
+}
+
+func metadataFloat(metadata map[string]any, key string) (float64, bool) {
+	switch value := metadata[key].(type) {
+	case float64:
+		return value, true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case json.Number:
+		parsed, err := value.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (db *DB) GetTrack(ctx context.Context, trackAssetID string) (catalog.TrackDetail, error) {
@@ -682,10 +755,12 @@ func (db *DB) TrackCandidates(ctx context.Context, assetID string) ([]catalog.Tr
 			if duration <= 0 {
 				duration = 1
 			}
+			candidate.OverlapSeconds = candidate.OverlapEnd.Sub(*candidate.OverlapStart).Seconds()
 			candidate.Confidence = candidate.OverlapEnd.Sub(*candidate.OverlapStart).Seconds() / duration
 			if candidate.Confidence > 1 {
 				candidate.Confidence = 1
 			}
+			candidate.Reason = "overlapping asset and track time intervals"
 		}
 		out = append(out, candidate)
 	}
@@ -742,6 +817,17 @@ func (db *DB) ListTrackLinks(ctx context.Context, assetID string) ([]catalog.Tra
 		out = append(out, link)
 	}
 	return out, rows.Err()
+}
+
+func (db *DB) DeleteTrackLink(ctx context.Context, linkID string) error {
+	cmd, err := db.pool.Exec(ctx, `delete from asset_track_links where id=$1`, linkID)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return catalog.ErrNotFound
+	}
+	return nil
 }
 
 func (db *DB) EnqueueJob(ctx context.Context, job jobs.Job) (jobs.Job, error) {
@@ -1244,7 +1330,7 @@ func replaceJobLogs(ctx context.Context, tx pgx.Tx, job jobs.Job) error {
 }
 
 func (db *DB) jobLogs(ctx context.Context, jobID string) ([]jobs.LogLine, error) {
-	rows, err := db.pool.Query(ctx, `select level, message, created_at from job_logs where job_id=$1 order by created_at`, jobID)
+	rows, err := db.pool.Query(ctx, `select id, level, message, created_at from job_logs where job_id=$1 order by id`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -1252,7 +1338,7 @@ func (db *DB) jobLogs(ctx context.Context, jobID string) ([]jobs.LogLine, error)
 	var out []jobs.LogLine
 	for rows.Next() {
 		var line jobs.LogLine
-		if err := rows.Scan(&line.Level, &line.Message, &line.CreatedAt); err != nil {
+		if err := rows.Scan(&line.ID, &line.Level, &line.Message, &line.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, line)

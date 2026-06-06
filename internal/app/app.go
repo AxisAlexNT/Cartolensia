@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/auth"
@@ -12,7 +13,9 @@ import (
 	"github.com/AxisAlexNT/Cartolensia/internal/database"
 	"github.com/AxisAlexNT/Cartolensia/internal/discovery"
 	"github.com/AxisAlexNT/Cartolensia/internal/jobs"
+	"github.com/AxisAlexNT/Cartolensia/internal/metadata"
 	"github.com/AxisAlexNT/Cartolensia/internal/plugins"
+	"github.com/AxisAlexNT/Cartolensia/internal/preview"
 	"github.com/AxisAlexNT/Cartolensia/internal/server"
 	"github.com/AxisAlexNT/Cartolensia/internal/storage"
 	"github.com/AxisAlexNT/Cartolensia/internal/workers"
@@ -110,7 +113,11 @@ func New(ctx context.Context, configPath string) (*App, error) {
 			return nil, err
 		}
 		service := auth.NewLocalService(authStore, authCfg)
-		password := os.Getenv(authCfg.AdminPasswordEnv)
+		password, err := bootstrapPassword(cfg.Auth, authCfg.AdminPasswordEnv)
+		if err != nil {
+			app.Close()
+			return nil, err
+		}
 		if _, _, err := service.Bootstrap(ctx, password); err != nil {
 			app.Close()
 			return nil, fmt.Errorf("bootstrap local auth: %w", err)
@@ -136,6 +143,14 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		manager.Register("hash", func(ctx context.Context, job *jobs.Job) error {
 			runner := discovery.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
 			return runner.HashUnhashed(ctx, job)
+		})
+		manager.Register("metadata_enrich", func(ctx context.Context, job *jobs.Job) error {
+			runner := metadata.Runner{Registry: app.Registry, Store: app.Store, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
+			return runner.Enrich(ctx, job)
+		})
+		manager.Register("preview_generate", func(ctx context.Context, job *jobs.Job) error {
+			runner := preview.Runner{Registry: app.Registry, Store: app.Store, CacheDir: app.Config.Cache.Dir, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
+			return runner.Generate(ctx, job)
 		})
 		manager.Start()
 		app.Workers = manager
@@ -201,11 +216,31 @@ func authConfig(cfg config.AuthConfig) (auth.Config, error) {
 		return auth.Config{}, fmt.Errorf("parse auth.api_token_ttl: %w", err)
 	}
 	return auth.Config{
-		AdminEmail:       cfg.AdminEmail,
-		AdminDisplayName: cfg.AdminDisplayName,
-		AdminPasswordEnv: cfg.AdminPasswordEnv,
-		SessionTTL:       sessionTTL,
-		APITokenTTL:      apiTokenTTL,
-		CookieName:       cfg.CookieName,
+		AdminEmail:              cfg.AdminEmail,
+		AdminDisplayName:        cfg.AdminDisplayName,
+		AdminPasswordEnv:        cfg.AdminPasswordEnv,
+		RotateBootstrapPassword: cfg.RotateBootstrapPassword,
+		SessionTTL:              sessionTTL,
+		APITokenTTL:             apiTokenTTL,
+		CookieName:              cfg.CookieName,
+		CookieSecure:            cfg.CookieSecure,
+		CSRFHeader:              cfg.CSRFHeader,
 	}, nil
+}
+
+func bootstrapPassword(cfg config.AuthConfig, passwordEnv string) (string, error) {
+	if passwordEnv == "" {
+		passwordEnv = "CARTOLENSIA_ADMIN_PASSWORD"
+	}
+	if password := os.Getenv(passwordEnv); password != "" {
+		return password, nil
+	}
+	if cfg.AdminPasswordFile == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(cfg.AdminPasswordFile)
+	if err != nil {
+		return "", fmt.Errorf("read auth.admin_password_file: %w", err)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }

@@ -120,6 +120,7 @@ type Counters struct {
 }
 
 type LogLine struct {
+	ID        int64     `json:"id,omitempty"`
 	Level     string    `json:"level"`
 	Message   string    `json:"message"`
 	CreatedAt time.Time `json:"created_at"`
@@ -146,6 +147,7 @@ func Transition(current Status, next Status) error {
 		StatusRunning:         {StatusSucceeded, StatusFailed, StatusCancelRequested, StatusCanceled, StatusQueued},
 		StatusCancelRequested: {StatusCanceled, StatusFailed, StatusQueued},
 		StatusFailed:          {StatusQueued},
+		StatusCanceled:        {StatusQueued},
 	}
 	for _, status := range allowed[current] {
 		if status == next {
@@ -255,6 +257,24 @@ func Retry(job *Job, delay time.Duration, cause error) error {
 	job.WorkerID = ""
 	job.LeaseExpiresAt = nil
 	job.Error = cause.Error()
+	return nil
+}
+
+func RetryNow(job *Job, cause error) error {
+	if cause == nil {
+		cause = errors.New("manual retry requested")
+	}
+	if err := Transition(job.Status, StatusQueued); err != nil {
+		return err
+	}
+	job.Status = StatusQueued
+	job.NextRunAt = nil
+	job.WorkerID = ""
+	job.LeaseExpiresAt = nil
+	job.FinishedAt = nil
+	job.CancelRequestedAt = nil
+	job.Error = cause.Error()
+	AddLog(job, "info", cause.Error())
 	return nil
 }
 

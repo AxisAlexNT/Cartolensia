@@ -78,9 +78,9 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 			} else {
 				job.Counters.Updated++
 			}
-			if err := r.enrichDiscoveredFile(ctx, result.Asset.ID, file); err != nil {
+			if err := r.applyTextHints(ctx, result.Asset.ID, file); err != nil {
 				job.Counters.Errors++
-				jobs.AddLog(job, "warn", fmt.Sprintf("%s: metadata enrichment skipped: %v", file.StorageURL, err))
+				jobs.AddLog(job, "warn", fmt.Sprintf("%s: fixture hints skipped: %v", file.StorageURL, err))
 			}
 			job.ProgressCurrent++
 			if err := r.updateJob(ctx, *job); err != nil {

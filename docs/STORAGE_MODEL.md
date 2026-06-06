@@ -37,13 +37,27 @@ Stage 1: fast scan.
 - extension and MIME guess;
 - size and mtime;
 - coarse media kind;
-- cheap metadata when available and safe.
+- fixture text hints when available and safe.
 
 Stage 2: lazy hash.
 
 - streaming SHA-512;
 - no whole-file buffering;
 - priority for selected assets, likely duplicates, and integrity checks.
+
+Stage 3: explicit metadata enrichment.
+
+- image dimensions through Go decoders where supported;
+- video metadata through optional ffprobe;
+- GPX point ingest, bbox, distance, duration, elevation, and time span;
+- additive metadata JSON patches only.
+
+Stage 4: optional preview generation.
+
+- cache under Cartolensia cache/work directory only;
+- no sidecars and no writes near originals;
+- cache keys derived from asset/content IDs and requested dimensions;
+- unsupported formats return clean statuses.
 
 ## Safety Modes
 
@@ -89,6 +103,22 @@ Do not access `/mnt/Models/rclone` during the MVP preparation or the first unatt
 - Original streaming opens files only through the registry and serves them read-only with HTTP Range support through the Go HTTP stack.
 - On-demand preview cache paths are derived from asset/content IDs and live under the Cartolensia cache directory. Preview code verifies generated cache paths stay inside that directory and must never create files next to originals.
 - Built-in preview generation supports decodable image formats provided by Go's standard image decoders and writes JPEG cache files. Unsupported formats such as dummy text fixtures and HEIC return a clean unsupported response.
+- Preview cache cleanup only walks the `previews/` subtree under the configured cache root and verifies each deletion target stays inside that root.
+- Metadata/preview/hash jobs check cancellation between files.
+
+## Synthetic Scale Fixtures
+
+`scripts/generate-synthetic-fixture.sh` creates configurable dummy directory trees for scale testing. By default it writes under ignored `testdata/synthetic_media/`; for unattended or review-friendly runs, prefer an explicit temporary root:
+
+```bash
+CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/generate-synthetic-fixture.sh
+```
+
+`scripts/perf-smoke.sh` can run a bounded discovery/hash smoke against that tree. The generated files are text/image-like/GPX/MP4-like dummy files, not real media.
+
+## Missing Files And Rescan Policy
+
+`asset_locations.last_seen_at` and `missing_at` exist in the schema. Discovery updates `last_seen_at` for seen URLs. Automatic missing marking is intentionally deferred until scoped rescan semantics are fully implemented. Future missing-file marking must be limited to an explicitly scanned storage/prefix scope so a small bounded scan cannot mark an unrelated archive subtree missing.
 
 ## Non-Media Files
 

@@ -23,10 +23,12 @@ var (
 )
 
 type Principal struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email,omitempty"`
-	Role  string `json:"role"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Email      string   `json:"email,omitempty"`
+	Role       string   `json:"role"`
+	AuthMethod string   `json:"auth_method,omitempty"`
+	Scopes     []string `json:"scopes,omitempty"`
 }
 
 type User struct {
@@ -76,9 +78,12 @@ type Authorizer interface {
 type Store interface {
 	BootstrapAdmin(context.Context, User) (User, bool, error)
 	UserByEmail(context.Context, string) (User, error)
+	UserByID(context.Context, string) (User, error)
+	UpdatePassword(context.Context, string, string) error
 	CreateSession(context.Context, string, string, []byte, time.Time) error
 	PrincipalBySessionHash(context.Context, []byte, time.Time) (Principal, error)
 	DeleteSessionByHash(context.Context, []byte) error
+	DeleteExpiredSessions(context.Context, time.Time) (int64, error)
 	PrincipalByAPITokenHash(context.Context, []byte, time.Time) (Principal, error)
 	CreateAPIToken(context.Context, APIToken, []byte) error
 	ListAPITokens(context.Context, string) ([]APIToken, error)
@@ -86,20 +91,38 @@ type Store interface {
 }
 
 type Config struct {
-	AdminEmail       string
-	AdminDisplayName string
-	AdminPasswordEnv string
-	SessionTTL       time.Duration
-	APITokenTTL      time.Duration
-	CookieName       string
+	AdminEmail              string
+	AdminDisplayName        string
+	AdminPasswordEnv        string
+	RotateBootstrapPassword bool
+	SessionTTL              time.Duration
+	APITokenTTL             time.Duration
+	CookieName              string
+	CookieSecure            bool
+	CSRFHeader              string
 }
 
 const DefaultCookieName = "cartolensia_session"
 
+const (
+	AuthMethodDevNoAuth = "dev_no_auth"
+	AuthMethodSession   = "session"
+	AuthMethodAPIToken  = "api_token"
+
+	ScopeRead         = "read"
+	ScopeWrite        = "write"
+	ScopeJobsWrite    = "jobs:write"
+	ScopePluginsWrite = "plugins:write"
+	ScopeMediaRead    = "media:read"
+	ScopeAdmin        = "admin"
+
+	DefaultCSRFHeader = "X-CSRF-Token"
+)
+
 type DevNoAuth struct{}
 
 func (DevNoAuth) Authenticate(*http.Request) (Principal, error) {
-	return Principal{ID: "dev", Name: "Development Admin", Role: "admin"}, nil
+	return Principal{ID: "dev", Name: "Development Admin", Role: "admin", AuthMethod: AuthMethodDevNoAuth, Scopes: []string{ScopeAdmin}}, nil
 }
 
 func (DevNoAuth) Authorize(principal Principal, _ string) error {
@@ -140,6 +163,9 @@ func NewLocalService(store Store, cfg Config) *LocalService {
 	if cfg.CookieName == "" {
 		cfg.CookieName = DefaultCookieName
 	}
+	if cfg.CSRFHeader == "" {
+		cfg.CSRFHeader = DefaultCSRFHeader
+	}
 	if cfg.AdminPasswordEnv == "" {
 		cfg.AdminPasswordEnv = "CARTOLENSIA_ADMIN_PASSWORD"
 	}
@@ -147,10 +173,14 @@ func NewLocalService(store Store, cfg Config) *LocalService {
 }
 
 func (s *LocalService) Bootstrap(ctx context.Context, password string) (User, bool, error) {
-	if strings.TrimSpace(s.cfg.AdminEmail) == "" {
+	email := strings.ToLower(strings.TrimSpace(s.cfg.AdminEmail))
+	if email == "" {
 		return User{}, false, errors.New("auth.admin_email is required for local auth bootstrap")
 	}
 	if password == "" {
+		if existing, err := s.store.UserByEmail(ctx, email); err == nil {
+			return existing, false, nil
+		}
 		return User{}, false, fmt.Errorf("%s must be set for local auth bootstrap", s.cfg.AdminPasswordEnv)
 	}
 	hash, err := HashPassword(password)
@@ -161,39 +191,64 @@ func (s *LocalService) Bootstrap(ctx context.Context, password string) (User, bo
 	if name == "" {
 		name = "Cartolensia Admin"
 	}
-	return s.store.BootstrapAdmin(ctx, User{
+	user, created, err := s.store.BootstrapAdmin(ctx, User{
 		ID:           id.NewUUID(),
-		Email:        strings.ToLower(strings.TrimSpace(s.cfg.AdminEmail)),
+		Email:        email,
 		DisplayName:  name,
 		PasswordHash: hash,
 		Role:         "admin",
 	})
+	if err != nil || created || !s.cfg.RotateBootstrapPassword {
+		return user, created, err
+	}
+	if err := s.store.UpdatePassword(ctx, user.ID, hash); err != nil {
+		return User{}, false, err
+	}
+	user.PasswordHash = hash
+	return user, false, nil
 }
 
 func (s *LocalService) Authenticate(r *http.Request) (Principal, error) {
-	token, ok := s.TokenFromRequest(r)
+	credential, ok := s.CredentialFromRequest(r)
 	if !ok {
 		return Principal{}, ErrUnauthenticated
 	}
-	tokenHash := TokenHash(token)
+	tokenHash := TokenHash(credential.Secret)
 	now := time.Now().UTC()
-	if principal, err := s.store.PrincipalBySessionHash(r.Context(), tokenHash, now); err == nil {
+	_, _ = s.store.DeleteExpiredSessions(r.Context(), now)
+	if credential.Method == AuthMethodSession {
+		principal, err := s.store.PrincipalBySessionHash(r.Context(), tokenHash, now)
+		if err == nil {
+			principal.AuthMethod = AuthMethodSession
+			return principal, nil
+		}
+		return Principal{}, err
+	}
+	if principal, err := s.store.PrincipalByAPITokenHash(r.Context(), tokenHash, now); err == nil {
+		principal.AuthMethod = AuthMethodAPIToken
 		return principal, nil
 	}
-	return s.store.PrincipalByAPITokenHash(r.Context(), tokenHash, now)
+	return Principal{}, ErrUnauthenticated
 }
 
-func (s *LocalService) Authorize(principal Principal, _ string) error {
+func (s *LocalService) Authorize(principal Principal, action string) error {
 	if principal.ID == "" {
 		return ErrUnauthenticated
+	}
+	if principal.AuthMethod != AuthMethodAPIToken && principal.Role == "admin" {
+		return nil
+	}
+	if principal.AuthMethod == AuthMethodAPIToken && scopeAllowed(principal.Scopes, action) {
+		return nil
 	}
 	if principal.Role != "admin" {
 		return ErrUnauthorized
 	}
-	return nil
+	return ErrUnauthorized
 }
 
 func (s *LocalService) Login(ctx context.Context, email, password string) (LoginResult, string, error) {
+	_, _ = s.store.DeleteExpiredSessions(ctx, time.Now().UTC())
 	user, err := s.store.UserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
 	if err != nil {
 		return LoginResult{}, "", ErrUnauthenticated
@@ -210,8 +265,29 @@ func (s *LocalService) Login(ctx context.Context, email, password string) (Login
 	if err := s.store.CreateSession(ctx, sessionID, user.ID, TokenHash(secret), expiresAt); err != nil {
 		return LoginResult{}, "", err
 	}
-	principal := Principal{ID: user.ID, Name: user.DisplayName, Email: user.Email, Role: user.Role}
+	principal := Principal{ID: user.ID, Name: user.DisplayName, Email: user.Email, Role: user.Role, AuthMethod: AuthMethodSession}
 	return LoginResult{Principal: principal, Session: Session{ID: sessionID, Principal: principal, ExpiresAt: expiresAt}}, secret, nil
+}
+
+func (s *LocalService) ChangePassword(ctx context.Context, principal Principal, oldPassword, newPassword string) error {
+	if principal.ID == "" {
+		return ErrUnauthenticated
+	}
+	if strings.TrimSpace(newPassword) == "" {
+		return errors.New("new password is required")
+	}
+	user, err := s.store.UserByID(ctx, principal.ID)
+	if err != nil {
+		return ErrUnauthenticated
+	}
+	if !CheckPassword(user.PasswordHash, oldPassword) {
+		return ErrUnauthenticated
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	return s.store.UpdatePassword(ctx, principal.ID, hash)
 }
 
 func (s *LocalService) Logout(ctx context.Context, token string) error {
@@ -260,16 +336,48 @@ func (s *LocalService) RevokeAPIToken(ctx context.Context, principal Principal, 
 
 func (s *LocalService) CookieName() string { return s.cfg.CookieName }
 
-func (s *LocalService) TokenFromRequest(r *http.Request) (string, bool) {
+func (s *LocalService) CookieSecure() bool { return s.cfg.CookieSecure }
+
+func (s *LocalService) CSRFHeader() string { return s.cfg.CSRFHeader }
+
+type Credential struct {
+	Secret string
+	Method string
+}
+
+func (s *LocalService) CredentialFromRequest(r *http.Request) (Credential, bool) {
 	if value := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(value), "bearer ") {
 		token := strings.TrimSpace(value[len("bearer "):])
-		return token, token != ""
+		return Credential{Secret: token, Method: AuthMethodAPIToken}, token != ""
 	}
 	cookie, err := r.Cookie(s.cfg.CookieName)
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
-		return "", false
+		return Credential{}, false
 	}
-	return cookie.Value, true
+	return Credential{Secret: cookie.Value, Method: AuthMethodSession}, true
+}
+
+func (s *LocalService) TokenFromRequest(r *http.Request) (string, bool) {
+	credential, ok := s.CredentialFromRequest(r)
+	return credential.Secret, ok
+}
+
+func (s *LocalService) CSRFToken(secret string) string {
+	sum := sha256.Sum256([]byte("cartolensia-csrf-v1:" + secret))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (s *LocalService) ValidateCSRF(r *http.Request) error {
+	credential, ok := s.CredentialFromRequest(r)
+	if !ok || credential.Method != AuthMethodSession {
+		return nil
+	}
+	expected := s.CSRFToken(credential.Secret)
+	actual := strings.TrimSpace(r.Header.Get(s.cfg.CSRFHeader))
+	if actual == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(actual)) != 1 {
+		return ErrUnauthorized
+	}
+	return nil
 }
 
 func HashPassword(password string) (string, error) {
@@ -322,4 +430,36 @@ func cleanScopes(scopes []string) []string {
 		out = append(out, scope)
 	}
 	return out
+}
+
+func scopeAllowed(scopes []string, action string) bool {
+	needed := scopesForAction(action)
+	available := map[string]struct{}{}
+	for _, scope := range scopes {
+		available[scope] = struct{}{}
+	}
+	if _, ok := available[ScopeAdmin]; ok {
+		return true
+	}
+	for _, scope := range needed {
+		if _, ok := available[scope]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func scopesForAction(action string) []string {
+	switch action {
+	case "jobs.cancel", "jobs.retry", "discovery.start", "hash.start", "metadata.enrich", "previews.generate":
+		return []string{ScopeJobsWrite, ScopeWrite}
+	case "plugins.rescan":
+		return []string{ScopePluginsWrite, ScopeWrite}
+	case "api_tokens.create", "api_tokens.list", "api_tokens.revoke", "auth.password.change":
+		return []string{ScopeAdmin}
+	case "sync.links.save", "sync.links.delete":
+		return []string{ScopeWrite}
+	default:
+		return []string{ScopeWrite}
+	}
 }

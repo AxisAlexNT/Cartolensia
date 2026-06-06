@@ -1,6 +1,6 @@
 # Database Schema
 
-This is the target schema for the MVP implementation. Names can change during implementation if tests and migrations document the change.
+This describes the implemented schema as of the current Phase 2/3 foundation. Migrations live under `migrations/` and are embedded into the Go binary.
 
 ## Extensions
 
@@ -63,12 +63,24 @@ Current metadata keys used by the MVP are optional and additive:
 - `duration_seconds`
 - `width`
 - `height`
+- `codec`
+- `container`
+- `bitrate_bps`
+- `frame_rate`
 - `ffprobe_available`
 - `track_point_count`
 - `track_start_at`
 - `track_end_at`
+- `distance_m`
+- `elevation_min_m`
+- `elevation_max_m`
+- `min_lat`
+- `min_lon`
+- `max_lat`
+- `max_lon`
 - `lat`
 - `lon`
+- `metadata_extracted_at`
 
 `asset_locations`
 
@@ -135,6 +147,8 @@ Current metadata keys used by the MVP are optional and additive:
 - `manifest_json jsonb not null`
 - `loaded_at timestamptz not null default now()`
 
+Plugin `manifest_json` stores built-in and filesystem manifest fields, including future sidecar HTTP contract fields such as runtime, capabilities, permissions, base URL, and health path.
+
 `users`
 
 - `id uuid primary key`
@@ -193,6 +207,53 @@ Current metadata keys used by the MVP are optional and additive:
 
 The live video-track sync skeleton uses `assets.taken_at` plus `metadata_json.duration_seconds` to compute candidate overlaps. Manual links are stored in `asset_track_links` with `time_offset_ms`.
 
+`embedding_models`
+
+- `id text primary key`
+- `modality text not null`
+- `model_name text not null`
+- `version text not null`
+- `dimension int null`
+- `plugin_id text null references plugins(id)`
+- `metadata_json jsonb not null default '{}'::jsonb`
+- `created_at timestamptz not null default now()`
+
+`asset_embeddings`
+
+- `id uuid primary key`
+- `asset_id uuid not null references assets(id) on delete cascade`
+- `model_id text not null references embedding_models(id)`
+- `modality text not null`
+- `source_ref text not null default 'asset'`
+- `embedding_json jsonb not null default '{}'::jsonb`
+- `metadata_json jsonb not null default '{}'::jsonb`
+- `created_at timestamptz not null default now()`
+- `unique(asset_id, model_id, modality, source_ref)`
+
+This schema intentionally does not require pgvector. A future migration may add vector columns when the extension is available.
+
+`transcoding_presets`
+
+- `id text primary key`
+- `name text not null`
+- `config_json jsonb not null default '{}'::jsonb`
+- `created_at timestamptz not null default now()`
+- `updated_at timestamptz not null default now()`
+
+`transcoding_outputs`
+
+- `id uuid primary key`
+- `source_asset_id uuid not null references assets(id) on delete cascade`
+- `output_storage text not null`
+- `output_url text null`
+- `status text not null default 'planned'`
+- `safety_policy text not null default 'no_original_writes'`
+- `metadata_json jsonb not null default '{}'::jsonb`
+- `created_at timestamptz not null default now()`
+- `updated_at timestamptz not null default now()`
+
+Transcoding output rows are contract placeholders. The current backend detects capabilities only and does not write transcoded files.
+
 ## Indexes
 
 Initial indexes:
@@ -212,6 +273,9 @@ Initial indexes:
 - `api_tokens(user_id)`
 - `track_points(track_asset_id, recorded_at)`
 - `asset_track_links(asset_id)`
+- `asset_embeddings(asset_id)`
+- `asset_embeddings(model_id)`
+- `transcoding_outputs(source_asset_id)`
 
 Future geospatial indexes:
 
@@ -232,3 +296,4 @@ Implemented migrations:
 - `migrations/002_phase1_hardening.sql`: `app_settings`, queued-job scheduling with `next_run_at`, and lease indexes.
 - `migrations/003_auth_foundation.sql`: users, sessions, and API tokens for local auth bootstrap.
 - `migrations/004_job_lease_cancel_index.sql`: forward-only replacement of the lease-expiry index so it covers both `running` and `cancel_requested` jobs.
+- `migrations/005_ai_transcoding_contracts.sql`: AI/vector contract tables and transcoding preset/output placeholders without requiring pgvector or a transcoding engine.

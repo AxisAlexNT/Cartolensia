@@ -67,6 +67,33 @@ func (s *MemoryStore) UserByEmail(_ context.Context, email string) (User, error)
 	return s.users[id], nil
 }
 
+func (s *MemoryStore) UserByID(_ context.Context, userID string) (User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	user, ok := s.users[userID]
+	if !ok {
+		return User{}, ErrNotFound
+	}
+	return user, nil
+}
+
+func (s *MemoryStore) UpdatePassword(_ context.Context, userID, passwordHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	user.PasswordHash = passwordHash
+	s.users[userID] = user
+	for id, session := range s.sessions {
+		if session.UserID == userID {
+			delete(s.sessions, id)
+		}
+	}
+	return nil
+}
+
 func (s *MemoryStore) CreateSession(_ context.Context, sessionID, userID string, tokenHash []byte, expiresAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,7 +114,7 @@ func (s *MemoryStore) PrincipalBySessionHash(_ context.Context, tokenHash []byte
 			if !ok || user.DisabledAt != nil {
 				return Principal{}, ErrUnauthenticated
 			}
-			return Principal{ID: user.ID, Name: user.DisplayName, Email: user.Email, Role: user.Role}, nil
+			return Principal{ID: user.ID, Name: user.DisplayName, Email: user.Email, Role: user.Role, AuthMethod: AuthMethodSession}, nil
 		}
 	}
 	return Principal{}, ErrUnauthenticated
@@ -102,6 +129,19 @@ func (s *MemoryStore) DeleteSessionByHash(_ context.Context, tokenHash []byte) e
 		}
 	}
 	return nil
+}
+
+func (s *MemoryStore) DeleteExpiredSessions(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var deleted int64
+	for id, session := range s.sessions {
+		if !session.ExpiresAt.After(now) {
+			delete(s.sessions, id)
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 func (s *MemoryStore) PrincipalByAPITokenHash(_ context.Context, tokenHash []byte, now time.Time) (Principal, error) {
@@ -119,7 +159,7 @@ func (s *MemoryStore) PrincipalByAPITokenHash(_ context.Context, tokenHash []byt
 			if !ok || user.DisabledAt != nil {
 				return Principal{}, ErrUnauthenticated
 			}
-			return Principal{ID: user.ID, Name: user.DisplayName, Email: user.Email, Role: user.Role}, nil
+			return Principal{ID: user.ID, Name: user.DisplayName, Email: user.Email, Role: user.Role, AuthMethod: AuthMethodAPIToken, Scopes: append([]string(nil), token.Scopes...)}, nil
 		}
 	}
 	return Principal{}, ErrUnauthenticated

@@ -3,6 +3,8 @@ package database
 import (
 	"testing"
 	"testing/fstest"
+
+	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 )
 
 func TestLoadMigrationsSorted(t *testing.T) {
@@ -52,5 +54,19 @@ func TestLoadMigrationsFSSortedAndChecksummed(t *testing.T) {
 	}
 	if migrations[0].Checksum == "" || migrations[0].Checksum == migrations[1].Checksum {
 		t.Fatalf("unexpected checksums: %#v", migrations)
+	}
+}
+
+func TestApplyTrackMetadata(t *testing.T) {
+	summary := catalog.TrackSummary{}
+	applyTrackMetadata(&summary, `{"distance_m":123.5,"duration_seconds":45,"elevation_min_m":10,"elevation_max_m":40}`)
+	if summary.DistanceM != 123.5 {
+		t.Fatalf("distance not applied: %#v", summary)
+	}
+	if summary.DurationSec == nil || *summary.DurationSec != 45 {
+		t.Fatalf("duration not applied: %#v", summary)
+	}
+	if summary.ElevationMin == nil || *summary.ElevationMin != 10 || summary.ElevationMax == nil || *summary.ElevationMax != 40 {
+		t.Fatalf("elevation not applied: %#v", summary)
 	}
 }

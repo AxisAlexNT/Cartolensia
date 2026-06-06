@@ -2,24 +2,30 @@
 import { computed, onMounted, ref } from "vue";
 import {
   api,
+  type APIToken,
   type AssetDetail,
   type BackendStatus,
   type ExplorerRow,
   type ExplorerView,
   type Job,
+  type JobStats,
   type PluginManifest,
   type Principal,
   type Stats,
   type StorageConfig,
-  type TrackSummary
+  type TrackSummary,
+  type TranscodingCapabilities
 } from "./api";
 
 const nav = [
   "Explorer",
   "Discovery",
+  "Jobs",
+  "Metadata",
   "Storages",
   "Plugins",
   "Stats",
+  "Settings",
   "Albums",
   "Map",
   "GPS Tracks",
@@ -36,6 +42,8 @@ const explorer = ref<ExplorerView | null>(null);
 const explorerPath = ref("");
 const assetDetail = ref<AssetDetail | null>(null);
 const jobs = ref<Job[]>([]);
+const jobStats = ref<JobStats | null>(null);
+const selectedJob = ref<Job | null>(null);
 const storages = ref<StorageConfig[]>([]);
 const plugins = ref<PluginManifest[]>([]);
 const stats = ref<Stats | null>(null);
@@ -43,8 +51,17 @@ const backend = ref<BackendStatus | null>(null);
 const principal = ref<Principal | null>(null);
 const loginEmail = ref("");
 const loginPassword = ref("");
+const oldPassword = ref("");
+const newPassword = ref("");
+const tokenName = ref("automation");
+const tokenScopes = ref("read,jobs:write");
+const tokenSecret = ref("");
+const apiTokens = ref<APIToken[]>([]);
 const tracks = ref<TrackSummary[]>([]);
 const mapData = ref<Record<string, unknown> | null>(null);
+const transcodingCapabilities = ref<TranscodingCapabilities | null>(null);
+const aiStatus = ref<Record<string, unknown> | null>(null);
+const vectorStatus = ref<Record<string, unknown> | null>(null);
 
 const activePlugin = computed(() => {
   const id = active.value.toLowerCase().replaceAll(" ", "-");
@@ -72,25 +89,36 @@ async function refresh() {
   error.value = "";
   try {
     await refreshAuth();
-    const [explorerRows, jobRows, storageRows, pluginRows, statData, backendStatus, trackRows, geojson] = await Promise.all([
+    const [explorerRows, jobRows, jobStatData, storageRows, pluginRows, statData, backendStatus, trackRows, geojson, transcodeCaps, ai, vector] = await Promise.all([
       api.explorer(),
       api.jobs(),
+      api.jobStats(),
       api.storages(),
       api.plugins(),
       api.stats(),
       api.status(),
       api.tracks(),
-      api.map()
+      api.map(),
+      api.transcodingCapabilities(),
+      api.aiStatus(),
+      api.vectorStatus()
     ]);
     rows.value = explorerRows;
     explorer.value = await api.explorerFolders(explorerPath.value);
     jobs.value = jobRows;
+    jobStats.value = jobStatData;
     storages.value = storageRows;
     plugins.value = pluginRows;
     stats.value = statData;
     backend.value = backendStatus;
     tracks.value = trackRows;
     mapData.value = geojson;
+    transcodingCapabilities.value = transcodeCaps;
+    aiStatus.value = ai;
+    vectorStatus.value = vector;
+    if (principal.value && backendStatus.auth?.mode === "local") {
+      apiTokens.value = await api.tokens().catch(() => []);
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -122,6 +150,7 @@ async function login() {
 async function logout() {
   await api.logout();
   principal.value = null;
+  apiTokens.value = [];
 }
 
 async function startDiscovery() {
@@ -134,9 +163,43 @@ async function startHash() {
   await refresh();
 }
 
+async function startMetadata() {
+  await api.startMetadata();
+  await refresh();
+}
+
+async function startPreviews() {
+  await api.startPreviews();
+  await refresh();
+}
+
 async function cancelJob(id: string) {
   await api.cancelJob(id);
   await refresh();
+}
+
+async function retryJob(id: string, force = false) {
+  await api.retryJob(id, force);
+  await refresh();
+}
+
+async function openJob(id: string) {
+  selectedJob.value = await api.job(id);
+  setActive("Jobs");
+}
+
+async function createToken() {
+  const scopes = tokenScopes.value.split(",").map((scope) => scope.trim()).filter(Boolean);
+  const result = await api.createToken(tokenName.value, scopes);
+  tokenSecret.value = result.secret;
+  apiTokens.value = await api.tokens();
+}
+
+async function changePassword() {
+  await api.changePassword(oldPassword.value, newPassword.value);
+  oldPassword.value = "";
+  newPassword.value = "";
+  await refreshAuth();
 }
 
 async function openFolder(path: string) {
@@ -160,6 +223,20 @@ async function openAsset(id: string) {
 function canCancel(job: Job): boolean {
   return job.status === "queued" || job.status === "running" || job.status === "cancel_requested";
 }
+
+function canRetry(job: Job): boolean {
+  return job.status === "failed" || job.status === "canceled";
+}
+
+function progressPercent(job: Job): number {
+  if (!job.progress_total || job.progress_total <= 0) return 0;
+  return Math.min(100, Math.round((job.progress_current / job.progress_total) * 100));
+}
+
+const mapFeatures = computed(() => {
+  const features = mapData.value?.features;
+  return Array.isArray(features) ? (features as Array<Record<string, unknown>>) : [];
+});
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -210,6 +287,7 @@ onMounted(refresh);
 
       <section class="content">
         <div v-if="error" class="alert">{{ error }}</div>
+        <div v-if="backend?.auth?.warning" class="alert">{{ backend.auth.warning }}</div>
         <div v-if="loading" class="muted">Loading...</div>
 
         <section v-if="active === 'Explorer'" class="panel">
@@ -265,18 +343,76 @@ onMounted(refresh);
             <div class="actions">
               <button type="button" @click="startDiscovery">Scan Fixture</button>
               <button type="button" @click="startHash">Hash Unhashed</button>
+              <button type="button" @click="startMetadata">Enrich Metadata</button>
+              <button type="button" @click="startPreviews">Generate Previews</button>
             </div>
           </header>
           <div class="job-list">
             <article v-for="job in jobs" :key="job.id" class="job">
               <div class="job-row">
                 <strong>{{ job.kind }}</strong>
-                <button v-if="canCancel(job)" type="button" @click="cancelJob(job.id)">Cancel</button>
+                <div class="actions">
+                  <button type="button" @click="openJob(job.id)">Open</button>
+                  <button v-if="canRetry(job)" type="button" @click="retryJob(job.id)">Retry</button>
+                  <button v-if="canCancel(job)" type="button" @click="cancelJob(job.id)">Cancel</button>
+                </div>
               </div>
+              <progress :value="job.progress_current" :max="job.progress_total ?? 100"></progress>
               <span>{{ job.status }} · attempt {{ job.attempts ?? 0 }} / {{ job.max_attempts ?? 0 }}</span>
-              <span>{{ job.progress_current }} / {{ job.progress_total ?? "?" }}</span>
+              <span>{{ job.progress_current }} / {{ job.progress_total ?? "?" }} · {{ progressPercent(job) }}%</span>
               <small>{{ job.logs?.at(-1)?.message ?? job.error }}</small>
             </article>
+          </div>
+        </section>
+
+        <section v-else-if="active === 'Jobs'" class="panel">
+          <header class="panel-head">
+            <h2>Jobs</h2>
+            <span>
+              {{ jobStats?.queued ?? 0 }} queued · {{ jobStats?.running ?? 0 }} running · {{ jobStats?.failed ?? 0 }} failed
+            </span>
+          </header>
+          <div class="job-list">
+            <article v-if="selectedJob" class="job job-detail">
+              <div class="job-row">
+                <strong>{{ selectedJob.kind }} · {{ selectedJob.status }}</strong>
+                <div class="actions">
+                  <button v-if="canRetry(selectedJob)" type="button" @click="retryJob(selectedJob.id)">Retry</button>
+                  <button v-if="canCancel(selectedJob)" type="button" @click="cancelJob(selectedJob.id)">Cancel</button>
+                </div>
+              </div>
+              <progress :value="selectedJob.progress_current" :max="selectedJob.progress_total ?? 100"></progress>
+              <small>{{ selectedJob.id }}</small>
+              <pre class="logbox">{{ JSON.stringify(selectedJob.logs ?? [], null, 2) }}</pre>
+            </article>
+            <article v-for="job in jobs" :key="job.id" class="job">
+              <div class="job-row">
+                <button type="button" class="link-button" @click="openJob(job.id)">{{ job.kind }}</button>
+                <div class="actions">
+                  <button v-if="canRetry(job)" type="button" @click="retryJob(job.id)">Retry</button>
+                  <button v-if="canCancel(job)" type="button" @click="cancelJob(job.id)">Cancel</button>
+                </div>
+              </div>
+              <progress :value="job.progress_current" :max="job.progress_total ?? 100"></progress>
+              <span>{{ job.status }} · {{ job.progress_current }} / {{ job.progress_total ?? "?" }}</span>
+              <small>{{ job.error }}</small>
+            </article>
+          </div>
+        </section>
+
+        <section v-else-if="active === 'Metadata'" class="panel">
+          <header class="panel-head">
+            <h2>Metadata</h2>
+            <div class="actions">
+              <button type="button" @click="startMetadata">Enrich Metadata</button>
+              <button type="button" @click="startPreviews">Generate Previews</button>
+            </div>
+          </header>
+          <div class="metrics">
+            <article><strong>{{ stats?.photos ?? 0 }}</strong><span>Images</span></article>
+            <article><strong>{{ stats?.videos ?? 0 }}</strong><span>Videos</span></article>
+            <article><strong>{{ stats?.tracks ?? 0 }}</strong><span>Tracks</span></article>
+            <article><strong>{{ backend?.preview_cache ?? "" }}</strong><span>Preview cache</span></article>
           </div>
         </section>
 
@@ -286,6 +422,10 @@ onMounted(refresh);
             <button type="button" @click="setActive('Explorer')">Back</button>
           </header>
           <div v-if="assetDetail" class="detail-grid">
+            <article class="preview-tile">
+              <img v-if="assetDetail.preview_url && assetDetail.preview.status !== 'unsupported'" :src="assetDetail.preview_url" alt="" />
+              <span v-else>{{ assetDetail.preview.status }}</span>
+            </article>
             <article>
               <strong>Media</strong>
               <span>{{ assetDetail.asset.media_kind }}</span>
@@ -314,6 +454,7 @@ onMounted(refresh);
               </tr>
             </tbody>
           </table>
+          <pre v-if="assetDetail" class="geojson">{{ JSON.stringify(assetDetail.asset.metadata ?? {}, null, 2) }}</pre>
         </section>
 
         <section v-else-if="active === 'Storages'" class="panel">
@@ -337,7 +478,7 @@ onMounted(refresh);
             <article v-for="plugin in plugins" :key="plugin.id" class="card">
               <h3>{{ plugin.name }}</h3>
               <p>{{ plugin.description }}</p>
-              <span>{{ plugin.id }} · {{ plugin.status }}</span>
+              <span>{{ plugin.id }} · {{ plugin.status }} · {{ plugin.runtime }}</span>
             </article>
           </div>
         </section>
@@ -360,13 +501,14 @@ onMounted(refresh);
             <span>{{ tracks.length }} tracks</span>
           </header>
           <table>
-            <thead><tr><th>Name</th><th>Points</th><th>Start</th><th>End</th></tr></thead>
+            <thead><tr><th>Name</th><th>Points</th><th>Start</th><th>End</th><th>Distance</th></tr></thead>
             <tbody>
               <tr v-for="track in tracks" :key="track.track_asset_id">
                 <td>{{ track.name }}</td>
                 <td>{{ track.point_count }}</td>
                 <td>{{ track.start_time ?? "" }}</td>
                 <td>{{ track.end_time ?? "" }}</td>
+                <td>{{ track.distance_m ? `${(track.distance_m / 1000).toFixed(2)} km` : "" }}</td>
               </tr>
             </tbody>
           </table>
@@ -375,9 +517,82 @@ onMounted(refresh);
         <section v-else-if="active === 'Map'" class="panel">
           <header class="panel-head">
             <h2>Map</h2>
-            <span>{{ Array.isArray(mapData?.features) ? mapData?.features.length : 0 }} features</span>
+            <span>{{ mapFeatures.length }} features</span>
           </header>
+          <svg class="map-canvas" viewBox="0 0 800 420" role="img" aria-label="Map features">
+            <rect x="0" y="0" width="800" height="420" />
+            <g v-for="(feature, index) in mapFeatures" :key="index">
+              <circle
+                v-if="(feature.geometry as any)?.type === 'Point'"
+                :cx="(((feature.geometry as any).coordinates[0] - 43.8) / 0.5) * 800"
+                :cy="420 - ((((feature.geometry as any).coordinates[1] - 39.8) / 0.5) * 420)"
+                r="6"
+              />
+              <polyline
+                v-else-if="(feature.geometry as any)?.type === 'LineString'"
+                :points="(feature.geometry as any).coordinates.map((coord: number[]) => `${((coord[0] - 43.8) / 0.5) * 800},${420 - (((coord[1] - 39.8) / 0.5) * 420)}`).join(' ')"
+              />
+            </g>
+          </svg>
           <pre class="geojson">{{ JSON.stringify(mapData, null, 2) }}</pre>
+        </section>
+
+        <section v-else-if="active === 'Transcoding'" class="panel">
+          <header class="panel-head">
+            <h2>Transcoding</h2>
+            <span>{{ transcodingCapabilities?.ffmpeg.available ? "ffmpeg detected" : "ffmpeg unavailable" }}</span>
+          </header>
+          <div class="metrics">
+            <article><strong>{{ transcodingCapabilities?.ffmpeg.available ? "yes" : "no" }}</strong><span>ffmpeg</span></article>
+            <article><strong>{{ transcodingCapabilities?.ffprobe.available ? "yes" : "no" }}</strong><span>ffprobe</span></article>
+            <article><strong>{{ transcodingCapabilities?.encoders.length ?? 0 }}</strong><span>Video encoders</span></article>
+            <article><strong>immutable</strong><span>Originals</span></article>
+          </div>
+          <table>
+            <thead><tr><th>Encoder</th><th>Codec</th><th>Hardware</th></tr></thead>
+            <tbody>
+              <tr v-for="encoder in transcodingCapabilities?.encoders ?? []" :key="encoder.name">
+                <td>{{ encoder.name }}</td>
+                <td>{{ encoder.codec_family }}</td>
+                <td>{{ encoder.hardware }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section v-else-if="active === 'Base AI'" class="panel">
+          <header class="panel-head"><h2>Base AI</h2></header>
+          <pre class="geojson">{{ JSON.stringify({ aiStatus, vectorStatus }, null, 2) }}</pre>
+        </section>
+
+        <section v-else-if="active === 'Settings'" class="panel">
+          <header class="panel-head"><h2>Settings</h2></header>
+          <div class="settings-grid">
+            <form v-if="backend?.auth_mode === 'local' && principal" class="settings-form" @submit.prevent="changePassword">
+              <h3>Password</h3>
+              <input v-model="oldPassword" type="password" autocomplete="current-password" placeholder="Current password" />
+              <input v-model="newPassword" type="password" autocomplete="new-password" placeholder="New password" />
+              <button type="submit">Change Password</button>
+            </form>
+            <form v-if="backend?.auth_mode === 'local' && principal" class="settings-form" @submit.prevent="createToken">
+              <h3>API Tokens</h3>
+              <input v-model="tokenName" type="text" placeholder="Token name" />
+              <input v-model="tokenScopes" type="text" placeholder="Scopes" />
+              <button type="submit">Create Token</button>
+              <code v-if="tokenSecret">{{ tokenSecret }}</code>
+            </form>
+          </div>
+          <table v-if="apiTokens.length > 0">
+            <thead><tr><th>Name</th><th>Scopes</th><th>Expires</th><th>Last Used</th></tr></thead>
+            <tbody>
+              <tr v-for="token in apiTokens" :key="token.id">
+                <td>{{ token.name }}</td>
+                <td>{{ token.scopes.join(", ") }}</td>
+                <td>{{ token.expires_at ?? "" }}</td>
+                <td>{{ token.last_used_at ?? "" }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
 
         <section v-else class="panel">

@@ -6,7 +6,19 @@ It is designed for tourists, bikers, hikers, transport fans, and people who mana
 
 ## Status
 
-Phase 1 vertical-slice MVP. The repository contains a runnable Go backend, PostgreSQL-capable metadata store, async discovery/hash workers, strict read-only fixture storage, Vue 3 WebUI, Docker Compose development database, and smoke/integration test scripts.
+Phase 2/3 foundation work is in progress. The repository contains a runnable Go backend, PostgreSQL-capable metadata store, async workers, strict read-only fixture storage, local auth, GPX/track APIs, image preview cache, capability inventory endpoints, Vue 3 WebUI, Docker Compose development database, and smoke/integration test scripts.
+
+Current implemented slices:
+
+* Memory mode for fixture development and PostgreSQL mode for durable metadata.
+* Embedded SQL migrations with checksum tracking.
+* Strict read-only filesystem storage using normalized `fs://storage/path` URLs.
+* Fast discovery, lazy SHA-512 hashing, explicit metadata enrichment, and preview generation jobs.
+* PostgreSQL-backed job leases, heartbeats, cancellation, retries, logs, stats, and worker panic recovery.
+* Local admin bootstrap, login/logout, password change, sessions, API tokens, token scopes, HttpOnly cookies, and CSRF protection for cookie-authenticated write requests.
+* Explorer folder grouping, asset detail, original read-only streaming, and preview endpoints.
+* GPX parsing, track APIs, map GeoJSON, live video-track sync link skeleton, ffprobe metadata extraction, and transcoding/AI/vector status contracts.
+* Synthetic fixture generation and bounded performance smoke scripts.
 
 ## Core ideas
 
@@ -28,6 +40,9 @@ Phase 1 vertical-slice MVP. The repository contains a runnable Go backend, Postg
 * [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 * [Product vision](docs/PRODUCT_VISION.md)
 * [Architecture](docs/ARCHITECTURE.md)
+* [Operations](docs/OPERATIONS.md)
+* [Security](docs/SECURITY.md)
+* [Real archive dry-run guide](docs/REAL_ARCHIVE_DRY_RUN.md)
 * [Target architecture](docs/ARCHITECTURE_TARGET.md)
 * [AI assistance note](docs/AI_ASSISTANCE.md)
 * [Raw original idea](ideas/general_description.md)
@@ -69,6 +84,31 @@ Run gated PostgreSQL integration tests against the development database:
 ```bash
 bash scripts/test-db.sh
 ```
+
+Generate a synthetic fixture outside the repo and run a bounded performance smoke:
+
+```bash
+CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/generate-synthetic-fixture.sh
+CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/perf-smoke.sh
+```
+
+## Auth Modes
+
+The fixture workflow defaults to explicit `dev_no_auth`. Local auth is enabled by configuration:
+
+```yaml
+auth:
+  mode: local
+  admin_email: admin@example.local
+```
+
+The admin password must come from `CARTOLENSIA_ADMIN_PASSWORD` or a configured `admin_password_file`; no production password is hardcoded. Local auth uses sessions, HttpOnly cookies, CSRF tokens for cookie-authenticated writes, and scoped API tokens for automation.
+
+## Safety
+
+Original media is treated as immutable. The implemented filesystem adapter is strict read-only: list/stat/open are allowed; write/delete/move/mkdir are rejected. Preview files are generated only under the Cartolensia cache directory and never beside originals.
+
+The test and smoke workflows use `testdata/media_fixture/` or synthetic fixtures. `/mnt/Models/rclone` is not required and must not be touched by automated tests.
 
 ## License
 

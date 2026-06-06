@@ -13,28 +13,37 @@ Cartolensia is plugin-oriented, but the MVP should keep plugin execution simple 
 
 ## Manifest Shape
 
-Initial manifest fields:
+Implemented manifest fields:
 
 ```yaml
-id: core.discovery
-name: Discovery
+id: example-sidecar
+name: Example Sidecar
 version: 0.1.0
-description: Indexes configured read-only storage roots.
+description: User-managed HTTP sidecar example.
 depends_on:
-  - core.explorer
-backend:
-  kind: builtin
-webui:
-  mount: discovery
+  - ai-base
+runtime: sidecar_http
+status: loaded
+capabilities:
+  - embeddings.generate
+permissions:
+  - read
+  - media:read
+sidecar_http:
+  base_url: http://127.0.0.1:19090
+  health_path: /health
 ```
 
 Validation rules:
 
 - `id` uses lowercase letters, numbers, dots, and hyphens.
 - `version` is required and should be semver-compatible.
-- dependencies must exist;
-- dependency graph must be acyclic;
+- dependencies must exist.
+- dependency graph must be acyclic.
 - duplicate plugin IDs are invalid.
+- empty runtime defaults to `builtin`.
+- supported runtimes are currently `builtin` and `sidecar_http`.
+- `sidecar_http` requires `sidecar_http.base_url`; `health_path` defaults to `/health`.
 
 ## Planned Built-In Stubs
 
@@ -45,11 +54,26 @@ Validation rules:
 - `ai-base`: AI runtime and future VectorStore skeleton.
 - `ai-classification`: transport/place classification workflow skeleton, depends on `ai-base`.
 
-The current backend exposes these through `GET /api/v1/plugins`. `POST /api/v1/plugins/rescan` reloads built-in and filesystem manifests from `plugins/<id>/plugin.yaml` and is treated as a write-like endpoint by the auth hook.
+The current backend exposes these through:
+
+- `GET /api/v1/plugins`
+- `GET /api/v1/plugins/{id}`
+- `GET /api/v1/plugins/{id}/health`
+- `POST /api/v1/plugins/rescan`
+
+`POST /api/v1/plugins/rescan` reloads built-in and filesystem manifests from `plugins/<id>/plugin.yaml` and is treated as a write-like endpoint by auth. `GET /api/v1/plugins/{id}/health` reports built-ins as loaded. Sidecar health is currently a stub and reports that active sidecar probing is not implemented; the core does not contact arbitrary sidecar URLs yet.
 
 ## Future Runtime Types
 
 Sidecar HTTP plugins are the next planned runtime once core contracts stabilize. Sidecar plugins should communicate with core through authenticated local APIs, scoped API tokens, and explicit capability manifests, not direct uncontrolled database access.
+
+Sidecar safety rules:
+
+- Cartolensia does not auto-start arbitrary plugin binaries.
+- Sidecars are user-managed services.
+- Core-to-sidecar calls will use configured secrets or scoped API tokens.
+- Sidecar permissions must be declared in the manifest and enforced by core before write-like actions.
+- WebUI plugin assets are future static bundles; the current UI renders status/config information from manifest data only.
 
 Sidecar gRPC can be considered later for higher-throughput plugin calls.
 
@@ -57,4 +81,4 @@ Go `.so` plugins are experimental developer-mode only and should not be the defa
 
 ## WebUI Extensions
 
-Plugin WebUI assets may later live under `plugins/<id>/webui/dist/` and be served as static bundles after manifest validation. For MVP, plugin navigation entries and unavailable states are generated from backend plugin descriptors.
+Plugin WebUI assets may later live under `plugins/<id>/webui/dist/` and be served as static bundles after manifest validation. For now, plugin navigation entries, detail pages, health state, dependencies, capabilities, and unavailable states are generated from backend plugin descriptors.

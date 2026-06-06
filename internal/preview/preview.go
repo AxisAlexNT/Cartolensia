@@ -14,7 +14,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 )
@@ -185,4 +187,71 @@ func resizeNearest(src image.Image, maxDim int) image.Image {
 		}
 	}
 	return dst
+}
+
+type CacheEntry struct {
+	Path      string
+	SizeBytes int64
+	ModTime   time.Time
+}
+
+func Cleanup(cacheDir string, maxBytes int64, ttl time.Duration, now time.Time) ([]CacheEntry, error) {
+	root, err := filepath.Abs(cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	var entries []CacheEntry
+	previewsDir := filepath.Join(root, "previews")
+	if _, err := os.Stat(previewsDir); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err := filepath.WalkDir(previewsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if err := ensureInsideCache(root, path); err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		entries = append(entries, CacheEntry{Path: path, SizeBytes: info.Size(), ModTime: info.ModTime()})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	var removed []CacheEntry
+	total := int64(0)
+	for _, entry := range entries {
+		total += entry.SizeBytes
+		if ttl > 0 && now.Sub(entry.ModTime) > ttl {
+			if err := os.Remove(entry.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return removed, err
+			}
+			removed = append(removed, entry)
+			total -= entry.SizeBytes
+		}
+	}
+	if maxBytes <= 0 || total <= maxBytes {
+		return removed, nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ModTime.Before(entries[j].ModTime) })
+	for _, entry := range entries {
+		if total <= maxBytes {
+			break
+		}
+		if err := ensureInsideCache(root, entry.Path); err != nil {
+			return removed, err
+		}
+		if err := os.Remove(entry.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed = append(removed, entry)
+		total -= entry.SizeBytes
+	}
+	return removed, nil
 }

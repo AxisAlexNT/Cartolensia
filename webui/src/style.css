@@ -229,6 +229,21 @@ td {
   gap: 4px;
 }
 
+.job progress {
+  height: 10px;
+  width: 100%;
+}
+
+.logbox {
+  background: #f6f8fa;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 .job-row {
   align-items: center;
   display: flex;
@@ -267,6 +282,80 @@ td {
 .detail-grid strong {
   display: block;
   margin-bottom: 4px;
+}
+
+.preview-tile {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 140px;
+}
+
+.preview-tile img {
+  display: block;
+  max-height: 180px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.map-canvas {
+  background: #eef2f4;
+  display: block;
+  height: min(52vw, 420px);
+  width: 100%;
+}
+
+.map-canvas rect {
+  fill: #eef2f4;
+}
+
+.map-canvas circle {
+  fill: #0969da;
+  stroke: #ffffff;
+  stroke-width: 2;
+}
+
+.map-canvas polyline {
+  fill: none;
+  stroke: #1a7f37;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  padding: 16px;
+}
+
+.settings-form {
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.settings-form h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.settings-form input {
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  font: inherit;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.settings-form code {
+  background: #f6f8fa;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+  padding: 8px;
 }
 
 .alert {

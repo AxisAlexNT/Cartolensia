@@ -18,3 +18,20 @@ func TestHashReaderStreamsSHA512(t *testing.T) {
 		t.Fatalf("unexpected byte count %d", got.Bytes)
 	}
 }
+
+func TestParseFrameRate(t *testing.T) {
+	got, ok := parseFrameRate("30000/1001")
+	if !ok || got < 29.97 || got > 29.98 {
+		t.Fatalf("unexpected ntsc frame rate %f ok=%v", got, ok)
+	}
+	got, ok = parseFrameRate("25/1")
+	if !ok || got != 25 {
+		t.Fatalf("unexpected integer frame rate %f ok=%v", got, ok)
+	}
+	if got, ok := parseFrameRate("0/0"); ok {
+		t.Fatalf("expected invalid zero frame rate, got %f", got)
+	}
+	if got, ok := parseFrameRate("not-a-rate"); ok {
+		t.Fatalf("expected invalid frame rate, got %f", got)
+	}
+}
