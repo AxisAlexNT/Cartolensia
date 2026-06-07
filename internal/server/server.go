@@ -1891,6 +1891,7 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	workers := aiWorkerProfiles(r.Context())
 	stats, _ := s.deps.Store.Stats(r.Context())
+	aiCounts := s.aiDataCounts(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":            aiWorkersConfigured(workers),
 		"inference_running":  false,
@@ -1902,6 +1903,7 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 		"model_policy":       "model downloads are explicit and never use original storage",
 		"planned_modalities": []string{"image", "video_frame", "audio_segment", "text_query"},
 		"stored_assets":      stats.Assets,
+		"ai_counts":          aiCounts,
 	})
 }
 
@@ -2541,13 +2543,74 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stats, _ := s.deps.Store.Stats(r.Context())
+	embeddings, _ := s.deps.Store.ListAssetEmbeddings(r.Context(), "")
+	embeddedAssets := map[string]struct{}{}
+	dimensions := 0
+	for _, embedding := range embeddings {
+		embeddedAssets[embedding.AssetID] = struct{}{}
+		if dimensions == 0 && len(embedding.Vector) > 0 {
+			dimensions = len(embedding.Vector)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"available": true,
-		"backend":   "local_json_bruteforce",
-		"pgvector":  capabilityInstalled(s.deps.Capabilities, "vector"),
-		"contract":  "OpenCLIP embeddings are stored as JSON/float arrays and searched with bounded brute-force cosine similarity.",
-		"limits":    map[string]any{"intended_collection_size": "small/local collections", "indexed_assets": stats.Assets},
+		"available":       true,
+		"backend":         "local_json_bruteforce",
+		"pgvector":        capabilityInstalled(s.deps.Capabilities, "vector"),
+		"pgvector_note":   "pgvector is optional; the local fallback is active for this small collection.",
+		"contract":        "OpenCLIP embeddings are stored as JSON/float arrays and searched with bounded brute-force cosine similarity.",
+		"embedded_assets": len(embeddedAssets),
+		"embedding_count": len(embeddings),
+		"dimensions":      dimensions,
+		"limits": map[string]any{
+			"intended_collection_size": "small/local collections",
+			"indexed_assets":           stats.Assets,
+			"embedded_assets":          len(embeddedAssets),
+		},
 	})
+}
+
+func (s *Server) aiDataCounts(ctx context.Context) map[string]any {
+	counts := map[string]any{
+		"asset_tags":        0,
+		"predictions":       0,
+		"face_detections":   0,
+		"asset_embeddings":  0,
+		"embedded_assets":   0,
+		"safety_candidates": 0,
+	}
+	if tags, err := s.deps.Store.ListAssetTags(ctx, ""); err == nil {
+		counts["asset_tags"] = len(tags)
+	}
+	if predictions, err := s.deps.Store.ListAIPredictions(ctx, ""); err == nil {
+		counts["predictions"] = len(predictions)
+		safetyCandidates := 0
+		for _, prediction := range predictions {
+			task := strings.ToLower(prediction.Task)
+			label := strings.ToLower(prediction.Label)
+			if !strings.Contains(task, "safety") && !strings.Contains(task, "nsfw") {
+				continue
+			}
+			if !strings.Contains(label, "unsafe") && !strings.Contains(label, "nsfw") {
+				continue
+			}
+			if prediction.Confidence == nil || *prediction.Confidence >= 0.75 {
+				safetyCandidates++
+			}
+		}
+		counts["safety_candidates"] = safetyCandidates
+	}
+	if faces, err := s.deps.Store.ListFaceDetections(ctx, ""); err == nil {
+		counts["face_detections"] = len(faces)
+	}
+	if embeddings, err := s.deps.Store.ListAssetEmbeddings(ctx, ""); err == nil {
+		embeddedAssets := map[string]struct{}{}
+		for _, embedding := range embeddings {
+			embeddedAssets[embedding.AssetID] = struct{}{}
+		}
+		counts["asset_embeddings"] = len(embeddings)
+		counts["embedded_assets"] = len(embeddedAssets)
+	}
+	return counts
 }
 
 func (s *Server) handleVectorSearch(w http.ResponseWriter, r *http.Request) {

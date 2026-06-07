@@ -211,23 +211,44 @@ const galleryTrackElement = ref<HTMLDivElement | null>(null);
 const selectedTrackMapElement = ref<HTMLDivElement | null>(null);
 const assetVideoElement = ref<HTMLVideoElement | null>(null);
 const galleryVideoElement = ref<HTMLVideoElement | null>(null);
+const showMapDebug = ref(localStorage.getItem("cartolensia.map.showDebug") === "true");
+const showMapLayerMenu = ref(false);
+const showSelectedTrackLayerMenu = ref(false);
+const showGalleryTrackLayerMenu = ref(false);
+const mapTilesVisible = ref(localStorage.getItem("cartolensia.map.tilesVisible") !== "false");
+const mapTracksVisible = ref(localStorage.getItem("cartolensia.map.tracksVisible") !== "false");
+const mapAssetsVisible = ref(localStorage.getItem("cartolensia.map.assetsVisible") !== "false");
+const trackPreviewTilesEnabled = ref(localStorage.getItem("cartolensia.trackPreview.tilesVisible") !== "false");
+const selectedTrackLayerVisible = ref(true);
+const galleryTrackLayerVisible = ref(true);
 let olMap: OLMap | null = null;
 let galleryTrackMap: OLMap | null = null;
 const galleryTrackSource = new VectorSource();
+let galleryTrackTileLayer: TileLayer<XYZ> | null = null;
+let galleryTrackLayer: VectorLayer<VectorSource> | null = null;
 let selectedTrackMap: OLMap | null = null;
 const selectedTrackSource = new VectorSource();
+let selectedTrackTileLayer: TileLayer<XYZ> | null = null;
+let selectedTrackLayer: VectorLayer<VectorSource> | null = null;
 let mapOverlay: Overlay | null = null;
 let activeHls: Hls | null = null;
 let mapHasInitialFit = false;
 const mapAssetSource = new VectorSource();
 const mapTrackSource = new VectorSource();
+let mapTileLayer: TileLayer<XYZ> | null = null;
 let mapAssetLayer: VectorLayer<VectorSource> | null = null;
 let mapTrackLayer: VectorLayer<VectorSource> | null = null;
 const transcodingCapabilities = ref<TranscodingCapabilities | null>(null);
 const transcodePresets = ref<TranscodingPreset[]>([]);
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const aiWorkers = ref<Record<string, unknown> | null>(null);
+type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed";
+
 const aiMessage = ref("");
+const aiBusyKind = ref<AIJobKind | "">("");
+const aiLastResult = ref<Record<string, unknown> | null>(null);
+const aiActionHistory = ref<Array<{ id: string; kind: AIJobKind; status: string; summary: string; created_at: string }>>([]);
+const vectorConfigHighlight = ref(false);
 const vectorStatus = ref<Record<string, unknown> | null>(null);
 const albums = ref<Album[]>([]);
 const selectedAlbumId = ref("");
@@ -366,6 +387,22 @@ const searchExplanationByAsset = computed(() => {
 });
 
 const aiWorkerRows = computed(() => asArray((aiWorkers.value?.workers as unknown[]) ?? []));
+const configuredAIWorker = computed(() => {
+  return aiWorkerRows.value.find((worker) => Boolean((worker as Record<string, unknown>).configured)) as Record<string, unknown> | undefined;
+});
+const aiHealth = computed(() => (configuredAIWorker.value?.health ?? {}) as Record<string, unknown>);
+const aiCapabilities = computed(() => ((aiHealth.value.capabilities ?? {}) as Record<string, unknown>));
+const aiModelStates = computed(() => ((aiCapabilities.value.models ?? {}) as Record<string, Record<string, unknown>>));
+const aiCounts = computed(() => ((aiStatus.value?.ai_counts ?? {}) as Record<string, number>));
+const vectorLimits = computed(() => ((vectorStatus.value?.limits ?? {}) as Record<string, unknown>));
+const recentAIJobs = computed(() => jobs.value.filter((job) => job.kind.startsWith("ai_")).slice(0, 6));
+const aiModelCards = computed(() => [
+  { key: "classifier", label: "Classifier", action: "classify", model: aiModelStates.value.classifier },
+  { key: "face_detector", label: "Face Detector", action: "faces", model: aiModelStates.value.face_detector },
+  { key: "safety", label: "NSFW/Safety", action: "safety", model: aiModelStates.value.safety },
+  { key: "openclip", label: "Embeddings", action: "embed", model: aiModelStates.value.openclip },
+  { key: "caption", label: "Captioning", action: "describe", model: aiModelStates.value.caption }
+]);
 
 const selectedAlbumItems = computed(() => asArray(albumItems.value?.items));
 const selectedAlbumAssets = computed(() => selectedAlbumItems.value.map((item) => item.asset));
@@ -571,6 +608,49 @@ function galleryPointerUp(event: PointerEvent) {
   }
 }
 
+function createLocalOSMLayer(onError: () => void): TileLayer<XYZ> {
+  const layer = new TileLayer({
+    source: new XYZ({
+      url: "/api/v1/tiles/osm/{z}/{x}/{y}.png",
+      maxZoom: 19,
+      attributions: "© OpenStreetMap contributors"
+    })
+  });
+  layer.getSource()?.on("tileloaderror", onError);
+  return layer;
+}
+
+function fitTrackMap(target: OLMap | null, source: VectorSource, maxZoom = 16) {
+  if (!target || source.getFeatures().length === 0) return;
+  const extent = source.getExtent();
+  if (extent) {
+    target.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom, duration: 120 });
+  }
+  target.updateSize();
+}
+
+function fitGalleryTrack() {
+  fitTrackMap(galleryTrackMap, galleryTrackSource, 16);
+}
+
+function fitSelectedTrack() {
+  fitTrackMap(selectedTrackMap, selectedTrackSource, 16);
+}
+
+function fitMainMap() {
+  if (!olMap) return;
+  const source = mapAssetSource.getFeatures().length > 0 ? mapAssetSource : mapTrackSource;
+  if (source.getFeatures().length === 0) return;
+  const extent = source.getExtent();
+  if (extent) {
+    olMap.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom: 14, duration: 150 });
+  }
+}
+
+function persistLayerPreference(key: string, value: boolean) {
+  localStorage.setItem(key, value ? "true" : "false");
+}
+
 async function refreshGalleryTrackPreview() {
   const current = galleryCurrent.value;
   if (!current || current.media_kind !== "track") {
@@ -587,13 +667,18 @@ async function refreshGalleryTrackPreview() {
 function renderGalleryTrackMap(preview: Record<string, unknown>) {
   if (!galleryTrackElement.value) return;
   if (!galleryTrackMap) {
-    const layer = new VectorLayer({
+    galleryTrackTileLayer = createLocalOSMLayer(() => {
+      tileStatus.value = "Track preview tiles are unavailable; dark vector fallback remains active.";
+    });
+    galleryTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
+    galleryTrackLayer = new VectorLayer({
       source: galleryTrackSource,
       style: new Style({ stroke: new Stroke({ color: "#f8fafc", width: 3 }) })
     });
+    galleryTrackLayer.setVisible(galleryTrackLayerVisible.value);
     galleryTrackMap = new OLMap({
       target: galleryTrackElement.value,
-      layers: [layer],
+      layers: [galleryTrackTileLayer, galleryTrackLayer],
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
     });
   } else {
@@ -602,13 +687,9 @@ function renderGalleryTrackMap(preview: Record<string, unknown>) {
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   galleryTrackSource.clear();
   galleryTrackSource.addFeatures(features);
-  if (features.length > 0) {
-    const extent = galleryTrackSource.getExtent();
-    if (extent) {
-      galleryTrackMap.getView().fit(extent, { padding: [24, 24, 24, 24], maxZoom: 16, duration: 120 });
-    }
-  }
-  galleryTrackMap.updateSize();
+  galleryTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
+  galleryTrackLayer?.setVisible(galleryTrackLayerVisible.value);
+  fitGalleryTrack();
 }
 
 async function refreshSelectedTrackMap() {
@@ -627,13 +708,18 @@ async function refreshSelectedTrackMap() {
 function renderSelectedTrackMap(preview: Record<string, unknown>) {
   if (!selectedTrackMapElement.value) return;
   if (!selectedTrackMap) {
-    const layer = new VectorLayer({
+    selectedTrackTileLayer = createLocalOSMLayer(() => {
+      tileStatus.value = "Track detail tiles are unavailable; dark vector fallback remains active.";
+    });
+    selectedTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
+    selectedTrackLayer = new VectorLayer({
       source: selectedTrackSource,
       style: new Style({ stroke: new Stroke({ color: "#e6edf3", width: 3 }) })
     });
+    selectedTrackLayer.setVisible(selectedTrackLayerVisible.value);
     selectedTrackMap = new OLMap({
       target: selectedTrackMapElement.value,
-      layers: [layer],
+      layers: [selectedTrackTileLayer, selectedTrackLayer],
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
     });
   } else {
@@ -642,13 +728,9 @@ function renderSelectedTrackMap(preview: Record<string, unknown>) {
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   selectedTrackSource.clear();
   selectedTrackSource.addFeatures(features);
-  if (features.length > 0) {
-    const extent = selectedTrackSource.getExtent();
-    if (extent) {
-      selectedTrackMap.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom: 16, duration: 120 });
-    }
-  }
-  selectedTrackMap.updateSize();
+  selectedTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
+  selectedTrackLayer?.setVisible(selectedTrackLayerVisible.value);
+  fitSelectedTrack();
 }
 
 function trackProfilePath(profile: TrackProfile | null): string {
@@ -1395,18 +1477,54 @@ async function cleanupPreviews(dryRun = true) {
 	await refresh();
 }
 
-async function requestAIJob(kind: "classify" | "faces" | "describe" | "safety" | "embed") {
+async function confirmCleanupPreviews() {
+  if (!window.confirm("Clear generated preview cache files under the configured Cartolensia cache root? Originals are not touched.")) {
+    return;
+  }
+  await cleanupPreviews(false);
+}
+
+async function requestAIJob(kind: AIJobKind) {
+	const actionID = `${kind}-${Date.now()}`;
+	aiBusyKind.value = kind;
+	aiMessage.value = `Running ${kind} on ${selectedAssets.value.size > 0 ? `${selectedAssets.value.size} selected assets` : "the current indexed scope"}...`;
 	try {
 		const result = await api.aiJob(kind, {
 			scope: selectedAssets.value.size > 0 ? "selected" : "current_indexed",
 			asset_ids: Array.from(selectedAssets.value),
 			limit: 54
 		});
-		aiMessage.value = `${String(result.status ?? "completed")} · processed ${String(result.processed ?? 0)} / ${String(result.targets ?? 0)} · stored ${String(result.stored ?? 0)}${result.unsafe ? ` · ${String(result.unsafe)} need review` : ""}`;
+		aiLastResult.value = result;
+		const summary = `${String(result.status ?? "completed")} · processed ${String(result.processed ?? 0)} / ${String(result.targets ?? 0)} · stored ${String(result.stored ?? 0)}${result.unsafe ? ` · ${String(result.unsafe)} need review` : ""}`;
+		aiMessage.value = summary;
+		aiActionHistory.value = [{ id: actionID, kind, status: String(result.status ?? "completed"), summary, created_at: new Date().toLocaleTimeString() }]
+			.concat(aiActionHistory.value)
+			.slice(0, 8);
     await refresh();
 	} catch (err) {
-		aiMessage.value = err instanceof Error ? err.message : String(err);
+		const message = err instanceof Error ? err.message : String(err);
+		aiMessage.value = message;
+		aiActionHistory.value = [{ id: actionID, kind, status: "failed", summary: message, created_at: new Date().toLocaleTimeString() }]
+			.concat(aiActionHistory.value)
+			.slice(0, 8);
+	} finally {
+		aiBusyKind.value = "";
 	}
+}
+
+function requestAIModelAction(action: string) {
+  if (["classify", "faces", "describe", "safety", "embed"].includes(action)) {
+    void requestAIJob(action as AIJobKind);
+  }
+}
+
+function configureVectorStore() {
+  settingsTab.value = "ai";
+  vectorConfigHighlight.value = true;
+  setActive("Settings");
+  window.setTimeout(() => {
+    vectorConfigHighlight.value = false;
+  }, 3000);
 }
 
 async function startDryRun() {
@@ -2064,16 +2182,10 @@ function handleKeydown(event: KeyboardEvent) {
 function ensureOpenLayersMap() {
   if (!mapElement.value) return;
   if (!olMap) {
-    const tileLayer = new TileLayer({
-      source: new XYZ({
-        url: "/api/v1/tiles/osm/{z}/{x}/{y}.png",
-        maxZoom: 19,
-        attributions: "© OpenStreetMap contributors"
-      })
-    });
-    tileLayer.getSource()?.on("tileloaderror", () => {
+    mapTileLayer = createLocalOSMLayer(() => {
       tileStatus.value = "Base tiles are unavailable right now; vector asset and track layers remain active.";
     });
+    mapTileLayer.setVisible(mapTilesVisible.value);
     mapTrackLayer = new VectorLayer({
       source: mapTrackSource,
       style: (feature) => {
@@ -2084,6 +2196,7 @@ function ensureOpenLayersMap() {
         return undefined;
       }
     });
+    mapTrackLayer.setVisible(mapTracksVisible.value);
     mapAssetLayer = new VectorLayer({
       source: mapAssetSource,
       style: (feature) => {
@@ -2113,9 +2226,10 @@ function ensureOpenLayersMap() {
         });
       }
     });
+    mapAssetLayer.setVisible(mapAssetsVisible.value);
     olMap = new OLMap({
       target: mapElement.value,
-      layers: [tileLayer, mapTrackLayer, mapAssetLayer],
+      layers: [mapTileLayer, mapTrackLayer, mapAssetLayer],
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 9 })
     });
     if (mapPopupElement.value) {
@@ -2186,6 +2300,27 @@ watch([mapMediaKind, mapAlbumId, mapTrackId, mapCluster], () => {
   if (active.value === "Map") {
     void refreshMap();
   }
+});
+
+watch(showMapDebug, (value) => {
+  persistLayerPreference("cartolensia.map.showDebug", value);
+});
+
+watch([mapTilesVisible, mapTracksVisible, mapAssetsVisible], () => {
+  mapTileLayer?.setVisible(mapTilesVisible.value);
+  mapTrackLayer?.setVisible(mapTracksVisible.value);
+  mapAssetLayer?.setVisible(mapAssetsVisible.value);
+  persistLayerPreference("cartolensia.map.tilesVisible", mapTilesVisible.value);
+  persistLayerPreference("cartolensia.map.tracksVisible", mapTracksVisible.value);
+  persistLayerPreference("cartolensia.map.assetsVisible", mapAssetsVisible.value);
+});
+
+watch([trackPreviewTilesEnabled, selectedTrackLayerVisible, galleryTrackLayerVisible], () => {
+  selectedTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
+  galleryTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
+  selectedTrackLayer?.setVisible(selectedTrackLayerVisible.value);
+  galleryTrackLayer?.setVisible(galleryTrackLayerVisible.value);
+  persistLayerPreference("cartolensia.trackPreview.tilesVisible", trackPreviewTilesEnabled.value);
 });
 
 function formatBytes(value: number): string {
@@ -2978,7 +3113,30 @@ onBeforeUnmount(() => {
               </div>
             </header>
             <div class="track-detail-grid">
-              <div ref="selectedTrackMapElement" class="track-detail-map"></div>
+              <div class="map-shell">
+                <div ref="selectedTrackMapElement" class="track-detail-map"></div>
+                <div class="map-layer-control">
+                  <button type="button" class="icon-button" @click="showSelectedTrackLayerMenu = !showSelectedTrackLayerMenu">
+                    <i class="bi bi-layers" aria-hidden="true"></i>
+                    Layers
+                  </button>
+                  <div v-if="showSelectedTrackLayerMenu" class="layer-menu">
+                    <label class="form-check form-switch">
+                      <input v-model="trackPreviewTilesEnabled" class="form-check-input" type="checkbox" />
+                      <span>OSM tiles</span>
+                    </label>
+                    <label class="form-check form-switch">
+                      <input v-model="selectedTrackLayerVisible" class="form-check-input" type="checkbox" />
+                      <span>Track layer</span>
+                    </label>
+                    <button type="button" class="btn btn-sm btn-outline-primary" @click="fitSelectedTrack">
+                      <i class="bi bi-aspect-ratio" aria-hidden="true"></i>
+                      Fit to track
+                    </button>
+                    <small>Tiles load on demand through Cartolensia only; no bulk prefetch.</small>
+                  </div>
+                </div>
+              </div>
               <div class="track-profiles">
                 <article class="profile-card">
                   <header>
@@ -3128,11 +3286,41 @@ onBeforeUnmount(() => {
             <span v-if="mapAlbumId">The selected album may have no mapped assets. Clear the album filter to check all geotagged media.</span>
             <span v-else>If assets are indexed but not geotagged, run metadata enrichment or choose a prefix with EXIF/GPS metadata.</span>
           </p>
-          <div ref="mapElement" class="ol-map" role="img" aria-label="OpenLayers map"></div>
+          <div class="map-shell map-page-shell">
+            <div ref="mapElement" class="ol-map" role="img" aria-label="OpenLayers map"></div>
+            <div class="map-layer-control">
+              <button type="button" class="icon-button" @click="showMapLayerMenu = !showMapLayerMenu">
+                <i class="bi bi-layers" aria-hidden="true"></i>
+                Layers
+              </button>
+              <div v-if="showMapLayerMenu" class="layer-menu">
+                <label class="form-check form-switch">
+                  <input v-model="mapTilesVisible" class="form-check-input" type="checkbox" />
+                  <span>OSM tiles</span>
+                </label>
+                <label class="form-check form-switch">
+                  <input v-model="mapTracksVisible" class="form-check-input" type="checkbox" />
+                  <span>Tracks</span>
+                </label>
+                <label class="form-check form-switch">
+                  <input v-model="mapAssetsVisible" class="form-check-input" type="checkbox" />
+                  <span>Photos/videos</span>
+                </label>
+                <button type="button" class="btn btn-sm btn-outline-primary" @click="fitMainMap">
+                  <i class="bi bi-aspect-ratio" aria-hidden="true"></i>
+                  Fit features
+                </button>
+                <small>OSM tiles are on-demand through the local tile proxy.</small>
+              </div>
+            </div>
+          </div>
           <div v-show="mapPopup" ref="mapPopupElement" class="map-popup">
             <div class="job-row">
               <strong>{{ mapPopup?.title }}</strong>
-              <button type="button" @click="mapPopup = null">Close</button>
+              <button type="button" class="icon-button" @click="mapPopup = null">
+                <i class="bi bi-x-lg" aria-hidden="true"></i>
+                Close
+              </button>
             </div>
             <p>{{ mapPopup?.summary }}</p>
             <p v-if="mapPopup?.kind === 'cluster' && mapPopup.count && mapPopup.assets.length < mapPopup.count" class="muted">
@@ -3206,7 +3394,11 @@ onBeforeUnmount(() => {
           <p class="muted" v-if="tileSources.length > 0">
             Tile source: {{ tileSources[0].name }} · {{ tileSources[0].policy }}
           </p>
-          <pre class="geojson">{{ JSON.stringify(mapData, null, 2) }}</pre>
+          <label class="form-check form-switch map-debug-toggle">
+            <input v-model="showMapDebug" class="form-check-input" type="checkbox" />
+            <span>Show debug GeoJSON</span>
+          </label>
+          <pre v-if="showMapDebug" class="geojson">{{ JSON.stringify(mapData, null, 2) }}</pre>
         </section>
 
         <section v-else-if="active === 'Transcoding'" class="panel">
@@ -3235,44 +3427,124 @@ onBeforeUnmount(() => {
 	        <section v-else-if="active === 'Base AI'" class="panel">
 	          <header class="panel-head">
 	            <h2>Base AI</h2>
-	            <span>Optional sidecar workers; no model downloads run automatically.</span>
+	            <span>Local sidecar inference; no model downloads run automatically.</span>
 	          </header>
 	          <div class="metrics">
 	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.cpu ? "yes" : "unknown" }}</strong><span>CPU</span></article>
 	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.nvidia_smi ? "yes" : "no" }}</strong><span>NVIDIA</span></article>
 	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.dev_dri ? "yes" : "no" }}</strong><span>/dev/dri</span></article>
-	            <article><strong>{{ vectorStatus?.backend ?? "none" }}</strong><span>Vector store</span></article>
+	            <article><strong>{{ aiCounts.asset_tags ?? 0 }}</strong><span>AI tags</span></article>
+	            <article><strong>{{ aiCounts.predictions ?? 0 }}</strong><span>Predictions</span></article>
+	            <article><strong>{{ aiCounts.face_detections ?? 0 }}</strong><span>Faces</span></article>
+	            <article><strong>{{ vectorStatus?.embedded_assets ?? vectorLimits.embedded_assets ?? 0 }}</strong><span>Embedded assets</span></article>
 	          </div>
-	          <div class="settings-grid">
-	            <article class="settings-form settings-wide">
-	              <h3>Worker Profiles</h3>
+	          <div class="ai-dashboard">
+	            <article class="settings-form settings-wide ai-status-panel">
+	              <div class="section-title">
+	                <div>
+	                  <h3>Worker Profiles</h3>
+	                  <p class="muted">Native sidecar endpoint and optional Docker profiles. Model/cache paths remain outside originals.</p>
+	                </div>
+	                <span :class="['status-badge', configuredAIWorker ? 'ok' : 'warn']">
+	                  {{ configuredAIWorker ? 'worker reachable' : 'no worker configured' }}
+	                </span>
+	              </div>
 	              <div class="cards">
-	                <article v-for="worker in aiWorkerRows" :key="String((worker as Record<string, unknown>).id)" class="card">
-	                  <strong>{{ (worker as Record<string, unknown>).id }}</strong>
-	                  <span>{{ (worker as Record<string, unknown>).profile }} · {{ (worker as Record<string, unknown>).status }}</span>
-	                  <small>{{ (worker as Record<string, unknown>).available === false ? "hardware not detected" : "profile available as optional sidecar" }}</small>
+	                <article v-for="worker in aiWorkerRows" :key="String((worker as Record<string, unknown>).id)" class="card ai-card">
+	                  <div class="job-row">
+	                    <strong>{{ (worker as Record<string, unknown>).id }}</strong>
+	                    <span :class="['status-badge', (worker as Record<string, unknown>).status === 'ok' ? 'ok' : 'warn']">
+	                      {{ (worker as Record<string, unknown>).status }}
+	                    </span>
+	                  </div>
+	                  <span>{{ (worker as Record<string, unknown>).profile }}</span>
+	                  <small>{{ (worker as Record<string, unknown>).endpoint || "profile available when configured" }}</small>
+	                  <small>{{ (worker as Record<string, unknown>).available === false ? "hardware not detected" : "hardware/profile available" }}</small>
 	                </article>
 	              </div>
-	              <p class="muted">Compose profiles are ai-cpu, ai-nvidia, ai-rocm, and ai-intel. Model cache defaults to .cartolensia/models, never original storage.</p>
 	            </article>
-	            <article class="settings-form">
-	              <h3>Modalities And Jobs</h3>
-	              <p>image · video_frame · audio_segment · text_query</p>
-	              <div class="actions">
-	                <button type="button" @click="requestAIJob('classify')">Classify selected/current scope</button>
-	                <button type="button" @click="requestAIJob('faces')">Detect faces</button>
-	                <button type="button" @click="requestAIJob('safety')">Safety scan</button>
-	                <button type="button" @click="requestAIJob('embed')">Generate embeddings</button>
-	                <button type="button" @click="requestAIJob('describe')">Describe images</button>
+
+	            <article class="settings-form settings-wide">
+	              <div class="section-title">
+	                <div>
+	                  <h3>Models And Scoped Actions</h3>
+	                  <p class="muted">Buttons run on selected assets or the current 54-asset indexed real-peek scope. Nothing scans new files.</p>
+	                </div>
+	                <span v-if="aiBusyKind" class="status-badge warn">
+	                  <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+	                  {{ aiBusyKind }}
+	                </span>
 	              </div>
-	              <p class="muted">{{ aiMessage || "Requests run only on selected assets or the current indexed subset and store DB metadata only." }}</p>
+	              <div class="cards">
+	                <article v-for="card in aiModelCards" :key="card.key" class="card ai-card">
+	                  <div class="job-row">
+	                    <strong>{{ card.label }}</strong>
+	                    <span :class="['status-badge', card.model?.loaded || card.model?.available ? 'ok' : 'warn']">
+	                      {{ card.model?.loaded ? 'loaded' : card.model?.available ? 'available' : 'lazy/not loaded' }}
+	                    </span>
+	                  </div>
+	                  <span>{{ card.model?.name ?? 'model status unknown' }}</span>
+	                  <small v-if="card.model?.threshold">threshold {{ card.model.threshold }}</small>
+	                  <button
+	                    type="button"
+	                    class="btn btn-sm btn-outline-primary"
+	                    :disabled="Boolean(aiBusyKind)"
+	                    @click="requestAIModelAction(card.action)"
+	                  >
+	                    <i class="bi bi-play-circle" aria-hidden="true"></i>
+	                    Run {{ card.label }}
+	                  </button>
+	                </article>
+	              </div>
+	              <div v-if="aiMessage" class="ai-result-panel">
+	                <strong>Latest action</strong>
+	                <span>{{ aiMessage }}</span>
+	                <button type="button" class="btn btn-sm btn-outline-secondary" @click="setActive('Jobs')">Open Jobs</button>
+	              </div>
+	              <pre v-if="aiLastResult" class="compact-json">{{ JSON.stringify(aiLastResult, null, 2) }}</pre>
 	            </article>
+
 	            <article class="settings-form">
 	              <h3>Vector Store</h3>
-	              <p>Backend: {{ vectorStatus?.backend ?? "none" }}</p>
-	              <p>pgvector: {{ vectorStatus?.pgvector ? "available" : "optional/not enabled" }}</p>
-	              <button type="button" @click="setActive('Settings')">Configure vector store</button>
-	              <button type="button" @click="requestAIJob('embed')">Run embedding job</button>
+	              <p><strong>{{ vectorStatus?.backend ?? "none" }}</strong></p>
+	              <p class="muted">
+	                {{ vectorStatus?.contract ?? "Vector contract unavailable." }}
+	              </p>
+	              <div class="detail-grid compact-detail">
+	                <article><strong>{{ vectorStatus?.embedded_assets ?? vectorLimits.embedded_assets ?? 0 }}</strong><span>Embedded assets</span></article>
+	                <article><strong>{{ vectorStatus?.dimensions ?? "n/a" }}</strong><span>Dimensions</span></article>
+	                <article><strong>{{ vectorStatus?.pgvector ? "yes" : "optional" }}</strong><span>pgvector</span></article>
+	              </div>
+	              <p class="muted">{{ vectorStatus?.pgvector_note ?? "Local JSON/bruteforce fallback is active for small collections." }}</p>
+	              <div class="actions">
+	                <button type="button" class="btn btn-primary btn-sm" @click="configureVectorStore">
+	                  <i class="bi bi-sliders" aria-hidden="true"></i>
+	                  Configure Vector Store
+	                </button>
+	                <button type="button" class="btn btn-outline-primary btn-sm" :disabled="Boolean(aiBusyKind)" @click="requestAIJob('embed')">
+	                  Generate embeddings
+	                </button>
+	              </div>
+	            </article>
+
+	            <article class="settings-form">
+	              <h3>Recent AI Activity</h3>
+	              <div v-if="aiActionHistory.length === 0 && recentAIJobs.length === 0" class="empty-state">No AI action has been started in this browser session.</div>
+	              <table v-else>
+	                <thead><tr><th>Kind</th><th>Status</th><th>Summary</th></tr></thead>
+	                <tbody>
+	                  <tr v-for="item in aiActionHistory" :key="item.id">
+	                    <td>{{ item.kind }}</td>
+	                    <td>{{ item.status }}</td>
+	                    <td>{{ item.summary }}</td>
+	                  </tr>
+	                  <tr v-for="job in recentAIJobs" :key="job.id">
+	                    <td>{{ job.kind }}</td>
+	                    <td>{{ job.status }}</td>
+	                    <td>{{ job.progress_current }} / {{ job.progress_total ?? 0 }}</td>
+	                  </tr>
+	                </tbody>
+	              </table>
 	            </article>
 	          </div>
 	          <details>
@@ -3281,7 +3553,7 @@ onBeforeUnmount(() => {
 	          </details>
 	        </section>
 
-        <section v-else-if="active === 'Settings'" class="panel">
+        <section v-else-if="active === 'Settings'" class="panel settings-page">
           <header class="panel-head">
             <h2>Settings</h2>
             <span>Runtime settings apply immediately; YAML-bound settings require restart.</span>
@@ -3316,11 +3588,16 @@ onBeforeUnmount(() => {
 
           <div v-else-if="['indexing', 'metadata', 'preview', 'map', 'gps', 'transcoding'].includes(settingsTab)" class="settings-grid">
             <article v-if="runtimeSpecsForTab(settingsTab).length > 0" class="settings-form settings-wide">
-              <h3>Runtime Settings</h3>
-              <p class="muted">Runtime values apply immediately where supported. Existing long-running jobs keep their current payloads.</p>
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-lightning-charge" aria-hidden="true"></i> Runtime Settings</h3>
+                  <p class="muted">Runtime values apply immediately where supported. Existing long-running jobs keep their current payloads.</p>
+                </div>
+                <span class="status-badge ok">applies now</span>
+              </div>
               <div class="form-stack">
                 <label v-for="spec in runtimeSpecsForTab(settingsTab)" :key="spec.key">
-                  {{ spec.label }}
+                  <span>{{ spec.label }}</span>
                   <select
                     v-if="spec.kind === 'boolean'"
                     :value="String(settings?.runtime_settings?.[spec.key] ?? false)"
@@ -3338,14 +3615,24 @@ onBeforeUnmount(() => {
                   <small>{{ spec.help }}</small>
                 </label>
               </div>
-              <button type="button" @click="saveRuntimeSettings">Save runtime settings</button>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-primary" @click="saveRuntimeSettings">
+                  <i class="bi bi-check2-circle" aria-hidden="true"></i>
+                  Save runtime settings
+                </button>
+              </div>
             </article>
             <article v-if="pendingSpecsForTab(settingsTab).length > 0" class="settings-form settings-wide">
-              <h3>Restart-Required Settings</h3>
-              <p class="muted">These are saved as pending YAML and take effect after restart.</p>
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-arrow-repeat" aria-hidden="true"></i> Restart-Required Settings</h3>
+                  <p class="muted">These are saved as pending YAML and take effect after restart.</p>
+                </div>
+                <span class="status-badge warn">restart required</span>
+              </div>
               <div class="form-stack">
                 <label v-for="spec in pendingSpecsForTab(settingsTab)" :key="spec.key">
-                  {{ spec.label }}
+                  <span>{{ spec.label }}</span>
                   <select
                     v-if="spec.kind === 'boolean'"
                     :value="pendingValue(spec.key, 'false')"
@@ -3363,28 +3650,53 @@ onBeforeUnmount(() => {
                   <small>{{ spec.help }}</small>
                 </label>
               </div>
-              <button type="button" @click="savePendingSettings">Save pending YAML</button>
-              <a href="/api/v1/settings/pending/download" target="_blank" rel="noreferrer">Download pending YAML</a>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-outline-primary" @click="savePendingSettings">
+                  <i class="bi bi-save" aria-hidden="true"></i>
+                  Save pending YAML
+                </button>
+                <a class="btn btn-outline-secondary" href="/api/v1/settings/pending/download" target="_blank" rel="noreferrer">
+                  <i class="bi bi-download" aria-hidden="true"></i>
+                  Download pending YAML
+                </a>
+              </div>
             </article>
             <article v-if="settingsTab === 'gps'" class="settings-form">
-              <h3>Current GPS/KML State</h3>
+              <h3><i class="bi bi-signpost-split" aria-hidden="true"></i> Current GPS/KML State</h3>
               <p>{{ tracks.length }} parsed tracks · {{ stats?.tracks ?? 0 }} track-like assets</p>
+              <label class="form-check form-switch">
+                <input v-model="trackPreviewTilesEnabled" class="form-check-input" type="checkbox" />
+                <span>Use OSM background in interactive track previews</span>
+              </label>
               <p class="muted">Track thumbnails are generated into the Cartolensia cache. Originals stay immutable.</p>
             </article>
             <article v-if="settingsTab === 'map'" class="settings-form">
-              <h3>Tile And Cluster Status</h3>
+              <h3><i class="bi bi-map" aria-hidden="true"></i> Tile And Cluster Status</h3>
               <p>{{ mapStatus?.base_tiles ?? 'vector-only' }} · {{ mapStatus?.clustering ?? 'none' }}</p>
               <p>{{ tileSources[0]?.policy ?? 'No tile source configured.' }}</p>
+              <label class="form-check form-switch">
+                <input v-model="showMapDebug" class="form-check-input" type="checkbox" />
+                <span>Show raw GeoJSON debug by default in this browser</span>
+              </label>
+              <div class="chip-row">
+                <span class="chip">Cluster radius {{ settings?.runtime_settings?.['map.cluster_radius_px'] ?? 64 }} px</span>
+                <span class="chip">On-demand cache only</span>
+              </div>
             </article>
             <article v-if="settingsTab === 'preview'" class="settings-form">
-              <h3>Preview Cache</h3>
+              <h3><i class="bi bi-images" aria-hidden="true"></i> Preview Cache</h3>
               <p>{{ previewCacheStats?.entries ?? 0 }} entries · {{ formatBytes(previewCacheStats?.bytes ?? 0) }}</p>
-              <button type="button" @click="cleanupPreviews(true)">Preview cleanup report</button>
+              <p class="muted">Default workflow is on-demand viewing. Persistent preview generation remains opt-in to avoid write amplification.</p>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-outline-primary" @click="cleanupPreviews(true)">Preview cleanup report</button>
+                <button type="button" class="btn btn-outline-danger" @click="confirmCleanupPreviews">Clear cache</button>
+              </div>
             </article>
             <article v-if="settingsTab === 'transcoding'" class="settings-form">
-              <h3>Detected Encoders</h3>
+              <h3><i class="bi bi-film" aria-hidden="true"></i> Detected Encoders</h3>
               <p>ffmpeg {{ transcodingCapabilities?.ffmpeg.available ? 'available' : 'missing' }}</p>
               <p>{{ transcodingCapabilities?.encoders.length ?? 0 }} encoders detected.</p>
+              <p class="muted">HLS sessions are written only under Cartolensia cache directories and never beside originals.</p>
             </article>
           </div>
 
@@ -3480,12 +3792,43 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="settingsTab === 'ai'" class="settings-grid">
-            <article class="settings-form">
-              <h3>AI / Vector</h3>
-              <label>Vector backend <input :value="pendingValue('ai.vector_backend', 'disabled')" type="text" @input="setPendingValue('ai.vector_backend', ($event.target as HTMLInputElement).value)" /></label>
-              <label>Worker endpoint <input :value="pendingValue('ai.worker_endpoint')" type="text" @input="setPendingValue('ai.worker_endpoint', ($event.target as HTMLInputElement).value)" /></label>
-              <p class="muted">AI execution remains disabled until sidecar workers and provenance policy are configured.</p>
-              <button type="button" @click="savePendingSettings">Save pending YAML</button>
+            <article :class="['settings-form', 'settings-wide', { 'highlight-card': vectorConfigHighlight }]">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-diagram-3" aria-hidden="true"></i> AI / Vector</h3>
+                  <p class="muted">Local JSON/bruteforce vector search is active now. pgvector remains optional for larger collections.</p>
+                </div>
+                <span :class="['status-badge', vectorStatus?.available ? 'ok' : 'warn']">{{ vectorStatus?.backend ?? 'not configured' }}</span>
+              </div>
+              <div class="detail-grid compact-detail">
+                <article><strong>{{ vectorStatus?.embedded_assets ?? vectorLimits.embedded_assets ?? 0 }}</strong><span>Embedded assets</span></article>
+                <article><strong>{{ vectorStatus?.dimensions ?? "n/a" }}</strong><span>Dimensions</span></article>
+                <article><strong>{{ vectorStatus?.pgvector ? "available" : "optional" }}</strong><span>pgvector</span></article>
+              </div>
+              <div class="form-stack">
+                <label>
+                  <span>Vector backend</span>
+                  <select :value="pendingValue('ai.vector_backend', 'local_json_bruteforce')" @change="setPendingValue('ai.vector_backend', ($event.target as HTMLSelectElement).value)">
+                    <option value="local_json_bruteforce">local_json_bruteforce</option>
+                    <option value="pgvector" disabled>pgvector (future/optional)</option>
+                  </select>
+                  <small>Local fallback is production-safe for small personal/lab collections and requires no extension.</small>
+                </label>
+                <label>
+                  <span>Worker endpoint</span>
+                  <input :value="pendingValue('ai.worker_endpoint')" type="text" @input="setPendingValue('ai.worker_endpoint', ($event.target as HTMLInputElement).value)" />
+                  <small>Native sidecar default: http://127.0.0.1:19090.</small>
+                </label>
+              </div>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-outline-primary" @click="savePendingSettings">
+                  <i class="bi bi-save" aria-hidden="true"></i>
+                  Save pending YAML
+                </button>
+                <button type="button" class="btn btn-outline-secondary" @click="setActive('Base AI')">
+                  Back to AI dashboard
+                </button>
+              </div>
             </article>
           </div>
 
@@ -3641,13 +3984,35 @@ onBeforeUnmount(() => {
           controls
           preload="metadata"
         ></video>
-        <div
-          v-else-if="galleryCurrent.media_kind === 'track'"
-          ref="galleryTrackElement"
-          class="gallery-track-map"
-          role="img"
-          aria-label="Interactive track preview"
-        ></div>
+        <div v-else-if="galleryCurrent.media_kind === 'track'" class="map-shell gallery-track-shell">
+          <div
+            ref="galleryTrackElement"
+            class="gallery-track-map"
+            role="img"
+            aria-label="Interactive track preview"
+          ></div>
+          <div class="map-layer-control">
+            <button type="button" class="icon-button" @click="showGalleryTrackLayerMenu = !showGalleryTrackLayerMenu">
+              <i class="bi bi-layers" aria-hidden="true"></i>
+              Layers
+            </button>
+            <div v-if="showGalleryTrackLayerMenu" class="layer-menu">
+              <label class="form-check form-switch">
+                <input v-model="trackPreviewTilesEnabled" class="form-check-input" type="checkbox" />
+                <span>OSM tiles</span>
+              </label>
+              <label class="form-check form-switch">
+                <input v-model="galleryTrackLayerVisible" class="form-check-input" type="checkbox" />
+                <span>Track layer</span>
+              </label>
+              <button type="button" class="btn btn-sm btn-outline-primary" @click="fitGalleryTrack">
+                <i class="bi bi-aspect-ratio" aria-hidden="true"></i>
+                Fit to track
+              </button>
+              <small>Tile background uses Cartolensia's on-demand proxy only.</small>
+            </div>
+          </div>
+        </div>
         <div v-else class="gallery-fallback">
           <strong>{{ galleryCurrent.media_kind }}</strong>
           <span>Inline preview is unavailable for this asset type.</span>

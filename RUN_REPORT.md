@@ -1802,3 +1802,97 @@ Known limitations:
 - BLIP captions are generated suggestions; only one current real-peek asset was captioned in this run.
 - Vector search uses the local brute-force JSON/PostgreSQL fallback; pgvector is still optional/future for large collections.
 - AI job execution is currently synchronous/bounded through API handlers rather than durable worker jobs; this is acceptable for the 54-asset real-peek validation but should move to background jobs before large-library inference.
+
+## 2026-06-07 Focused UI Stabilization And Real-Peek Polish
+
+### Scope
+
+- Focused stabilization only: map/track preview controls, Settings layout, Map debug visibility, and Base AI/vector status clarity.
+- No new real-data prefixes were scanned.
+- PostgreSQL was not reset.
+- No new models or Docker images were downloaded.
+- No commit was made and no push was done.
+
+### Live Audit
+
+Queried the live real-peek service before changes:
+
+- `/api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks, `619580406` indexed bytes.
+- `/api/v1/map/status`: GeoJSON backend, `48` geotagged assets, `4` tracks, Cartolensia OSM tile proxy, screen-distance clustering, no warnings.
+- `/api/v1/gps/tracks`: `4` parsed GPX/KML summaries.
+- `/api/v1/ai/status`: local AI sidecar configured at `127.0.0.1:19090`, CUDA device visible through the worker, local model cache under `.cartolensia/models`.
+- `/api/v1/ai/workers`: `ai-local` healthy; Docker-style CPU/NVIDIA/ROCm/Intel profiles remain optional/not configured.
+- `/api/v1/vector/status`: local JSON/brute-force fallback active; pgvector optional/not enabled.
+- `/api/v1/jobs?limit=20`: recent jobs were terminal; no new indexing, metadata, preview, or AI jobs were started by this stabilization run.
+- `/api/v1/settings` and `/api/v1/settings/schema`: runtime/pending settings were available; `map.tiles_enabled` was true and persistent preview generation remained false.
+
+### Fixes Implemented
+
+- Track preview/detail maps now use the existing Cartolensia OSM tile proxy as an optional background:
+  - GPS/KML Track detail page;
+  - track gallery overlay preview;
+  - shared local preference for OSM-on/off.
+- Added per-map layer cogwheel menus:
+  - OSM tiles on/off;
+  - track layer on/off;
+  - photo/asset layer on/off on the main Map;
+  - fit-to-track / fit-to-features actions.
+- Map raw GeoJSON is hidden by default behind a Bootstrap switch and persists locally through `localStorage`.
+- Main Map viewport is larger when debug is hidden, and map popup close buttons now include a Bootstrap icon.
+- Settings page visual layout was cleaned up:
+  - runtime and restart-required settings are separate cards;
+  - responsive form grids, section headers, help text, and grouped action buttons;
+  - GPS/KML, Map/Tiles, Preview Cache, Transcoding, and AI/Vector tabs now have focused status/control cards.
+- Preview Cache clear action is confirmation-protected.
+- Base AI page now shows:
+  - worker cards with status badges;
+  - model cards for classifier, face detector, safety, embeddings, and captions;
+  - visible running state, latest action result, and recent browser-session AI actions;
+  - vector store card showing local fallback, pgvector status, embedded asset count, and dimensions;
+  - Configure Vector Store opens Settings → AI/Vector and highlights the relevant controls.
+- Backend status hardening:
+  - `/api/v1/ai/status` now includes AI tag/prediction/face/embedding/safety counts.
+  - `/api/v1/vector/status` now includes embedded asset count, embedding count, vector dimensions, and a pgvector/fallback note.
+  - memory store list methods now match PostgreSQL semantics for all-asset AI/tag/face/embedding listing.
+
+### Verification
+
+Passed:
+
+- `gofmt -w internal/catalog/extended_store.go internal/server/server.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Notes:
+
+- Vite still reports the existing large bundle warning for the OpenLayers/HLS/Bootstrap bundle; build passes.
+- Attempting to keep the compiled binary alive with `nohup` did not survive the sandboxed shell. The live app was restarted through the already-working approved `go run ./cmd/cartolensia -config .cartolensia/runtime/realpeek.yaml` path.
+
+### Live Validation After Restart
+
+- `http://127.0.0.1:18080/api/v1/health` returned `ok`.
+- `/api/v1/stats`: still `54` assets and `54` hashed.
+- `/api/v1/gps/tracks`: still `4` parsed tracks.
+- `/api/v1/map/status`: still `48` geotagged assets and `4` tracks.
+- `/api/v1/ai/status`: `89` AI tags, `347` latest prediction rows, `82` face detections, `48` embeddings, `0` safety candidates.
+- `/api/v1/vector/status`: `local_json_bruteforce`, `48` embedded assets, `48` embeddings, `512` dimensions, pgvector optional/not enabled.
+
+### Remaining Issues
+
+- Manual browser inspection is still needed for the new layer menus and visual spacing.
+- OSM-backed generated static track thumbnail compositing remains future work; this pass adds OSM background for interactive OpenLayers track previews.
+- AI API actions remain synchronous/bounded from the UI; durable AI jobs are still a future hardening task.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No previews, tiles, transcodes, model files, exports, database files, or temp files were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.

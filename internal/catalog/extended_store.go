@@ -865,8 +865,16 @@ func (s *MemoryStore) ListAssetTags(_ context.Context, assetID string) ([]AssetT
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := []AssetTag{}
-	for _, tag := range s.assetTags[assetID] {
-		out = append(out, tag)
+	if assetID == "" {
+		for _, tags := range s.assetTags {
+			for _, tag := range tags {
+				out = append(out, tag)
+			}
+		}
+	} else {
+		for _, tag := range s.assetTags[assetID] {
+			out = append(out, tag)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Tag == out[j].Tag {
@@ -902,7 +910,14 @@ func (s *MemoryStore) CreateAIPrediction(_ context.Context, pred AIPrediction) (
 func (s *MemoryStore) ListAIPredictions(_ context.Context, assetID string) ([]AIPrediction, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := append([]AIPrediction(nil), s.aiPredictions[assetID]...)
+	out := []AIPrediction{}
+	if assetID == "" {
+		for _, predictions := range s.aiPredictions {
+			out = append(out, predictions...)
+		}
+	} else {
+		out = append(out, s.aiPredictions[assetID]...)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
 }
@@ -929,7 +944,14 @@ func (s *MemoryStore) CreateFaceDetection(_ context.Context, face FaceDetection)
 func (s *MemoryStore) ListFaceDetections(_ context.Context, assetID string) ([]FaceDetection, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := append([]FaceDetection(nil), s.faceDetections[assetID]...)
+	out := []FaceDetection{}
+	if assetID == "" {
+		for _, detections := range s.faceDetections {
+			out = append(out, detections...)
+		}
+	} else {
+		out = append(out, s.faceDetections[assetID]...)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
 }
@@ -980,9 +1002,8 @@ func (s *MemoryStore) ListAssetEmbeddings(_ context.Context, assetID string) ([]
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := []AssetEmbedding{}
-	prefix := assetID + "\x00"
 	for key, embedding := range s.assetEmbeddings {
-		if strings.HasPrefix(key, prefix) {
+		if assetID == "" || strings.HasPrefix(key, assetID+"\x00") {
 			out = append(out, embedding)
 		}
 	}
