@@ -140,8 +140,12 @@ Implemented endpoints:
 - `POST /api/v1/ai/jobs/classify`
 - `POST /api/v1/ai/jobs/faces`
 - `POST /api/v1/ai/jobs/describe`
+- `POST /api/v1/ai/jobs/ocr`
+- `GET /api/v1/assets/{asset_id}/ocr`
+- `GET /api/v1/ocr/runs`
 - `GET /api/v1/vector/status`
 - `GET /api/v1/search?q=...`
+- `GET /api/v1/search/places`
 - `GET /api/v1/files/browse`
 - `GET /api/v1/stats`
 - `GET /api/v1/backend/status`
@@ -178,12 +182,12 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Albums page for virtual album creation, item management, and map handoff;
 - GPS Tracks page backed by parsed GPX/KML/KMZ track points and enriched distance/duration metadata, including media lookup and snap-media controls;
 - Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, screen-distance clustering, count labels, click-priority asset/cluster layers above tracks, cluster/point mini-gallery popups, track click popups, album filters, media filters, and track filters;
-- universal Explorer search with result explanations and table/tile/gallery reuse;
+- universal Explorer search with result explanations, table/tile/gallery reuse, an explicit `postgres_local` `SearchBackend`, OCR/caption/AI metadata matching, and cache-only local place matching for entries such as Yerevan, Vanadzor, Lori Province, and Armenia;
 - Duplicates page for report-only SHA-512+size content groups;
 - Storages page;
 - Plugins page and plugin detail health/status surface;
 - Stats page;
-- Settings page with categorized tabs for effective config, runtime preferences, restart-required YAML settings, schema-based per-plugin settings, cache-scoped DB metadata export, password rotation, and API token management;
+- Settings page with categorized tabs for effective config, runtime preferences, Search/Places cache-only geocoder controls, restart-required YAML settings, schema-based per-plugin settings, cache-scoped DB metadata export, password rotation, and API token management;
 - Transcoding page with capability inventory, preset management, auto-selection rule drafts, command-template validation, cache-only job planning, metrics status, and cache-scoped HLS session status;
 - Base AI dashboard with native-vs-Docker worker status, GPU policy, model cards, vector fallback status, and visible scoped action/job results;
 - AI Classification page for AI tag/category browsing, predictions, safety candidates, face detections, and vector text search.
@@ -231,6 +235,8 @@ Settings path fields use `GET /api/v1/files/browse` for an allowlisted file/fold
 ## Future Interfaces
 
 - Vector search is implemented through a local JSON/PostgreSQL fallback using stored float arrays and bounded brute-force cosine search for small local collections. pgvector remains optional for later scaling.
+- Search is implemented behind a small `SearchBackend` interface. The current backend is `postgres_local`; Elasticsearch/OpenSearch are intentionally future optional adapters.
+- OCR is represented as a Base AI sidecar contract and stored metadata/prediction surface with bounding boxes. The Tesseract runtime can feed this contract without changing asset-detail/search UI.
 - Sidecar HTTP plugins are represented in manifests but are user-managed services; Cartolensia does not auto-start arbitrary plugin binaries.
 - Live video-track sync is represented in schema by `track_points` and `asset_track_links`, including `time_offset_ms`, with a marker interpolation API for linked videos.
 - Transcoding contracts and capability detection exist. Cache-scoped HLS sessions and preset management are implemented as a safe MVP; durable transcoding jobs and managed output libraries are still future work.

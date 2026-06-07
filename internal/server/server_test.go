@@ -3,9 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -228,7 +232,27 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	store := catalog.NewMemoryStore()
 	cfg := config.Defaults()
 	cfg.Cache.Dir = t.TempDir()
-	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "photos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	photoFile, err := os.Create(filepath.Join(root, "photos", "photo.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 80, 80))
+	for y := 0; y < 80; y++ {
+		for x := 0; x < 80; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(120 + x), G: uint8(80 + y), B: 180, A: 255})
+		}
+	}
+	if err := jpeg.Encode(photoFile, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := photoFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: root, Mode: "strict_read_only"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +260,7 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	now := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
 	photo, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
 		StorageName:  "fixture",
-		StorageURL:   "fixture://photos/photo.jpg",
+		StorageURL:   "fs://fixture/photos/photo.jpg",
 		RelativePath: "photos/photo.jpg",
 		Name:         "photo.jpg",
 		Extension:    ".jpg",
@@ -250,7 +274,7 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	}
 	video, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
 		StorageName:  "fixture",
-		StorageURL:   "fixture://videos/video.mp4",
+		StorageURL:   "fs://fixture/videos/video.mp4",
 		RelativePath: "videos/video.mp4",
 		Name:         "video.mp4",
 		Extension:    ".mp4",
@@ -281,6 +305,11 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/faces/detections/"+face.ID+"/thumbnail", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("face thumbnail status %d content-type %s body %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/faces/clusters", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"face_count":1`) {
 		t.Fatalf("clusters status %d body %s", rec.Code, rec.Body.String())
@@ -291,12 +320,84 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 		t.Fatalf("ignore status %d body %s", rec.Code, rec.Body.String())
 	}
 
-	if _, err := store.UpsertAssetGeo(ctx, catalog.AssetGeo{AssetID: photo.Asset.ID, Lat: 40.1, Lon: 44.1, Source: "exif"}, true); err != nil {
+	if _, err := store.UpsertAssetGeo(ctx, catalog.AssetGeo{AssetID: photo.Asset.ID, Lat: 40.18, Lon: 44.51, Source: "exif"}, true); err != nil {
 		t.Fatal(err)
+	}
+	ocrConfidence := 0.82
+	if _, err := store.CreateAIPrediction(ctx, catalog.AIPrediction{
+		AssetID:    photo.Asset.ID,
+		Task:       "ocr_image",
+		Label:      "Laboratory sample label",
+		Confidence: &ocrConfidence,
+		ModelName:  "tesseract-test",
+		Metadata: map[string]any{
+			"language": "eng",
+			"engine":   "tesseract",
+			"x":        10,
+			"y":        12,
+			"width":    140,
+			"height":   24,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=Yerevan", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"local place bbox"`) || !strings.Contains(rec.Body.String(), `"places"`) || !strings.Contains(rec.Body.String(), `"backend":"postgres_local"`) {
+		t.Fatalf("Yerevan search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=laboratory", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"AI prediction/caption/class"`) {
+		t.Fatalf("OCR search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search/places", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cache_only"`) || !strings.Contains(rec.Body.String(), `"Yerevan"`) || !strings.Contains(rec.Body.String(), `"Vanadzor"`) {
+		t.Fatalf("place cache status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"places"`) || !strings.Contains(rec.Body.String(), `"Yerevan, Armenia"`) {
+		t.Fatalf("asset places status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ocr", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Laboratory sample label"`) || !strings.Contains(rec.Body.String(), `"blocks"`) {
+		t.Fatalf("asset OCR status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/ocr/runs", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"stored_blocks":1`) || !strings.Contains(rec.Body.String(), `"eng"`) {
+		t.Fatalf("OCR runs status %d body %s", rec.Code, rec.Body.String())
+	}
+	loriPhoto, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/photos/vanadzor.jpg",
+		RelativePath: "photos/vanadzor.jpg",
+		Name:         "vanadzor.jpg",
+		Extension:    ".jpg",
+		MIME:         "image/jpeg",
+		MediaKind:    "photo",
+		SizeBytes:    13,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertAssetGeo(ctx, catalog.AssetGeo{AssetID: loriPhoto.Asset.ID, Lat: 40.8128, Lon: 44.4883, Source: "exif"}, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"Vanadzor", "Lori province"} {
+		rec = httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q="+url.QueryEscape(query), nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"local place bbox"`) || !strings.Contains(rec.Body.String(), `"vanadzor.jpg"`) {
+			t.Fatalf("%s search status %d body %s", query, rec.Code, rec.Body.String())
+		}
 	}
 	trackAsset, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
 		StorageName:  "fixture",
-		StorageURL:   "fixture://tracks/test.gpx",
+		StorageURL:   "fs://fixture/tracks/test.gpx",
 		RelativePath: "tracks/test.gpx",
 		Name:         "test.gpx",
 		Extension:    ".gpx",
@@ -310,8 +411,8 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	}
 	trackID := trackAsset.Asset.ID
 	points := []catalog.TrackPoint{
-		{TrackAssetID: trackID, RecordedAt: now.Add(-time.Second), Lat: 40.0, Lon: 44.0, Source: "test"},
-		{TrackAssetID: trackID, RecordedAt: now.Add(time.Second), Lat: 40.2, Lon: 44.2, Source: "test"},
+		{TrackAssetID: trackID, RecordedAt: now.Add(-time.Second), Lat: 40.17, Lon: 44.50, Source: "test"},
+		{TrackAssetID: trackID, RecordedAt: now.Add(time.Second), Lat: 40.19, Lon: 44.52, Source: "test"},
 	}
 	if err := store.UpsertTrackPoints(ctx, trackID, points); err != nil {
 		t.Fatal(err)
@@ -333,6 +434,16 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/geo-align/sessions/"+geoSession.ID+"/marker/"+photo.Asset.ID, strings.NewReader(`{"lat":40.3,"lon":44.3}`)))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"modified":true`) {
 		t.Fatalf("geo marker status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/geo-align/sessions/"+geoSession.ID+"/marker/"+photo.Asset.ID, strings.NewReader(`{"reset":true}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"modified":false`) || !strings.Contains(rec.Body.String(), `"staged_lon":44.51`) {
+		t.Fatalf("geo marker reset status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/geo-align/sessions/"+geoSession.ID+"/marker/"+photo.Asset.ID, strings.NewReader(`{"lat":40.3,"lon":44.3}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"modified":true`) {
+		t.Fatalf("geo marker second move status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/geo-align/sessions/"+geoSession.ID+"/apply", nil))
@@ -596,8 +707,13 @@ func TestSettingsAndDBExportStayInCache(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "runtime_settings") || !strings.Contains(rec.Body.String(), "restart_required") {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "runtime_settings") || !strings.Contains(rec.Body.String(), "restart_required") || !strings.Contains(rec.Body.String(), "Search/Places") {
 		t.Fatalf("settings status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/settings/schema", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "search.geocoder_mode") {
+		t.Fatalf("settings schema status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/settings/runtime", strings.NewReader(`{"indexing.default_max_files":25,"unknown":"ignored"}`)))

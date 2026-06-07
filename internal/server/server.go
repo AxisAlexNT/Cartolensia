@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/jpeg"
 	"io"
 	"math"
 	"net/http"
@@ -17,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "image/png"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/auth"
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
@@ -185,6 +190,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/assets", s.handleAssets)
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
 	s.mux.HandleFunc("/api/v1/search", s.handleSearch)
+	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/duplicates", s.handleDuplicates)
 	s.mux.HandleFunc("/api/v1/albums", s.handleAlbums)
 	s.mux.HandleFunc("/api/v1/albums/", s.handleAlbumByID)
@@ -201,6 +207,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/geo-align/sessions/", s.handleGeoAlignSessionByID)
 	s.mux.HandleFunc("/api/v1/video-track-player/session", s.handleVideoTrackPlayerSessionCreate)
 	s.mux.HandleFunc("/api/v1/video-track-player/sessions/", s.handleVideoTrackPlayerSessionByID)
+	s.mux.HandleFunc("/api/v1/ocr/runs", s.handleOCRRuns)
 	s.mux.HandleFunc("/api/v1/map", s.handleMap)
 	s.mux.HandleFunc("/api/v1/map/", s.handleMapSubroute)
 	s.mux.HandleFunc("/api/v1/transcoding/status", s.handleTranscodingStatus)
@@ -222,6 +229,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/jobs/safety", s.handleAIJobRequest("safety_nsfw"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/embed", s.handleAIJobRequest("embed_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/describe", s.handleAIJobRequest("describe_image"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/ocr", s.handleAIJobRequest("ocr_image"))
 	s.mux.HandleFunc("/api/v1/ai/predictions", s.handleAIPredictions)
 	s.mux.HandleFunc("/api/v1/ai/safety/", s.handleAISafetyByAsset)
 	s.mux.HandleFunc("/api/v1/faces/clusters", s.handleFaceClusters)
@@ -1186,6 +1194,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	searchCtx := s.buildSearchContext(r.Context(), tokens)
+	backend := s.searchBackend()
 	type result struct {
 		Asset       catalog.Asset `json:"asset"`
 		Matched     []string      `json:"matched"`
@@ -1225,12 +1234,53 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		all = all[offset:end]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"query":    raw,
-		"tokens":   tokens,
-		"results":  all,
-		"tracks":   trackMatches,
-		"warnings": searchWarnings(tokens),
-		"page":     catalog.Page{Limit: limit, Offset: offset, Total: total},
+		"query":        raw,
+		"tokens":       tokens,
+		"backend":      backend.ID(),
+		"backend_mode": backend.Mode(),
+		"results":      all,
+		"tracks":       trackMatches,
+		"places":       searchCtx.places,
+		"warnings":     searchWarnings(tokens),
+		"page":         catalog.Page{Limit: limit, Offset: offset, Total: total},
+	})
+}
+
+func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	places := make([]searchPlaceMatch, 0, len(localPlaceEntries()))
+	for _, place := range localPlaceEntries() {
+		matchedAssets := 0
+		geos, err := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{BBox: &place.BBox, Limit: 10000})
+		if err == nil {
+			seen := map[string]struct{}{}
+			for _, geo := range geos {
+				seen[geo.Asset.ID] = struct{}{}
+			}
+			matchedAssets = len(seen)
+		}
+		places = append(places, searchPlaceMatch{
+			Query:         strings.ToLower(place.Name),
+			Name:          place.Name,
+			DisplayName:   place.DisplayName,
+			Provider:      "local",
+			Source:        "built_in_place_cache",
+			Lat:           place.Lat,
+			Lon:           place.Lon,
+			BBox:          place.BBox,
+			MatchedAssets: matchedAssets,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend":        "postgres_local",
+		"mode":           "cache_only",
+		"online_enabled": false,
+		"provider":       "local_place_cache",
+		"places":         places,
+		"note":           "Place search is cache-only. No online geocoder is called by this endpoint.",
 	})
 }
 
@@ -1240,6 +1290,78 @@ type assetSearchContext struct {
 	tagMatches        map[string]map[string]struct{}
 	predictionMatches map[string]map[string]struct{}
 	faceMatches       map[string]map[string]struct{}
+	placeMatches      map[string]map[string]struct{}
+	places            []searchPlaceMatch
+}
+
+type SearchBackend interface {
+	ID() string
+	Mode() string
+}
+
+type postgresLocalSearchBackend struct{}
+
+func (postgresLocalSearchBackend) ID() string {
+	return "postgres_local"
+}
+
+func (postgresLocalSearchBackend) Mode() string {
+	return "fts_trigram_ready_metadata_place_ai_ocr"
+}
+
+func (s *Server) searchBackend() SearchBackend {
+	return postgresLocalSearchBackend{}
+}
+
+type searchPlaceMatch struct {
+	Query         string       `json:"query"`
+	Name          string       `json:"name"`
+	DisplayName   string       `json:"display_name"`
+	Provider      string       `json:"provider"`
+	Source        string       `json:"source"`
+	Lat           float64      `json:"lat"`
+	Lon           float64      `json:"lon"`
+	BBox          catalog.BBox `json:"bbox"`
+	MatchedAssets int          `json:"matched_assets"`
+}
+
+type assetPlaceRecord struct {
+	CoordinateSource string         `json:"coordinate_source"`
+	GeoSource        string         `json:"geo_source,omitempty"`
+	Lat              float64        `json:"lat"`
+	Lon              float64        `json:"lon"`
+	PlaceName        string         `json:"place_name"`
+	DisplayName      string         `json:"display_name"`
+	Provider         string         `json:"provider"`
+	Source           string         `json:"source"`
+	Match            string         `json:"match"`
+	BBox             catalog.BBox   `json:"bbox"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+}
+
+type ocrBlockRecord struct {
+	ID         string         `json:"id"`
+	AssetID    string         `json:"asset_id"`
+	Text       string         `json:"text"`
+	Language   string         `json:"language,omitempty"`
+	Engine     string         `json:"engine,omitempty"`
+	Confidence *float64       `json:"confidence,omitempty"`
+	X          float64        `json:"x"`
+	Y          float64        `json:"y"`
+	Width      float64        `json:"width"`
+	Height     float64        `json:"height"`
+	ModelName  string         `json:"model_name,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+type localPlaceEntry struct {
+	Name        string
+	DisplayName string
+	Aliases     []string
+	Lat         float64
+	Lon         float64
+	BBox        catalog.BBox
 }
 
 func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetSearchContext {
@@ -1249,6 +1371,7 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 		tagMatches:        map[string]map[string]struct{}{},
 		predictionMatches: map[string]map[string]struct{}{},
 		faceMatches:       map[string]map[string]struct{}{},
+		placeMatches:      map[string]map[string]struct{}{},
 	}
 	var indexedAssets []catalog.Asset
 	for _, token := range tokens {
@@ -1260,6 +1383,32 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 		plain = strings.TrimSpace(strings.ToLower(plain))
 		if plain == "" {
 			continue
+		}
+		if prefix == "" || prefix == "place" {
+			if place, ok := localPlaceForQuery(plain); ok {
+				matches := map[string]struct{}{}
+				geos, err := s.deps.Store.QueryAssetGeo(ctx, catalog.GeoQuery{BBox: &place.BBox, Limit: 10000})
+				if err == nil {
+					for _, geo := range geos {
+						matches[geo.Asset.ID] = struct{}{}
+					}
+				}
+				out.placeMatches[token] = matches
+				out.places = append(out.places, searchPlaceMatch{
+					Query:         plain,
+					Name:          place.Name,
+					DisplayName:   place.DisplayName,
+					Provider:      "local",
+					Source:        "built_in_place_cache",
+					Lat:           place.Lat,
+					Lon:           place.Lon,
+					BBox:          place.BBox,
+					MatchedAssets: len(matches),
+				})
+				if prefix == "place" {
+					continue
+				}
+			}
 		}
 		switch prefix {
 		case "", "album":
@@ -1398,8 +1547,10 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	assetID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/assets/"), "/")
-	if assetID == "" || strings.Contains(assetID, "/") {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/assets/"), "/")
+	parts := strings.Split(rest, "/")
+	assetID := parts[0]
+	if assetID == "" || len(parts) > 2 {
 		http.NotFound(w, r)
 		return
 	}
@@ -1410,6 +1561,20 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "ocr":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"asset_id": asset.ID,
+				"blocks":   s.assetOCRBlocks(r.Context(), asset.ID),
+				"engine":   "tesseract_sidecar_contract",
+				"note":     "OCR blocks are metadata records. Running OCR is explicit and never writes to originals.",
+			})
+		default:
+			http.NotFound(w, r)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, s.assetDetail(r.Context(), asset))
@@ -2305,6 +2470,8 @@ func aiSidecarPath(kind string) string {
 		return "/embed-image"
 	case "describe_image":
 		return "/describe-image"
+	case "ocr_image":
+		return "/ocr-image"
 	default:
 		return ""
 	}
@@ -2312,7 +2479,7 @@ func aiSidecarPath(kind string) string {
 
 func aiSupportsAsset(kind string, asset catalog.Asset) bool {
 	switch kind {
-	case "classify_image", "detect_faces", "safety_nsfw", "embed_image", "describe_image":
+	case "classify_image", "detect_faces", "safety_nsfw", "embed_image", "describe_image", "ocr_image":
 		return asset.MediaKind == "photo"
 	default:
 		return false
@@ -2474,6 +2641,43 @@ func (s *Server) persistAIResponse(ctx context.Context, workerID, kind, assetID 
 					Source:   "ai_caption",
 					Metadata: map[string]any{"model": modelName, "caption": caption},
 				}); err == nil {
+					stored++
+				}
+			}
+		}
+	case "ocr_image":
+		if blocks, ok := response.Metadata["blocks"].([]any); ok {
+			for _, item := range blocks {
+				block, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				text := strings.TrimSpace(stringFromAny(block["text"]))
+				if text == "" {
+					continue
+				}
+				conf := floatPtrFromAny(block["confidence"])
+				metadata := map[string]any{
+					"engine":   stringFromAny(block["engine"]),
+					"language": stringFromAny(block["language"]),
+					"x":        floatFromAny(block["x"]),
+					"y":        floatFromAny(block["y"]),
+					"width":    floatFromAny(block["width"]),
+					"height":   floatFromAny(block["height"]),
+				}
+				if metadata["engine"] == "" {
+					metadata["engine"] = "tesseract_or_sidecar"
+				}
+				_, err := s.deps.Store.CreateAIPrediction(ctx, catalog.AIPrediction{
+					AssetID:    assetID,
+					WorkerID:   workerID,
+					Task:       "ocr_image",
+					Label:      text,
+					Confidence: conf,
+					ModelName:  modelName,
+					Metadata:   metadata,
+				})
+				if err == nil {
 					stored++
 				}
 			}
@@ -2795,6 +2999,10 @@ func (s *Server) handleFaceDetectionByID(w http.ResponseWriter, r *http.Request)
 		http.NotFound(w, r)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "thumbnail" && r.Method == http.MethodGet {
+		s.handleFaceDetectionThumbnail(w, r, parts[0])
+		return
+	}
 	if len(parts) == 1 && r.Method == http.MethodDelete {
 		if !s.requireWrite(w, r, "faces.detection.write") {
 			return
@@ -2851,6 +3059,64 @@ func (s *Server) handleFaceDetectionByID(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, face)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleFaceDetectionThumbnail(w http.ResponseWriter, r *http.Request, detectionID string) {
+	faces, err := s.deps.Store.ListFaceDetections(r.Context(), "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var face catalog.FaceDetection
+	for _, item := range faces {
+		if item.ID == detectionID {
+			face = item
+			break
+		}
+	}
+	if face.ID == "" {
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), face.AssetID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	loc, ok := catalog.FirstLocation(asset)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("asset has no storage location"))
+		return
+	}
+	file, _, err := s.deps.Registry.OpenByURL(loc.StorageURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer file.Close()
+	source, _, err := image.Decode(file)
+	if err != nil {
+		http.Redirect(w, r, "/api/v1/media/"+url.PathEscape(face.AssetID)+"/preview", http.StatusTemporaryRedirect)
+		return
+	}
+	bounds := source.Bounds()
+	x := int(math.Floor(face.X))
+	y := int(math.Floor(face.Y))
+	width := int(math.Ceil(face.Width))
+	height := int(math.Ceil(face.Height))
+	pad := int(math.Ceil(float64(maxInt(width, height)) * 0.35))
+	crop := image.Rect(x-pad, y-pad, x+width+pad, y+height+pad).Intersect(bounds)
+	if crop.Empty() {
+		crop = bounds
+	}
+	out := image.NewRGBA(image.Rect(0, 0, crop.Dx(), crop.Dy()))
+	draw.Draw(out, out.Bounds(), source, crop.Min, draw.Src)
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=600")
+	if err := jpeg.Encode(w, out, &jpeg.Options{Quality: 84}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 }
 
@@ -3194,9 +3460,7 @@ func (s *Server) handleGeoAlignSessionByID(w http.ResponseWriter, r *http.Reques
 	}
 	if len(parts) == 2 && parts[1] == "reset" && r.Method == http.MethodPost {
 		for i := range session.Markers {
-			session.Markers[i].ManualLat = nil
-			session.Markers[i].ManualLon = nil
-			session.Markers[i].Modified = false
+			resetGeoAlignMarkerState(&session.Markers[i])
 		}
 		session.UpdatedAt = time.Now().UTC()
 		writeJSON(w, http.StatusOK, session)
@@ -3233,8 +3497,9 @@ func (s *Server) handleGeoAlignSessionByID(w http.ResponseWriter, r *http.Reques
 	}
 	if len(parts) == 3 && parts[1] == "marker" && r.Method == http.MethodPatch {
 		var req struct {
-			Lat float64 `json:"lat"`
-			Lon float64 `json:"lon"`
+			Lat   float64 `json:"lat"`
+			Lon   float64 `json:"lon"`
+			Reset bool    `json:"reset"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -3242,6 +3507,12 @@ func (s *Server) handleGeoAlignSessionByID(w http.ResponseWriter, r *http.Reques
 		}
 		for i := range session.Markers {
 			if session.Markers[i].AssetID == parts[2] {
+				if req.Reset {
+					resetGeoAlignMarkerState(&session.Markers[i])
+					session.UpdatedAt = time.Now().UTC()
+					writeJSON(w, http.StatusOK, session.Markers[i])
+					return
+				}
 				session.Markers[i].ManualLat = &req.Lat
 				session.Markers[i].ManualLon = &req.Lon
 				session.Markers[i].StagedLat = req.Lat
@@ -3256,6 +3527,23 @@ func (s *Server) handleGeoAlignSessionByID(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func resetGeoAlignMarkerState(marker *geoAlignMarker) {
+	marker.ManualLat = nil
+	marker.ManualLon = nil
+	if marker.OriginalLat != nil && marker.OriginalLon != nil {
+		marker.StagedLat = *marker.OriginalLat
+		marker.StagedLon = *marker.OriginalLon
+	} else if len(marker.TrackCandidates) > 0 {
+		candidate := marker.TrackCandidates[0]
+		lat, lon := floatFromAny(candidate["lat"]), floatFromAny(candidate["lon"])
+		if lat != 0 || lon != 0 {
+			marker.StagedLat = lat
+			marker.StagedLon = lon
+		}
+	}
+	marker.Modified = false
 }
 
 func (s *Server) buildGeoAlignSession(ctx context.Context, assets []catalog.Asset, trackIDs []string) (geoAlignSession, error) {
@@ -3533,6 +3821,39 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleOCRRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	jobsList, err := s.deps.Store.ListJobs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	runs := []jobs.Job{}
+	for _, job := range jobsList {
+		if job.Kind == "ai_ocr" {
+			runs = append(runs, job)
+		}
+	}
+	runs = summarizeJobsForList(runs)
+	predictions, err := s.deps.Store.ListAIPredictions(r.Context(), "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	blocks := ocrBlocksFromPredictions(predictions)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"runs":             runs,
+		"total":            len(runs),
+		"stored_blocks":    len(blocks),
+		"supported_langs":  []string{"eng", "rus", "hye", "chi_sim", "chi_tra"},
+		"engine_contract":  "tesseract_cli_or_ai_sidecar",
+		"auto_run_enabled": false,
+	})
+}
+
 func (s *Server) potentiallyUnsafeAlbumSummary(ctx context.Context) map[string]any {
 	albums, err := s.deps.Store.ListAlbums(ctx, catalog.AlbumQuery{Tree: true, Limit: 1000})
 	if err != nil {
@@ -3576,7 +3897,7 @@ func (s *Server) handleAISafetyByAsset(w http.ResponseWriter, r *http.Request) {
 func aiWorkerProfiles(ctx context.Context) []map[string]any {
 	hints := transcoding.AcceleratorHints()
 	localStatus, localHealth := aiWorkerHealth(ctx, "http://127.0.0.1:19090/health")
-	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text"}
+	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text", "ocr_image"}
 	localDevice := ""
 	localModels := map[string]any{}
 	if caps, ok := localHealth["capabilities"].(map[string]any); ok {
@@ -3611,7 +3932,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"profile":      "cpu",
 			"configured":   false,
 			"status":       "not_configured",
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
 			"endpoint":     "",
 		},
 		{
@@ -3622,7 +3943,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"available":      hints["docker_nvidia_runtime"],
 			"native_gpu":     hints["nvidia_smi"],
 			"docker_runtime": hints["docker_nvidia_runtime"],
-			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
 			"endpoint":       "",
 			"note":           "optional Docker NVIDIA profile; native CUDA is represented by ai-local",
 		},
@@ -3632,7 +3953,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"configured":   false,
 			"status":       "not_configured",
 			"available":    hints["dev_dri"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
 			"endpoint":     "",
 		},
 		{
@@ -3641,7 +3962,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"configured":   false,
 			"status":       "not_configured",
 			"available":    hints["dev_dri"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
 			"endpoint":     "",
 		},
 	}
@@ -3717,6 +4038,8 @@ func aiCartolensiaJobKind(kind string) string {
 		return "ai_embed"
 	case "describe_image":
 		return "ai_describe"
+	case "ocr_image":
+		return "ai_ocr"
 	default:
 		return "ai_action"
 	}
@@ -4260,6 +4583,7 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 	}
 	if predictions, err := s.deps.Store.ListAIPredictions(ctx, asset.ID); err == nil {
 		detail["ai_predictions"] = predictions
+		detail["ocr_blocks"] = ocrBlocksFromPredictions(predictions)
 	}
 	if faces, err := s.deps.Store.ListFaceDetections(ctx, asset.ID); err == nil {
 		detail["face_detections"] = faces
@@ -4267,6 +4591,7 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 	if embeddings, err := s.deps.Store.ListAssetEmbeddings(ctx, asset.ID); err == nil {
 		detail["embeddings"] = summarizeAssetEmbeddings(embeddings)
 	}
+	detail["places"] = s.assetPlaceRecords(ctx, asset)
 	return detail
 }
 
@@ -5044,6 +5369,12 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 		}
 		return nil
 	}
+	if prefix == "place" {
+		if _, ok := searchCtx.placeMatches[token][asset.ID]; ok {
+			return []string{"local place bbox"}
+		}
+		return nil
+	}
 	if prefix == "track" {
 		if _, ok := searchCtx.trackNameMatches[token][asset.ID]; ok {
 			return []string{"track"}
@@ -5081,6 +5412,9 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 	}
 	if _, ok := searchCtx.faceMatches[token][asset.ID]; ok {
 		out = append(out, "face")
+	}
+	if _, ok := searchCtx.placeMatches[token][asset.ID]; ok {
+		out = append(out, "local place bbox")
 	}
 	if strings.Contains(strings.ToLower(asset.MediaKind), plain) {
 		out = append(out, "media kind")
@@ -5123,7 +5457,7 @@ func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
 	for _, token := range tokens {
 		plain := strings.ToLower(strings.TrimSpace(token))
 		if before, after, ok := strings.Cut(plain, ":"); ok {
-			if before != "track" && before != "type" && before != "kind" && before != "media" && before != "format" && before != "date" {
+			if before != "track" && before != "type" && before != "kind" && before != "media" && before != "format" && before != "date" && before != "place" {
 				continue
 			}
 			plain = after
@@ -5134,6 +5468,9 @@ func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
 		if strings.Contains(text, plain) {
 			matched = append(matched, "track metadata")
 		}
+		if place, ok := localPlaceForQuery(plain); ok && trackOverlapsPlace(track, place) {
+			matched = append(matched, "local place bbox")
+		}
 		if track.PointCount > 0 && strings.Contains(strconv.Itoa(track.PointCount), plain) {
 			matched = append(matched, "point count")
 		}
@@ -5143,6 +5480,220 @@ func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
 	}
 	sort.Strings(matched)
 	return uniqueStrings(matched)
+}
+
+func localPlaceForQuery(query string) (localPlaceEntry, bool) {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return localPlaceEntry{}, false
+	}
+	for _, place := range localPlaceEntries() {
+		if strings.EqualFold(query, strings.ToLower(place.Name)) {
+			return place, true
+		}
+		for _, alias := range place.Aliases {
+			if query == strings.ToLower(alias) {
+				return place, true
+			}
+		}
+	}
+	return localPlaceEntry{}, false
+}
+
+func localPlaceEntries() []localPlaceEntry {
+	return []localPlaceEntry{
+		{
+			Name:        "Yerevan",
+			DisplayName: "Yerevan, Armenia",
+			Aliases:     []string{"yerevan", "erevan", "երեւան", "երևան"},
+			Lat:         40.1872,
+			Lon:         44.5152,
+			BBox:        catalog.BBox{MinLon: 44.35, MinLat: 40.05, MaxLon: 44.68, MaxLat: 40.28},
+		},
+		{
+			Name:        "Vanadzor",
+			DisplayName: "Vanadzor, Lori Province, Armenia",
+			Aliases:     []string{"vanadzor", "kirovakan", "վանաձոր"},
+			Lat:         40.8128,
+			Lon:         44.4883,
+			BBox:        catalog.BBox{MinLon: 44.38, MinLat: 40.72, MaxLon: 44.62, MaxLat: 40.90},
+		},
+		{
+			Name:        "Lori Province",
+			DisplayName: "Lori Province, Armenia",
+			Aliases:     []string{"lori", "lori province", "lori marz", "լոռի", "լոռու մարզ"},
+			Lat:         40.9631,
+			Lon:         44.4730,
+			BBox:        catalog.BBox{MinLon: 43.78, MinLat: 40.68, MaxLon: 45.05, MaxLat: 41.32},
+		},
+		{
+			Name:        "Armenia",
+			DisplayName: "Armenia",
+			Aliases:     []string{"armenia", "hayastan", "հայաստան"},
+			Lat:         40.0691,
+			Lon:         45.0382,
+			BBox:        catalog.BBox{MinLon: 43.45, MinLat: 38.80, MaxLon: 46.70, MaxLat: 41.35},
+		},
+	}
+}
+
+func (s *Server) assetPlaceRecords(ctx context.Context, asset catalog.Asset) []assetPlaceRecord {
+	type coordinate struct {
+		source    string
+		geoSource string
+		lat       float64
+		lon       float64
+		metadata  map[string]any
+	}
+	coordinates := []coordinate{}
+	addCoordinate := func(source, geoSource string, lat, lon float64, metadata map[string]any) {
+		if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+			return
+		}
+		for _, existing := range coordinates {
+			if existing.source == source && math.Abs(existing.lat-lat) < 0.000001 && math.Abs(existing.lon-lon) < 0.000001 {
+				return
+			}
+		}
+		coordinates = append(coordinates, coordinate{source: source, geoSource: geoSource, lat: lat, lon: lon, metadata: metadata})
+	}
+	if geo, err := s.deps.Store.GetAssetGeo(ctx, asset.ID); err == nil {
+		addCoordinate("asset_geo", geo.Source, geo.Lat, geo.Lon, map[string]any{
+			"confidence":     geo.Confidence,
+			"track_asset_id": geo.TrackAssetID,
+			"taken_at":       geo.TakenAt,
+			"metadata":       geo.Metadata,
+		})
+	}
+	if lat, lon, ok := metadataCoordinate(asset.Metadata, "gps_lat", "gps_lon"); ok {
+		addCoordinate("exif", "metadata", lat, lon, map[string]any{"source": "asset.metadata.gps_lat/gps_lon"})
+	} else if lat, lon, ok := metadataCoordinate(asset.Metadata, "lat", "lon"); ok {
+		addCoordinate("metadata", "metadata", lat, lon, map[string]any{"source": "asset.metadata.lat/lon"})
+	}
+	out := []assetPlaceRecord{}
+	seen := map[string]struct{}{}
+	for _, coordinate := range coordinates {
+		for _, place := range localPlacesForPoint(coordinate.lat, coordinate.lon) {
+			key := fmt.Sprintf("%s|%s|%.6f|%.6f", coordinate.source, strings.ToLower(place.Name), coordinate.lat, coordinate.lon)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, assetPlaceRecord{
+				CoordinateSource: coordinate.source,
+				GeoSource:        coordinate.geoSource,
+				Lat:              coordinate.lat,
+				Lon:              coordinate.lon,
+				PlaceName:        place.Name,
+				DisplayName:      place.DisplayName,
+				Provider:         "local",
+				Source:           "built_in_place_cache",
+				Match:            "coordinate inside cached place bbox",
+				BBox:             place.BBox,
+				Metadata:         coordinate.metadata,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CoordinateSource == out[j].CoordinateSource {
+			return out[i].DisplayName < out[j].DisplayName
+		}
+		return out[i].CoordinateSource < out[j].CoordinateSource
+	})
+	return out
+}
+
+func (s *Server) assetOCRBlocks(ctx context.Context, assetID string) []ocrBlockRecord {
+	predictions, err := s.deps.Store.ListAIPredictions(ctx, assetID)
+	if err != nil {
+		return []ocrBlockRecord{}
+	}
+	return ocrBlocksFromPredictions(predictions)
+}
+
+func ocrBlocksFromPredictions(predictions []catalog.AIPrediction) []ocrBlockRecord {
+	out := []ocrBlockRecord{}
+	for _, prediction := range predictions {
+		if prediction.Task != "ocr_image" && prediction.Task != "ocr" && prediction.Task != "ocr_text" {
+			continue
+		}
+		text := strings.TrimSpace(prediction.Label)
+		if text == "" {
+			continue
+		}
+		out = append(out, ocrBlockRecord{
+			ID:         prediction.ID,
+			AssetID:    prediction.AssetID,
+			Text:       text,
+			Language:   stringFromMap(prediction.Metadata, "language"),
+			Engine:     stringFromMap(prediction.Metadata, "engine"),
+			Confidence: prediction.Confidence,
+			X:          floatFromAny(prediction.Metadata["x"]),
+			Y:          floatFromAny(prediction.Metadata["y"]),
+			Width:      floatFromAny(prediction.Metadata["width"]),
+			Height:     floatFromAny(prediction.Metadata["height"]),
+			ModelName:  prediction.ModelName,
+			CreatedAt:  prediction.CreatedAt,
+			Metadata:   prediction.Metadata,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Y == out[j].Y {
+			return out[i].X < out[j].X
+		}
+		return out[i].Y < out[j].Y
+	})
+	return out
+}
+
+func localPlacesForPoint(lat, lon float64) []localPlaceEntry {
+	out := []localPlaceEntry{}
+	for _, place := range localPlaceEntries() {
+		if lon >= place.BBox.MinLon && lon <= place.BBox.MaxLon && lat >= place.BBox.MinLat && lat <= place.BBox.MaxLat {
+			out = append(out, place)
+		}
+	}
+	return out
+}
+
+func metadataCoordinate(metadata map[string]any, latKey, lonKey string) (float64, float64, bool) {
+	if metadata == nil {
+		return 0, 0, false
+	}
+	lat, latOK := metadataFloat(metadata[latKey])
+	lon, lonOK := metadataFloat(metadata[lonKey])
+	return lat, lon, latOK && lonOK
+}
+
+func metadataFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		f, err := typed.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func trackOverlapsPlace(track catalog.TrackSummary, place localPlaceEntry) bool {
+	if track.MinLat == nil || track.MinLon == nil || track.MaxLat == nil || track.MaxLon == nil {
+		return false
+	}
+	return *track.MaxLon >= place.BBox.MinLon &&
+		*track.MinLon <= place.BBox.MaxLon &&
+		*track.MaxLat >= place.BBox.MinLat &&
+		*track.MinLat <= place.BBox.MaxLat
 }
 
 func timePtrSearchString(value *time.Time) string {
@@ -5156,7 +5707,11 @@ func stringFromMap(values map[string]any, key string) string {
 	if values == nil {
 		return ""
 	}
-	switch value := values[key].(type) {
+	return stringFromAny(values[key])
+}
+
+func stringFromAny(value any) string {
+	switch value := value.(type) {
 	case string:
 		return value
 	case fmt.Stringer:
@@ -5630,20 +6185,4 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func metadataFloat(value any) (float64, bool) {
-	switch typed := value.(type) {
-	case float64:
-		return typed, true
-	case int:
-		return float64(typed), true
-	case int64:
-		return float64(typed), true
-	case json.Number:
-		parsed, err := typed.Float64()
-		return parsed, err == nil
-	default:
-		return 0, false
-	}
 }

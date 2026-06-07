@@ -152,3 +152,23 @@ Next:
 - Add user-provided video start/end timestamp controls for reliable video-track synchronization.
 - Implement a verified AV1 browser playback route with WebM or fragmented MP4 when encoders and browser support are confirmed.
 - Add browser automation for gallery track previews, map cluster popups, modal focus/backdrop behavior, and face review.
+
+## 2026-06-07 Overnight Continuation Progress
+
+Completed:
+
+- Geo Align marker editing was hardened with Shift-drag marker movement, marker popups, track point popups, and per-marker reset/apply behavior.
+- Asset detail photo layout was constrained so original/view-size images remain inside the image workbench and face overlays align to the displayed image.
+- Face Gallery gained representative face thumbnails through a read-only face-crop endpoint.
+- Universal search gained cache-only local place matching; `Yerevan`, `Vanadzor`, `Lori Province`, and `Armenia` are represented in the built-in local cache.
+- Universal search now reports an explicit `postgres_local` backend through a small `SearchBackend` abstraction; Elasticsearch/OpenSearch remain deferred.
+- OCR gained a manual Base AI job/API/UI contract with bounding-box metadata and search integration through stored OCR text predictions.
+- Settings gained a Search/Places tab showing geocoder mode, online-geocoding status, provider, and local place-cache entries.
+- AV1 WebM output was validated on the current bounded short video using the cache-scoped route; HLS remains the H.264/NVENC interactive path.
+
+Next:
+
+- Replace built-in place entries with a durable operator-editable `place_cache` table and import/export UI.
+- Install and validate Tesseract OCR language packs for English, Russian, Armenian, and Chinese in the supervised environment, then wire the sidecar OCR runtime into `/ocr-image`.
+- Add browser automation for Geo Align Shift-drag editing, track point popups, place search cards, and face-crop thumbnails.
+- Move long AV1 jobs to durable queued/offline transcoding with progress and cancellation.

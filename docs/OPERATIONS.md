@@ -215,6 +215,26 @@ Generated thumbnails are cache files under the Cartolensia cache root. They are 
 
 The Settings page exposes categorized runtime preferences, effective YAML-bound settings, restart-required pending changes, schema-based plugin settings tabs, plugin YAML editors, and guarded DB metadata exports.
 
+Search is PostgreSQL/local by default. Place-name search is cache-only unless a future operator-enabled provider flow is added. The current local cache can be inspected with:
+
+```bash
+curl -fsS http://127.0.0.1:18080/api/v1/search/places
+curl -fsS 'http://127.0.0.1:18080/api/v1/search?q=Yerevan'
+```
+
+The Settings → Search/Places tab shows the same cache-only geocoder mode, provider status, and local place cache match counts. No public geocoder is called automatically. Current built-in local entries include Yerevan, Vanadzor, Lori Province, and Armenia.
+
+Universal Search reports the active backend in each response. The current backend is `postgres_local`; Elasticsearch/OpenSearch are not required for the MVP and should be added only when archive size and operations needs justify another service.
+
+OCR is manual-only. `POST /api/v1/ai/jobs/ocr` uses the configured AI sidecar OCR contract when available, and stored OCR blocks can be inspected with:
+
+```bash
+curl -fsS http://127.0.0.1:18080/api/v1/ocr/runs
+curl -fsS http://127.0.0.1:18080/api/v1/assets/<asset-id>/ocr
+```
+
+If Tesseract or a required language pack is missing, the OCR job should fail/report through the AI job path; it must not write OCR cache files into original storage.
+
 Useful endpoints:
 
 - `GET /api/v1/settings`

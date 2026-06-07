@@ -203,6 +203,38 @@ export type AssetDetail = {
   ai_predictions?: Record<string, unknown>[];
   face_detections?: Record<string, unknown>[];
   embeddings?: Record<string, unknown>[];
+  places?: AssetPlaceRecord[];
+  ocr_blocks?: OCRBlock[];
+};
+
+export type AssetPlaceRecord = {
+  coordinate_source: string;
+  geo_source?: string;
+  lat: number;
+  lon: number;
+  place_name: string;
+  display_name: string;
+  provider: string;
+  source: string;
+  match: string;
+  bbox: { min_lon: number; min_lat: number; max_lon: number; max_lat: number };
+  metadata?: Record<string, unknown>;
+};
+
+export type OCRBlock = {
+  id: string;
+  asset_id: string;
+  text: string;
+  language?: string;
+  engine?: string;
+  confidence?: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  model_name?: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type TrackSummary = {
@@ -531,13 +563,37 @@ export type SearchResult = {
   explanation: string;
 };
 
+export type SearchPlace = {
+  query: string;
+  name: string;
+  display_name: string;
+  provider: string;
+  source: string;
+  lat: number;
+  lon: number;
+  bbox: { min_lon: number; min_lat: number; max_lon: number; max_lat: number };
+  matched_assets: number;
+};
+
 export type SearchResponse = {
   query: string;
   tokens: string[];
+  backend?: string;
+  backend_mode?: string;
   results: SearchResult[];
   tracks?: Array<{ track: TrackSummary; matched: string[]; explanation: string }>;
+  places?: SearchPlace[];
   warnings: string[];
   page: { limit: number; offset: number; total: number };
+};
+
+export type SearchPlacesResponse = {
+  backend: string;
+  mode: string;
+  online_enabled: boolean;
+  provider: string;
+  places: SearchPlace[];
+  note?: string;
 };
 
 export type TileSource = {
@@ -954,7 +1010,7 @@ export const api = {
   transcodingMetricsStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/metrics/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
-  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed", payload: Record<string, unknown>) =>
+  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
   aiSummary: () => request<Record<string, unknown>>("/api/v1/ai/summary"),
   aiTags: () => request<Record<string, unknown>>("/api/v1/ai/tags"),
@@ -1000,6 +1056,11 @@ export const api = {
       `/api/v1/geo-align/sessions/${encodeURIComponent(sessionId)}/marker/${encodeURIComponent(assetId)}`,
       { method: "PATCH", body: JSON.stringify({ lat, lon }) }
     ),
+  resetGeoAlignMarker: (sessionId: string, assetId: string) =>
+    request<GeoAlignMarker>(
+      `/api/v1/geo-align/sessions/${encodeURIComponent(sessionId)}/marker/${encodeURIComponent(assetId)}`,
+      { method: "PATCH", body: JSON.stringify({ reset: true }) }
+    ),
   resetGeoAlignSession: (id: string) =>
     request<GeoAlignSession>(`/api/v1/geo-align/sessions/${encodeURIComponent(id)}/reset`, { method: "POST" }),
   applyGeoAlignSession: (id: string) =>
@@ -1029,6 +1090,7 @@ export const api = {
       tokens: asArray(response.tokens),
       page: response.page ?? { limit, offset, total: 0 }
     })),
+  searchPlaces: () => request<SearchPlacesResponse>("/api/v1/search/places"),
   settings: () => request<SettingsPayload>("/api/v1/settings"),
   pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
   patchPendingSettings: (settings: Record<string, unknown>) =>

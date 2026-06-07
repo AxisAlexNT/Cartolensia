@@ -26,6 +26,10 @@ var runtimeSettings = struct {
 	"map.tiles_enabled":             true,
 	"preview.cache_max_bytes":       int64(10 * 1024 * 1024 * 1024),
 	"gallery.default_view":          "tile",
+	"search.default_limit":          100,
+	"search.geocoder_mode":          "cache_only",
+	"search.online_geocoding":       false,
+	"search.geocoder_provider":      "local_place_cache",
 	"transcode.session_ttl":         "2h",
 }}
 
@@ -217,6 +221,7 @@ func (s *Server) settingsPayload() map[string]any {
 			{"id": "preview", "label": "Preview Cache", "runtime": true},
 			{"id": "map", "label": "Map/Tiles", "runtime": true},
 			{"id": "gps", "label": "GPS/KML Tracks", "runtime": true},
+			{"id": "search", "label": "Search/Places", "runtime": true},
 			{"id": "transcoding", "label": "Transcoding", "runtime": true},
 			{"id": "ai", "label": "AI/Vector", "runtime": false},
 			{"id": "auth", "label": "Auth/Security", "runtime": false},
@@ -348,6 +353,10 @@ func runtimeSettingsSchema() []map[string]any {
 		{"tab": "preview", "key": "preview.cache_max_bytes", "type": "number", "label": "Preview cache max bytes"},
 		{"tab": "map", "key": "map.cluster_radius_px", "type": "number", "label": "Cluster radius px"},
 		{"tab": "map", "key": "map.tiles_enabled", "type": "boolean", "label": "OSM tiles enabled"},
+		{"tab": "search", "key": "search.default_limit", "type": "number", "label": "Default search limit"},
+		{"tab": "search", "key": "search.geocoder_mode", "type": "text", "label": "Geocoder mode"},
+		{"tab": "search", "key": "search.online_geocoding", "type": "boolean", "label": "Online geocoding enabled"},
+		{"tab": "search", "key": "search.geocoder_provider", "type": "text", "label": "Geocoder provider"},
 		{"tab": "transcoding", "key": "transcode.session_ttl", "type": "text", "label": "Transcode session TTL"},
 	}
 }

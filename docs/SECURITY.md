@@ -95,6 +95,10 @@ The OpenStreetMap tile proxy is on-demand only. It caches tiles actively viewed 
 
 Track thumbnails/previews for GPX/KML/KMZ/GPZ assets are generated under the Cartolensia preview/cache root. They are never written beside original track files.
 
+Universal search uses PostgreSQL/local metadata by default. Place-name matching is cache-only through Cartolensia local place entries such as Yerevan, Vanadzor, Lori Province, and Armenia. The app does not call public reverse-geocoding/geocoding APIs automatically; future online provider support must be user-triggered, rate-limited, and cached before reuse.
+
+OCR is a manual AI job/action. OCR text and bounding boxes are metadata records and must not write temporary inputs, OCR cache files, or derived text sidecars into original storage. Missing OCR engines/language packs must be reported as job/worker errors rather than silently falling back to remote services.
+
 Settings DB exports are metadata/config JSON files written under the configured Cartolensia cache export directory. Import planning is validation-only and does not perform destructive restore while the app is live.
 
 ## HTTP/TLS
@@ -146,4 +150,4 @@ Current added dependency notes:
 - Geo Align apply writes only Cartolensia database geotag overrides in the current real-peek mode. EXIF writeback is explicitly blocked for `strict_read_only` storage.
 - Video Track Player sessions are read-only and derive transient marker positions from existing media metadata and track points.
 - Map cluster popups and track previews read existing metadata and tile/cache data only; they do not trigger discovery or missing-file marking.
-- AV1 live HLS is blocked when unsupported so the system does not start expensive, failing transcodes without a clear operator decision.
+- AV1 live HLS is blocked when unsupported so the system does not start expensive, failing transcodes without a clear operator decision. The verified browser route is cache-scoped `video/webm` output when a compatible encoder is available.

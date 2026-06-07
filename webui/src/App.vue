@@ -6,6 +6,7 @@ import GeoJSON from "ol/format/GeoJSON";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
 import Overlay from "ol/Overlay";
+import { defaults as defaultInteractions } from "ol/interaction/defaults";
 import VectorSource from "ol/source/Vector";
 import XYZ from "ol/source/XYZ";
 import { fromLonLat, toLonLat } from "ol/proj";
@@ -28,17 +29,21 @@ import {
   type FileBrowseResponse,
   type FaceCluster,
   type FaceDetection,
+  type GeoAlignMarker,
   type GeoAlignSession,
   type Job,
   type JobStats,
   type IndexingStatus,
   type MonthBucket,
+  type OCRBlock,
   type PluginManifest,
   type PreviewCacheEntry,
   type PreviewCacheStats,
   type Principal,
   type ScanRun,
   type SearchResult,
+  type SearchPlace,
+  type SearchPlacesResponse,
   type SettingsPayload,
   type Stats,
   type StreamOptions,
@@ -164,8 +169,11 @@ const searchWarnings = ref<string[]>([]);
 const universalSearchQ = ref("");
 const universalSearchResults = ref<SearchResult[]>([]);
 const universalSearchTrackResults = ref<Array<{ track: TrackSummary; matched: string[]; explanation: string }>>([]);
+const universalSearchPlaceResults = ref<SearchPlace[]>([]);
 const universalSearchWarnings = ref<string[]>([]);
 const universalSearchMessage = ref("");
+const universalSearchBackend = ref("");
+const searchPlaceCache = ref<SearchPlacesResponse | null>(null);
 const assetDetail = ref<AssetDetail | null>(null);
 const jobs = ref<Job[]>([]);
 const jobStats = ref<JobStats | null>(null);
@@ -273,6 +281,8 @@ let geoAlignMap: OLMap | null = null;
 let geoAlignTileLayer: TileLayer<XYZ> | null = null;
 let geoAlignTrackLayer: VectorLayer<VectorSource> | null = null;
 let geoAlignMarkerLayer: VectorLayer<VectorSource> | null = null;
+let geoAlignDragState: { assetId: string; feature: Feature; lastLat: number; lastLon: number; moved: boolean } | null = null;
+let geoAlignSuppressNextClick = false;
 const geoAlignTrackSource = new VectorSource();
 const geoAlignMarkerSource = new VectorSource();
 let mapOverlay: Overlay | null = null;
@@ -293,7 +303,7 @@ const transcodeTemplate = ref("ffmpeg -i ${input} -c:v ${preset} -f hls ${output
 const transcodePlannerMessage = ref("Plans write only to the configured Cartolensia transcode cache; originals are never replaced.");
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const aiWorkers = ref<Record<string, unknown> | null>(null);
-type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed";
+type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed" | "ocr";
 
 const aiMessage = ref("");
 const aiBusyKind = ref<AIJobKind | "">("");
@@ -316,7 +326,9 @@ const faceGalleryMessage = ref("");
 const faceClusterNameDraft = ref("");
 const faceSearchQ = ref("");
 const showAssetFaceBoxes = ref(localStorage.getItem("cartolensia.asset.showFaceBoxes") !== "false");
+const showAssetOCRBoxes = ref(localStorage.getItem("cartolensia.asset.showOCRBoxes") !== "false");
 const selectedAssetFaceId = ref("");
+const selectedAssetOCRId = ref("");
 const faceAddMode = ref(false);
 const newFaceName = ref("");
 const newFaceConfidence = ref(1);
@@ -325,6 +337,10 @@ let faceDraftStart: { x: number; y: number } | null = null;
 const geoAlignSession = ref<GeoAlignSession | null>(null);
 const geoAlignMessage = ref("");
 const geoAlignTrackIds = ref("");
+const geoAlignPopupMarker = ref<GeoAlignMarker | null>(null);
+const geoAlignPopupTrackInfo = ref<TrackPointInfo | null>(null);
+const geoAlignPopupTrackMessage = ref("");
+const geoAlignDragActive = ref(false);
 const videoTrackSession = ref<VideoTrackPlayerSession | null>(null);
 const videoTrackMessage = ref("");
 const videoTrackAssetId = ref("");
@@ -524,7 +540,8 @@ const aiModelCards = computed(() => [
   { key: "face_detector", label: "Face Detector", action: "faces", model: aiModelStates.value.face_detector },
   { key: "safety", label: "NSFW/Safety", action: "safety", model: aiModelStates.value.safety },
   { key: "openclip", label: "Embeddings", action: "embed", model: aiModelStates.value.openclip },
-  { key: "caption", label: "Captioning", action: "describe", model: aiModelStates.value.caption }
+  { key: "caption", label: "Captioning", action: "describe", model: aiModelStates.value.caption },
+  { key: "ocr", label: "OCR Text", action: "ocr", model: aiModelStates.value.ocr ?? { available: false, name: "Tesseract sidecar contract" } }
 ]);
 const aiTags = computed(() => asArray((aiTagPayload.value?.tags as unknown[]) ?? []));
 const aiPredictions = computed(() => asArray((aiPredictionPayload.value?.predictions as unknown[]) ?? []));
@@ -648,7 +665,7 @@ function openGallery(items: GalleryItem[], index: number) {
 function closeGallery() {
   closeAdvancedTranscode();
   if (transcodeSession.value) void stopActiveTranscode();
-  galleryTrackMap?.setTarget(undefined);
+  destroyGalleryTrackMap();
   galleryItems.value = [];
   galleryIndex.value = 0;
 }
@@ -799,6 +816,16 @@ function fitGalleryTrack() {
   fitTrackMap(galleryTrackMap, galleryTrackSource, 16);
 }
 
+function destroyGalleryTrackMap() {
+  galleryTrackMap?.setTarget(undefined);
+  galleryTrackMap?.dispose();
+  galleryTrackMap = null;
+  galleryTrackTileLayer = null;
+  galleryTrackLayer = null;
+  galleryTrackSource.clear();
+  galleryTrackFallbackPath.value = "";
+}
+
 function fitSelectedTrack() {
   fitTrackMap(selectedTrackMap, selectedTrackSource, 16);
 }
@@ -820,9 +847,8 @@ function persistLayerPreference(key: string, value: boolean) {
 async function refreshGalleryTrackPreview() {
   const current = galleryCurrent.value;
   if (!current || current.media_kind !== "track") {
-    galleryTrackSource.clear();
+    destroyGalleryTrackMap();
     galleryTrackPreviewStatus.value = "";
-    galleryTrackFallbackPath.value = "";
     return;
   }
   await nextTick();
@@ -837,28 +863,27 @@ async function refreshGalleryTrackPreview() {
 
 function renderGalleryTrackMap(preview: Record<string, unknown>) {
   if (!galleryTrackElement.value) return;
-  if (!galleryTrackMap) {
-    galleryTrackTileLayer = createLocalOSMLayer(() => {
-      tileStatus.value = "Track preview tiles are unavailable; dark vector fallback remains active.";
-    });
-    galleryTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
-    galleryTrackLayer = new VectorLayer({
-      source: galleryTrackSource,
-      style: trackPreviewStyle
-    });
-    galleryTrackLayer.setVisible(galleryTrackLayerVisible.value);
-    galleryTrackMap = new OLMap({
-      target: galleryTrackElement.value,
-      layers: [galleryTrackTileLayer, galleryTrackLayer],
-      view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
-    });
-  } else {
-    galleryTrackMap.setTarget(galleryTrackElement.value);
-  }
+  destroyGalleryTrackMap();
+  galleryTrackTileLayer = createLocalOSMLayer(() => {
+    tileStatus.value = "Track preview tiles are unavailable; dark vector fallback remains active.";
+  });
+  galleryTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
+  galleryTrackLayer = new VectorLayer({
+    source: galleryTrackSource,
+    style: trackPreviewStyle,
+    updateWhileAnimating: true,
+    updateWhileInteracting: true
+  });
+  galleryTrackLayer.setVisible(galleryTrackLayerVisible.value);
+  galleryTrackMap = new OLMap({
+    target: galleryTrackElement.value,
+    layers: [galleryTrackTileLayer, galleryTrackLayer],
+    view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
+  });
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   galleryTrackSource.clear();
   galleryTrackSource.addFeatures(features);
-  galleryTrackFallbackPath.value = trackFallbackPathFromPreview(preview);
+  galleryTrackFallbackPath.value = "";
   galleryTrackPreviewStatus.value = trackPreviewStatus(preview, features.length);
   galleryTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
   galleryTrackLayer?.setVisible(galleryTrackLayerVisible.value);
@@ -889,11 +914,13 @@ function renderSelectedTrackMap(preview: Record<string, unknown>) {
     selectedTrackTileLayer = createLocalOSMLayer(() => {
       tileStatus.value = "Track detail tiles are unavailable; dark vector fallback remains active.";
     });
+    selectedTrackTileLayer.setZIndex(0);
     selectedTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
     selectedTrackLayer = new VectorLayer({
       source: selectedTrackSource,
       style: trackPreviewStyle
     });
+    selectedTrackLayer.setZIndex(5);
     selectedTrackLayer.setVisible(selectedTrackLayerVisible.value);
     selectedTrackMap = new OLMap({
       target: selectedTrackMapElement.value,
@@ -992,11 +1019,13 @@ function ensureGeoAlignMap() {
     geoAlignTileLayer = createLocalOSMLayer(() => {
       tileStatus.value = "Geo Align OSM tiles are unavailable; vector markers remain active.";
     });
+    geoAlignTileLayer.setZIndex(0);
     geoAlignTileLayer.setVisible(geoAlignTilesVisible.value);
     geoAlignTrackLayer = new VectorLayer({
       source: geoAlignTrackSource,
       style: trackPreviewStyle
     });
+    geoAlignTrackLayer.setZIndex(4);
     geoAlignMarkerLayer = new VectorLayer({
       source: geoAlignMarkerSource,
       style: (feature) => {
@@ -1028,26 +1057,166 @@ function ensureGeoAlignMap() {
         ];
       }
     });
+    geoAlignMarkerLayer.setZIndex(8);
     geoAlignMap = new OLMap({
       target: geoAlignMapElement.value,
       layers: [geoAlignTileLayer, geoAlignTrackLayer, geoAlignMarkerLayer],
+      interactions: defaultInteractions({ shiftDragZoom: false }),
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
     });
+    bindGeoAlignViewportDragHandlers();
     geoAlignMap.on("singleclick", (event) => {
       if (!geoAlignMap) return;
-      geoAlignMap.forEachFeatureAtPixel(
-        event.pixel,
-        (feature) => {
-          const assetID = String(feature.get("asset_id") ?? "");
-          if (assetID) void openAsset(assetID);
-          return true;
-        },
-        { layerFilter: (layer) => layer === geoAlignMarkerLayer }
-      );
+      if (geoAlignSuppressNextClick) {
+        geoAlignSuppressNextClick = false;
+        return;
+      }
+      const markerFeature = geoAlignMarkerLayer ? geoAlignFeatureAtPixel(event.pixel, geoAlignMarkerLayer) : null;
+      const assetID = String(markerFeature?.get("asset_id") ?? "");
+      if (assetID) {
+        showGeoAlignMarkerPopup(assetID);
+        return;
+      }
+      const trackFeature = geoAlignTrackLayer ? geoAlignFeatureAtPixel(event.pixel, geoAlignTrackLayer) : null;
+      const trackID = String(trackFeature?.get("track_id") ?? trackFeature?.get("id") ?? "");
+      if (trackID) {
+        void showGeoAlignTrackPopup(trackID, event.coordinate);
+      } else {
+        closeGeoAlignPopup();
+      }
     });
   } else {
     geoAlignMap.setTarget(geoAlignMapElement.value);
   }
+}
+
+function bindGeoAlignViewportDragHandlers() {
+  if (!geoAlignMap) return;
+  const viewport = geoAlignMap.getViewport();
+  viewport.addEventListener("pointerdown", onGeoAlignPointerDown, { capture: true });
+  viewport.addEventListener("pointermove", onGeoAlignPointerMove, { capture: true });
+  viewport.addEventListener("pointerup", onGeoAlignPointerUp, { capture: true });
+  viewport.addEventListener("pointerleave", onGeoAlignPointerUp, { capture: true });
+}
+
+function onGeoAlignPointerDown(pointer: PointerEvent) {
+  if (!geoAlignMap || !geoAlignMarkerLayer || !pointer.shiftKey || pointer.button !== 0) return;
+  const pixel = geoAlignMap.getEventPixel(pointer);
+  const feature = geoAlignFeatureAtPixel(pixel, geoAlignMarkerLayer);
+  const assetId = String(feature?.get("asset_id") ?? "");
+  if (!feature || !assetId) return;
+  pointer.preventDefault();
+  pointer.stopPropagation();
+  const marker = findGeoAlignMarker(assetId);
+  geoAlignDragState = { assetId, feature, lastLat: marker?.staged_lat ?? 0, lastLon: marker?.staged_lon ?? 0, moved: false };
+  geoAlignDragActive.value = true;
+  geoAlignSuppressNextClick = true;
+  geoAlignMap.getViewport().style.cursor = "grabbing";
+  showGeoAlignMarkerPopup(assetId);
+}
+
+function onGeoAlignPointerMove(pointer: PointerEvent) {
+  if (!geoAlignDragState || !geoAlignMap) return;
+  pointer.preventDefault();
+  pointer.stopPropagation();
+  const coordinate = geoAlignMap.getEventCoordinate(pointer);
+  const geometry = geoAlignDragState.feature.getGeometry();
+  if (geometry instanceof Point) {
+    geometry.setCoordinates(coordinate);
+  }
+  const lonLat = toLonLat(coordinate);
+  geoAlignDragState.lastLon = Number(lonLat[0]);
+  geoAlignDragState.lastLat = Number(lonLat[1]);
+  geoAlignDragState.moved = true;
+  const marker = findGeoAlignMarker(geoAlignDragState.assetId);
+  if (marker) {
+    marker.staged_lat = geoAlignDragState.lastLat;
+    marker.staged_lon = geoAlignDragState.lastLon;
+    marker.manual_lat = geoAlignDragState.lastLat;
+    marker.manual_lon = geoAlignDragState.lastLon;
+    marker.modified = true;
+    if (geoAlignPopupMarker.value?.asset_id === marker.asset_id) {
+      geoAlignPopupMarker.value = { ...marker };
+    }
+  }
+  geoAlignDragState.feature.set("modified", true);
+}
+
+function onGeoAlignPointerUp(pointer: PointerEvent) {
+  if (!geoAlignDragState) return;
+  pointer.preventDefault();
+  pointer.stopPropagation();
+  void finishGeoAlignMarkerDrag();
+}
+
+function geoAlignFeatureAtPixel(pixel: number[], layer: VectorLayer<VectorSource>): Feature | null {
+  if (!geoAlignMap) return null;
+  let hit: Feature | null = null;
+  geoAlignMap.forEachFeatureAtPixel(
+    pixel,
+    (feature) => {
+      hit = feature as Feature;
+      return true;
+    },
+    { hitTolerance: 10, layerFilter: (candidate) => candidate === layer }
+  );
+  return hit;
+}
+
+function findGeoAlignMarker(assetId: string): GeoAlignMarker | null {
+  return geoAlignSession.value?.markers.find((marker) => marker.asset_id === assetId) ?? null;
+}
+
+function showGeoAlignMarkerPopup(assetId: string, center = false) {
+  const marker = findGeoAlignMarker(assetId);
+  if (!marker) return;
+  geoAlignPopupTrackInfo.value = null;
+  geoAlignPopupTrackMessage.value = "";
+  geoAlignPopupMarker.value = { ...marker };
+  if (center) centerGeoAlignOn(marker.staged_lat, marker.staged_lon, false);
+}
+
+async function showGeoAlignTrackPopup(trackId: string, coordinate: number[]) {
+  const lonLat = toLonLat(coordinate);
+  geoAlignPopupMarker.value = null;
+  geoAlignPopupTrackInfo.value = null;
+  geoAlignPopupTrackMessage.value = "Loading nearest track point...";
+  try {
+    geoAlignPopupTrackInfo.value = await api.gpsTrackPointInfo(trackId, Number(lonLat[1]), Number(lonLat[0]));
+    geoAlignPopupTrackMessage.value = "";
+  } catch (err) {
+    geoAlignPopupTrackMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function closeGeoAlignPopup() {
+  geoAlignPopupMarker.value = null;
+  geoAlignPopupTrackInfo.value = null;
+  geoAlignPopupTrackMessage.value = "";
+}
+
+function centerGeoAlignOn(lat?: number, lon?: number, animate = true) {
+  if (!geoAlignMap || typeof lat !== "number" || typeof lon !== "number") return;
+  geoAlignMap.getView().animate({
+    center: fromLonLat([lon, lat]),
+    zoom: Math.max(geoAlignMap.getView().getZoom() ?? 14, 16),
+    duration: animate ? 140 : 0
+  });
+}
+
+async function finishGeoAlignMarkerDrag() {
+  const drag = geoAlignDragState;
+  geoAlignDragState = null;
+  geoAlignDragActive.value = false;
+  if (geoAlignMap) geoAlignMap.getViewport().style.cursor = "";
+  if (!drag || !drag.moved || !geoAlignSession.value || !Number.isFinite(drag.lastLat) || !Number.isFinite(drag.lastLon)) return;
+  const updated = await api.moveGeoAlignMarker(geoAlignSession.value.id, drag.assetId, drag.lastLat, drag.lastLon);
+  const marker = findGeoAlignMarker(drag.assetId);
+  if (marker) Object.assign(marker, updated);
+  if (geoAlignPopupMarker.value?.asset_id === drag.assetId) {
+    geoAlignPopupMarker.value = { ...updated };
+  }
+  geoAlignMessage.value = `${updated.name} moved. Apply saves the DB-only geotag override; EXIF writeback remains disabled.`;
 }
 
 async function refreshGeoAlignMap() {
@@ -1073,7 +1242,16 @@ async function refreshGeoAlignMap() {
   for (const trackID of geoAlignSession.value.track_ids.slice(0, 6)) {
     const preview = await api.trackPreview(trackID, 1200).catch(() => null);
     if (!preview) continue;
-    geoAlignTrackSource.addFeatures(new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" }));
+    const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
+    const summary = ((preview.summary ?? {}) as Record<string, unknown>);
+    for (const feature of features) {
+      feature.set("track_id", trackID);
+      feature.set("id", trackID);
+      feature.set("name", String(summary.name ?? trackID));
+      feature.set("source_format", String(summary.source_format ?? "track"));
+      feature.set("point_count", Number(summary.point_count ?? 0));
+    }
+    geoAlignTrackSource.addFeatures(features);
   }
   window.setTimeout(() => {
     geoAlignMap?.updateSize();
@@ -1546,6 +1724,7 @@ async function refresh() {
 	      aiSafetyData,
 	      faceClusterPayload,
 	      settingsPayload,
+	      placeCachePayload,
 	      exportRows
     ] = await Promise.all([
       api.explorer(explorerQueryString()),
@@ -1577,6 +1756,7 @@ async function refresh() {
 	      api.aiSafety(),
 	      api.faceClusters(),
 	      api.settings(),
+	      api.searchPlaces(),
       api.dbExports()
 		]);
 		rows.value = asArray(explorerRows);
@@ -1634,8 +1814,9 @@ async function refresh() {
 	    aiPredictionPayload.value = aiPredictionsPayload;
 	    aiFacePayload.value = aiFacesPayload;
 	    aiSafetyPayload.value = aiSafetyData;
-	    faceClustersPayload.value = faceClusterPayload;
+    faceClustersPayload.value = faceClusterPayload;
     settings.value = settingsPayload;
+    searchPlaceCache.value = placeCachePayload;
     initializePendingConfig(settingsPayload);
     dbExports.value = asArray(exportRows);
     if (principal.value && backendStatus.auth?.mode === "local") {
@@ -1914,7 +2095,7 @@ async function requestAIJob(kind: AIJobKind) {
 }
 
 function requestAIModelAction(action: string) {
-  if (["classify", "faces", "describe", "safety", "embed"].includes(action)) {
+  if (["classify", "faces", "describe", "safety", "embed", "ocr"].includes(action)) {
     void requestAIJob(action as AIJobKind);
   }
 }
@@ -1940,14 +2121,18 @@ async function runUniversalSearch() {
     universalSearchMessage.value = "Enter a word, filename, date, camera, category, caption, tag, hash prefix, album, or track name.";
     universalSearchResults.value = [];
     universalSearchTrackResults.value = [];
+    universalSearchPlaceResults.value = [];
+    universalSearchBackend.value = "";
     return;
   }
   universalSearchMessage.value = "Searching indexed media and tracks...";
   const response = await api.search(query, 200);
   universalSearchResults.value = asArray(response.results);
   universalSearchTrackResults.value = asArray(response.tracks);
+  universalSearchPlaceResults.value = asArray(response.places);
   universalSearchWarnings.value = asArray(response.warnings);
-  universalSearchMessage.value = `${universalSearchResults.value.length} media results · ${universalSearchTrackResults.value.length} track results`;
+  universalSearchBackend.value = `${response.backend ?? "postgres_local"} · ${response.backend_mode ?? "metadata/local"}`;
+  universalSearchMessage.value = `${universalSearchResults.value.length} media results · ${universalSearchTrackResults.value.length} track results · ${universalSearchPlaceResults.value.length} place matches`;
 }
 
 async function refreshFaceClusters() {
@@ -2022,10 +2207,51 @@ async function nudgeGeoAlignMarker(assetId: string, dLat: number, dLon: number) 
   await refreshGeoAlignMap();
 }
 
+async function resetGeoAlignMarker(marker: GeoAlignMarker) {
+  if (!geoAlignSession.value) return;
+  const updated = await api.resetGeoAlignMarker(geoAlignSession.value.id, marker.asset_id);
+  const local = findGeoAlignMarker(marker.asset_id);
+  if (local) Object.assign(local, updated);
+  if (geoAlignPopupMarker.value?.asset_id === marker.asset_id) {
+    geoAlignPopupMarker.value = { ...updated };
+  }
+  geoAlignMessage.value = `${updated.name} reset to its original or track-derived coordinate.`;
+  await refreshGeoAlignMap();
+}
+
+function applyGeoAlignMarker(marker: GeoAlignMarker) {
+  geoAlignPopupMarker.value = { ...marker };
+  void applyGeoAlign();
+}
+
+function geoAlignCandidateLabel(candidate: Record<string, unknown>): string {
+  const lat = Number(candidate.lat);
+  const lon = Number(candidate.lon);
+  const mode = String(candidate.mode ?? "track");
+  const time = candidate.time ? ` · ${String(candidate.time)}` : "";
+  return `${mode} ${Number.isFinite(lat) && Number.isFinite(lon) ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : ""}${time}`;
+}
+
+function showGeoAlignCandidate(candidate: Record<string, unknown>) {
+  const lat = Number(candidate.lat);
+  const lon = Number(candidate.lon);
+  centerGeoAlignOn(lat, lon);
+}
+
+function geoAlignCoordinateText(lat?: number, lon?: number): string {
+  if (typeof lat !== "number" || typeof lon !== "number") return "n/a";
+  return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+}
+
+function copyText(text: string) {
+  void navigator.clipboard?.writeText(text);
+}
+
 async function resetGeoAlign() {
   if (!geoAlignSession.value) return;
   geoAlignSession.value = await api.resetGeoAlignSession(geoAlignSession.value.id);
   geoAlignMessage.value = "Manual marker moves were reset.";
+  closeGeoAlignPopup();
   await refreshGeoAlignMap();
 }
 
@@ -2163,6 +2389,16 @@ async function findNearbyTrackAssets(id: string) {
   const result = await api.gpsTrackNearbyAssets(id, 100);
   trackAssets.value = asArray(result.assets).map((item) => item.asset);
   trackAssetsReason.value = trackAssets.value.length === 0 ? "No geotagged photo/video assets were found within the default 100 m distance." : "";
+}
+
+async function openTrackAndFindAssets(id: string) {
+  await openTrack(id);
+  await findTrackAssets(id);
+}
+
+async function openTrackAndFindNearbyAssets(id: string) {
+  await openTrack(id);
+  await findNearbyTrackAssets(id);
 }
 
 async function snapTrackMedia(id: string) {
@@ -2314,6 +2550,12 @@ const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
   map: [
     { key: "map.cluster_radius_px", label: "Cluster radius px", help: "Screen distance used for marker clustering.", kind: "number" },
     { key: "map.tiles_enabled", label: "OSM tiles enabled", help: "On-demand tile proxy; no bulk prefetch.", kind: "boolean" }
+  ],
+  search: [
+    { key: "search.default_limit", label: "Default search limit", help: "Bounded result count for broad universal searches.", kind: "number" },
+    { key: "search.geocoder_mode", label: "Geocoder mode", help: "cache_only is the current safe default.", kind: "text" },
+    { key: "search.online_geocoding", label: "Online geocoding enabled", help: "Currently off by default; provider calls must be user-triggered and cached.", kind: "boolean" },
+    { key: "search.geocoder_provider", label: "Geocoder provider", help: "local_place_cache is active now; Nominatim-compatible providers remain explicit future configuration.", kind: "text" }
   ],
   transcoding: [
     { key: "transcode.session_ttl", label: "Transcode session TTL", help: "Cleanup age for cache-scoped HLS sessions.", kind: "text" }
@@ -2661,6 +2903,35 @@ function faceBoxStyle(face: FaceDetection | Record<string, unknown>, detail: Ass
   };
 }
 
+function ocrBoxStyle(block: OCRBlock | Record<string, unknown>, detail: AssetDetail): Record<string, string> {
+  const metadata = detail.asset.metadata ?? {};
+  const blocks = asArray(detail.ocr_blocks as unknown[]) as Array<Record<string, unknown>>;
+  const x = Number((block as Record<string, unknown>).x ?? 0);
+  const y = Number((block as Record<string, unknown>).y ?? 0);
+  const width = Number((block as Record<string, unknown>).width ?? 0);
+  const height = Number((block as Record<string, unknown>).height ?? 0);
+  const imageWidth = Number(
+    metadata.width ??
+      metadata.image_width ??
+      metadata.ImageWidth ??
+      metadata["ExifImageWidth"] ??
+      Math.max(...blocks.map((item) => Number(item.x ?? 0) + Number(item.width ?? 0)), x + width, 1)
+  );
+  const imageHeight = Number(
+    metadata.height ??
+      metadata.image_height ??
+      metadata.ImageHeight ??
+      metadata["ExifImageHeight"] ??
+      Math.max(...blocks.map((item) => Number(item.y ?? 0) + Number(item.height ?? 0)), y + height, 1)
+  );
+  return {
+    left: `${Math.max(0, (x / Math.max(1, imageWidth)) * 100)}%`,
+    top: `${Math.max(0, (y / Math.max(1, imageHeight)) * 100)}%`,
+    width: `${Math.max(0.5, (width / Math.max(1, imageWidth)) * 100)}%`,
+    height: `${Math.max(0.5, (height / Math.max(1, imageHeight)) * 100)}%`
+  };
+}
+
 function faceMetadata(face: FaceDetection | Record<string, unknown>): Record<string, unknown> {
   return (((face as Record<string, unknown>).metadata ?? {}) as Record<string, unknown>);
 }
@@ -2710,6 +2981,8 @@ function faceDraftBoxStyle(detail: AssetDetail): Record<string, string> {
 }
 
 function faceClusterPreviewURL(cluster: FaceCluster): string {
+  const faceID = String(cluster.representative_face_id ?? "");
+  if (faceID) return `/api/v1/faces/detections/${encodeURIComponent(faceID)}/thumbnail`;
   const assetID = String(cluster.metadata?.representative_asset_id ?? "");
   return assetID ? `/api/v1/media/${assetID}/preview` : "";
 }
@@ -2719,7 +2992,7 @@ function faceClusterPreviewTitle(cluster: FaceCluster): string {
 }
 
 function faceCardPreviewURL(face: FaceDetection): string {
-  return `/api/v1/media/${face.asset_id}/preview`;
+  return `/api/v1/faces/detections/${encodeURIComponent(face.id)}/thumbnail`;
 }
 
 async function openFaceFromDetection(face: FaceDetection | Record<string, unknown>) {
@@ -3111,6 +3384,9 @@ watch([geoAlignTilesVisible, geoAlignTrackLayerVisible, geoAlignMarkerLayerVisib
 watch(showAssetFaceBoxes, () => {
   localStorage.setItem("cartolensia.asset.showFaceBoxes", showAssetFaceBoxes.value ? "true" : "false");
 });
+watch(showAssetOCRBoxes, () => {
+  localStorage.setItem("cartolensia.asset.showOCRBoxes", showAssetOCRBoxes.value ? "true" : "false");
+});
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -3137,7 +3413,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeydown);
-  galleryTrackMap?.setTarget(undefined);
+  destroyGalleryTrackMap();
   selectedTrackMap?.setTarget(undefined);
   geoAlignMap?.setTarget(undefined);
   olMap?.setTarget(undefined);
@@ -3604,6 +3880,10 @@ onBeforeUnmount(() => {
                   <input v-model="showAssetFaceBoxes" class="form-check-input" type="checkbox" />
                   <span>Show face rectangles</span>
                 </label>
+                <label class="form-check form-switch">
+                  <input v-model="showAssetOCRBoxes" class="form-check-input" type="checkbox" />
+                  <span>Show OCR boxes</span>
+                </label>
                 <button type="button" class="btn btn-sm btn-outline-primary" @click="faceAddMode = !faceAddMode; newFaceDraftBox = null">
                   <i class="bi bi-plus-square" aria-hidden="true"></i>
                   {{ faceAddMode ? "Cancel add face" : "Add face" }}
@@ -3618,25 +3898,35 @@ onBeforeUnmount(() => {
                 @pointerup="finishFaceDraft"
                 @pointerleave="finishFaceDraft"
               >
-              <img
-                :src="assetDetail.original_url || assetDetail.preview_url"
-                alt=""
-                @error="markPreviewFailed(assetDetail.asset.id)"
-              />
-              <span
-                v-for="face in visibleAssetFaces"
-                v-show="showAssetFaceBoxes"
-                :key="String(face.id)"
-                :class="['face-box', { ignored: faceIgnored(face), selected: selectedAssetFaceId === face.id }]"
-                :style="faceBoxStyle(face, assetDetail)"
-                :title="`Face ${typeof face.confidence === 'number' ? face.confidence.toFixed(3) : ''}`"
-              ></span>
-              <span
-                v-if="faceAddMode && newFaceDraftBox"
-                class="face-box draft"
-                :style="faceDraftBoxStyle(assetDetail)"
-                aria-hidden="true"
-              ></span>
+                <img
+                  :src="assetDetail.original_url || assetDetail.preview_url"
+                  alt=""
+                  @error="markPreviewFailed(assetDetail.asset.id)"
+                />
+                <span
+                  v-for="face in visibleAssetFaces"
+                  v-show="showAssetFaceBoxes"
+                  :key="String(face.id)"
+                  :class="['face-box', { ignored: faceIgnored(face), selected: selectedAssetFaceId === face.id }]"
+                  :style="faceBoxStyle(face, assetDetail)"
+                  :title="`Face ${typeof face.confidence === 'number' ? face.confidence.toFixed(3) : ''}`"
+                ></span>
+                <button
+                  v-for="block in assetDetail.ocr_blocks ?? []"
+                  v-show="showAssetOCRBoxes"
+                  :key="block.id"
+                  type="button"
+                  :class="['ocr-box', { selected: selectedAssetOCRId === block.id }]"
+                  :style="ocrBoxStyle(block, assetDetail)"
+                  :title="block.text"
+                  @click.stop="selectedAssetOCRId = block.id"
+                ></button>
+                <span
+                  v-if="faceAddMode && newFaceDraftBox"
+                  class="face-box draft"
+                  :style="faceDraftBoxStyle(assetDetail)"
+                  aria-hidden="true"
+                ></span>
               </div>
               <div v-if="faceAddMode" class="face-add-panel">
                 <label>
@@ -3722,7 +4012,7 @@ onBeforeUnmount(() => {
               <a v-if="assetDetail.original_url" :href="assetDetail.original_url" target="_blank" rel="noreferrer">Open</a>
             </article>
           </div>
-          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0)" class="settings-form settings-wide">
+          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.ocr_blocks?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0)" class="settings-form settings-wide">
             <h3>AI Results</h3>
             <div v-if="assetDetail.ai_tags?.length" class="chip-row">
               <span v-for="tag in assetDetail.ai_tags" :key="`${tag.tag}-${tag.source}`" class="chip">
@@ -3763,7 +4053,47 @@ onBeforeUnmount(() => {
                 </button>
               </article>
             </section>
+            <section v-if="assetDetail.ocr_blocks?.length" class="ocr-record-list">
+              <h4>OCR Text</h4>
+              <p class="muted">OCR is stored as local metadata with bounding boxes. Click text to highlight it on the image.</p>
+              <article
+                v-for="block in assetDetail.ocr_blocks"
+                :key="block.id"
+                :class="['ocr-record-card', { selected: selectedAssetOCRId === block.id }]"
+                @click="selectedAssetOCRId = block.id"
+              >
+                <div>
+                  <strong>{{ block.text }}</strong>
+                  <small>{{ block.language || 'unknown language' }} · {{ block.engine || block.model_name || 'OCR engine' }}</small>
+                </div>
+                <span>{{ typeof block.confidence === 'number' ? block.confidence.toFixed(2) : 'n/a' }}</span>
+                <button type="button" class="btn btn-sm btn-outline-secondary" @click.stop="copyText(block.text)">
+                  <i class="bi bi-clipboard" aria-hidden="true"></i>
+                  Copy
+                </button>
+              </article>
+            </section>
             <p v-if="assetDetail.embeddings?.length">Embeddings stored: {{ assetDetail.embeddings.length }} vector record(s).</p>
+          </section>
+          <section v-if="assetDetail" class="settings-form settings-wide">
+            <h3><i class="bi bi-geo-alt" aria-hidden="true"></i> Places and Coordinates</h3>
+            <p class="muted">
+              Cache-only reverse geocoding from Cartolensia's local place cache. No public geocoder is called automatically.
+            </p>
+            <div v-if="assetDetail.places?.length" class="place-record-grid">
+              <article v-for="place in assetDetail.places" :key="`${place.coordinate_source}-${place.display_name}-${place.lat}-${place.lon}`" class="place-record-card">
+                <div>
+                  <strong>{{ place.display_name }}</strong>
+                  <span class="status-badge ok">{{ place.coordinate_source }}</span>
+                  <span v-if="place.geo_source" class="status-badge">{{ place.geo_source }}</span>
+                </div>
+                <p>{{ place.lat.toFixed(6) }}, {{ place.lon.toFixed(6) }}</p>
+                <small>{{ place.match }} · {{ place.provider }}/{{ place.source }}</small>
+              </article>
+            </div>
+            <div v-else class="empty-state compact-empty">
+              No cached place match for this asset's known coordinates yet.
+            </div>
           </section>
           <table v-if="assetDetail">
             <thead><tr><th>Storage</th><th>Path</th><th>Size</th><th>MIME</th></tr></thead>
@@ -4676,8 +5006,25 @@ onBeforeUnmount(() => {
             </button>
           </form>
           <p v-if="universalSearchMessage" class="alert">{{ universalSearchMessage }}</p>
+          <p v-if="universalSearchBackend" class="muted">
+            Search backend: {{ universalSearchBackend }}. Elasticsearch/OpenSearch are intentionally not enabled in this run.
+          </p>
           <div v-if="universalSearchWarnings.length" class="chip-row">
             <span v-for="warning in universalSearchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
+          </div>
+          <div v-if="universalSearchPlaceResults.length" class="search-place-row">
+            <article v-for="place in universalSearchPlaceResults" :key="`${place.provider}-${place.name}`" class="settings-form search-place-card">
+              <div>
+                <h3><i class="bi bi-geo-alt" aria-hidden="true"></i> {{ place.display_name || place.name }}</h3>
+                <p class="muted">Matched local place cache · {{ place.matched_assets }} geotagged media assets inside bbox.</p>
+              </div>
+              <div class="detail-grid">
+                <article><strong>{{ place.lat.toFixed(4) }}, {{ place.lon.toFixed(4) }}</strong><span>Center</span></article>
+                <article><strong>{{ place.bbox.min_lat.toFixed(3) }}..{{ place.bbox.max_lat.toFixed(3) }}</strong><span>Latitude bbox</span></article>
+                <article><strong>{{ place.bbox.min_lon.toFixed(3) }}..{{ place.bbox.max_lon.toFixed(3) }}</strong><span>Longitude bbox</span></article>
+                <article><strong>{{ place.source }}</strong><span>Source</span></article>
+              </div>
+            </article>
           </div>
           <div class="search-results-grid">
             <article class="settings-form">
@@ -4863,7 +5210,7 @@ onBeforeUnmount(() => {
                   :key="marker.asset_id"
                   type="button"
                   class="link-button"
-                  @click="openAsset(marker.asset_id)"
+                  @click="showGeoAlignMarkerPopup(marker.asset_id, true)"
                 >
                   {{ marker.name }}
                 </button>
@@ -4874,6 +5221,10 @@ onBeforeUnmount(() => {
               <div v-if="!geoAlignSession" class="empty-state">Start a session to preview markers.</div>
               <div v-else class="map-shell alignment-map-shell">
                 <div ref="geoAlignMapElement" class="alignment-ol-map"></div>
+                <div v-if="geoAlignDragActive" class="geo-align-drag-hint">
+                  <i class="bi bi-arrows-move" aria-hidden="true"></i>
+                  Release to stage this marker.
+                </div>
                 <div class="map-layer-control">
                   <button type="button" class="icon-button" @click="showGeoAlignLayerMenu = !showGeoAlignLayerMenu">
                     <i class="bi bi-layers" aria-hidden="true"></i>
@@ -4899,6 +5250,68 @@ onBeforeUnmount(() => {
                     <small>Tiles load on demand through Cartolensia; no bulk prefetch.</small>
                   </div>
                 </div>
+                <aside v-if="geoAlignPopupMarker" class="geo-align-popup">
+                  <header>
+                    <strong>{{ geoAlignPopupMarker.name }}</strong>
+                    <button type="button" class="btn btn-sm btn-outline-secondary danger-close" @click="closeGeoAlignPopup">
+                      <i class="bi bi-x-lg" aria-hidden="true"></i>
+                      Close
+                    </button>
+                  </header>
+                  <div class="geo-align-popup-body">
+                    <img :src="geoAlignPopupMarker.thumbnail_url || `/api/v1/media/${geoAlignPopupMarker.asset_id}/preview`" alt="" loading="lazy" />
+                    <div>
+                      <span :class="['status-badge', geoAlignPopupMarker.modified ? 'warn' : geoAlignPopupMarker.status === 'ungeotagged' ? 'bad' : 'ok']">
+                        {{ geoAlignPopupMarker.modified ? 'manual override' : geoAlignPopupMarker.status }}
+                      </span>
+                      <p>{{ geoAlignPopupMarker.media_kind }} · {{ geoAlignCoordinateText(geoAlignPopupMarker.staged_lat, geoAlignPopupMarker.staged_lon) }}</p>
+                      <p>Original: {{ geoAlignCoordinateText(geoAlignPopupMarker.original_lat, geoAlignPopupMarker.original_lon) }}</p>
+                      <p v-if="geoAlignPopupMarker.modified">Manual: {{ geoAlignCoordinateText(geoAlignPopupMarker.manual_lat, geoAlignPopupMarker.manual_lon) }}</p>
+                    </div>
+                  </div>
+                  <details v-if="geoAlignPopupMarker.track_candidates.length" open>
+                    <summary>Track candidates</summary>
+                    <button
+                      v-for="(candidate, index) in geoAlignPopupMarker.track_candidates"
+                      :key="index"
+                      type="button"
+                      class="link-button"
+                      @click="showGeoAlignCandidate(candidate)"
+                    >
+                      {{ geoAlignCandidateLabel(candidate) }}
+                    </button>
+                  </details>
+                  <div class="actions">
+                    <button type="button" class="btn btn-sm btn-outline-primary" @click="openAsset(geoAlignPopupMarker.asset_id)">Open asset detail</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="centerGeoAlignOn(geoAlignPopupMarker.original_lat, geoAlignPopupMarker.original_lon)">Show original</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="resetGeoAlignMarker(geoAlignPopupMarker)">Reset marker</button>
+                    <button type="button" class="btn btn-sm btn-success" :disabled="!geoAlignPopupMarker.modified" @click="applyGeoAlignMarker(geoAlignPopupMarker)">Apply marker</button>
+                  </div>
+                </aside>
+                <aside v-else-if="geoAlignPopupTrackInfo || geoAlignPopupTrackMessage" class="geo-align-popup">
+                  <header>
+                    <strong>{{ geoAlignPopupTrackInfo?.track.name || 'Track point' }}</strong>
+                    <button type="button" class="btn btn-sm btn-outline-secondary danger-close" @click="closeGeoAlignPopup">
+                      <i class="bi bi-x-lg" aria-hidden="true"></i>
+                      Close
+                    </button>
+                  </header>
+                  <p v-if="geoAlignPopupTrackMessage" class="muted">{{ geoAlignPopupTrackMessage }}</p>
+                  <template v-if="geoAlignPopupTrackInfo">
+                    <span>Clicked: {{ geoAlignPopupTrackInfo.clicked.lat.toFixed(6) }}, {{ geoAlignPopupTrackInfo.clicked.lon.toFixed(6) }}</span>
+                    <span>Nearest: {{ geoAlignPopupTrackInfo.nearest.lat.toFixed(6) }}, {{ geoAlignPopupTrackInfo.nearest.lon.toFixed(6) }}</span>
+                    <span>Distance: {{ geoAlignPopupTrackInfo.distance_m.toFixed(1) }} m</span>
+                    <span v-if="geoAlignPopupTrackInfo.timestamp">Time: {{ geoAlignPopupTrackInfo.timestamp }}</span>
+                    <span v-if="geoAlignPopupTrackInfo.relative_time_seconds !== undefined">Time in track: {{ geoAlignPopupTrackInfo.relative_time_seconds.toFixed(1) }} s</span>
+                    <span v-if="geoAlignPopupTrackInfo.speed_mps !== undefined">Speed: {{ geoAlignPopupTrackInfo.speed_mps.toFixed(2) }} m/s</span>
+                    <span v-if="geoAlignPopupTrackInfo.elevation_m !== undefined">Altitude: {{ geoAlignPopupTrackInfo.elevation_m.toFixed(1) }} m</span>
+                    <div class="actions">
+                      <button type="button" class="btn btn-sm btn-outline-primary" @click="openTrack(geoAlignPopupTrackInfo.track.track_asset_id)">Open track detail</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="openTrackAndFindAssets(geoAlignPopupTrackInfo.track.track_asset_id)">List media during track</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="openTrackAndFindNearbyAssets(geoAlignPopupTrackInfo.track.track_asset_id)">List nearby media</button>
+                    </div>
+                  </template>
+                </aside>
               </div>
             </article>
           </div>
@@ -5024,7 +5437,7 @@ onBeforeUnmount(() => {
             </article>
           </div>
 
-          <div v-else-if="['indexing', 'metadata', 'preview', 'map', 'gps', 'transcoding'].includes(settingsTab)" class="settings-grid">
+          <div v-else-if="['indexing', 'metadata', 'preview', 'map', 'gps', 'search', 'transcoding'].includes(settingsTab)" class="settings-grid">
             <article v-if="runtimeSpecsForTab(settingsTab).length > 0" class="settings-form settings-wide">
               <div class="section-title">
                 <div>
@@ -5129,6 +5542,37 @@ onBeforeUnmount(() => {
                 <span class="chip">Cluster radius {{ settings?.runtime_settings?.['map.cluster_radius_px'] ?? 64 }} px</span>
                 <span class="chip">On-demand cache only</span>
               </div>
+            </article>
+            <article v-if="settingsTab === 'search'" class="settings-form settings-wide">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-search-heart" aria-hidden="true"></i> Local Place Search</h3>
+                  <p class="muted">{{ searchPlaceCache?.note ?? 'Place lookup is cache-only unless an operator explicitly enables an online provider.' }}</p>
+                </div>
+                <span :class="['status-badge', searchPlaceCache?.online_enabled ? 'warn' : 'ok']">
+                  {{ searchPlaceCache?.mode ?? 'cache_only' }}
+                </span>
+              </div>
+              <div class="detail-grid compact-detail">
+                <article><strong>{{ searchPlaceCache?.backend ?? 'postgres_local' }}</strong><span>Search backend</span></article>
+                <article><strong>{{ searchPlaceCache?.provider ?? 'local_place_cache' }}</strong><span>Geocoder provider</span></article>
+                <article><strong>{{ searchPlaceCache?.places?.length ?? 0 }}</strong><span>Cached places</span></article>
+              </div>
+              <div v-if="searchPlaceCache?.places?.length" class="search-place-row">
+                <article v-for="place in searchPlaceCache.places" :key="`${place.provider}-${place.name}`" class="search-place-card compact-place-card">
+                  <h4><i class="bi bi-geo-alt" aria-hidden="true"></i> {{ place.display_name || place.name }}</h4>
+                  <p>{{ place.matched_assets }} current geotagged media assets match this bbox.</p>
+                  <small>
+                    {{ place.lat.toFixed(4) }}, {{ place.lon.toFixed(4) }} ·
+                    {{ place.bbox.min_lat.toFixed(3) }}..{{ place.bbox.max_lat.toFixed(3) }},
+                    {{ place.bbox.min_lon.toFixed(3) }}..{{ place.bbox.max_lon.toFixed(3) }}
+                  </small>
+                  <button type="button" class="btn btn-sm btn-outline-primary" @click="universalSearchQ = place.name; setActive('Search'); runUniversalSearch()">
+                    Search this place
+                  </button>
+                </article>
+              </div>
+              <p class="muted">No public geocoder is called automatically. Future Nominatim-compatible lookups must be user-triggered and cached before being reused offline.</p>
             </article>
             <article v-if="settingsTab === 'preview'" class="settings-form">
               <h3><i class="bi bi-images" aria-hidden="true"></i> Preview Cache</h3>

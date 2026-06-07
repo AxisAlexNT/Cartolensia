@@ -2235,3 +2235,140 @@ Passed:
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-07 Overnight Stabilization Continuation
+
+This continuation kept the existing live real-peek PostgreSQL database and did not run any discovery, missing marking, or reset. The stop sentinel `.cartolensia/STOP_AFTER_CURRENT_TASK` was checked and was absent during the work.
+
+### Baseline
+
+- `GET /api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks, `619580406` bytes.
+- `GET /api/v1/gps/tracks`: `4` parsed GPX/KML summaries.
+- `GET /api/v1/map/status`: `48` geotagged assets, `4` tracks, Cartolensia OSM tile proxy enabled.
+- `GET /api/v1/ai/status`: local vector fallback active with `48` embeddings, `89` tags, `347` predictions, `123` face detections; native sidecar was not running at audit time.
+- `GET /api/v1/jobs?limit=30`: latest AI face-detection job visible and succeeded.
+- `GET /api/v1/transcoding/metrics/status`: `ssim` and `psnr` available; `libvmaf` unavailable in current ffmpeg.
+- `GET /api/v1/vector/status`: `local_json_bruteforce`, `512` dimensions, `48` embedded assets.
+- `GET /api/v1/search?q=Yerevan`: returned `1` place match, `48` media results, and `4` track results from the local place cache.
+
+### Implemented
+
+- Added a read-only `GET /api/v1/search/places` endpoint exposing the local place cache and current bbox match counts.
+- Added a Search/Places Settings tab:
+  - default search limit;
+  - cache-only geocoder mode;
+  - online geocoding toggle shown off by default;
+  - local provider status;
+  - visible Yerevan/Armenia cache cards with match counts and quick “Search this place” action.
+- Consolidated local place definitions so universal search and place-cache status use the same source of truth.
+- Extended tests to cover:
+  - Yerevan local place search;
+  - `GET /api/v1/search/places`;
+  - Search/Places settings tab/schema visibility.
+
+### Verification
+
+Passed after this continuation:
+
+- `gofmt -w internal/server/server.go internal/server/server_test.go internal/server/settings.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+### Known Limitations
+
+- The place cache is currently built in (`Yerevan`, `Armenia`) and cache-only. A durable `place_cache` table and user-triggered online geocoder import remain future work.
+- The native AI sidecar was not running during the latest audit; stored AI predictions/tags/faces remain visible from PostgreSQL metadata.
+- Browser automation was not run in this continuation; manual inspection should verify Geo Align shift-drag, track map interactivity, and Search/Places settings ergonomics.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, models, previews, transcodes, exports, database files, or caches were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
+## 2026-06-08 Search/OCR/Map Productization Continuation
+
+This continuation kept the real-peek archive in `strict_read_only` mode and did not run discovery, missing marking, model downloads, Docker pulls, or package installs. The stop sentinel `.cartolensia/STOP_AFTER_CURRENT_TASK` was checked and was absent during the work.
+
+### Baseline
+
+- `GET /api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks.
+- `GET /api/v1/search?q=Yerevan`: returned the current bounded Yerevan-area set through the local place cache.
+- `GET /api/v1/search?q=Vanadzor`: returned no media before this run because Vanadzor/Lori were not in the local place cache.
+- `GET /api/v1/settings/schema`: Search/Places tab was present.
+
+### Implemented
+
+- Search backend hardening:
+  - added a small `SearchBackend` interface and explicit `postgres_local` backend identity in `/api/v1/search`;
+  - kept Elasticsearch/OpenSearch intentionally out of this run;
+  - search responses now disclose backend mode for future backend pluggability.
+- Local place cache and reverse-place display:
+  - added local entries for `Vanadzor` and `Lori Province` alongside existing `Yerevan` and `Armenia`;
+  - asset detail now returns computed `places` rows for stored `asset_geo` and EXIF/metadata coordinates;
+  - asset detail UI now shows cache-only reverse-geocoded places, coordinate source, provider/source, and coordinates.
+- OCR foundation:
+  - added `ocr_image` as a manual Base AI action routed to the sidecar `/ocr-image` contract;
+  - added `GET /api/v1/assets/{id}/ocr`;
+  - added `GET /api/v1/ocr/runs`;
+  - OCR text blocks are represented through existing AI prediction storage with bounding boxes, making OCR text searchable without a risky migration in this stabilization slice;
+  - asset detail now has OCR box visibility, OCR text list, click-to-highlight, and copy text controls.
+- Gallery/map polish:
+  - fixed the gallery track ghosting cause by removing the static SVG fallback overlay from the live OpenLayers map path;
+  - gallery track maps now dispose/recreate cleanly on asset change and close;
+  - map viewport sizing was increased;
+  - Geo Align switches/sidebar were widened and the map uses more viewport height.
+
+### Verification
+
+Passed:
+
+- `gofmt -w internal/server/server.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Pending final/live checks for this continuation:
+
+- `git diff --check`
+- `go test ./...`
+- focused live API checks after restart.
+
+Final verification completed:
+
+- `git diff --check`
+- `go test ./...`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Live validation after restart:
+
+- `GET /api/v1/stats`: still `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks.
+- `GET /api/v1/search?q=Yerevan&limit=3`: returned backend `postgres_local`, backend mode `fts_trigram_ready_metadata_place_ai_ocr`, `48` media matches, and `4` track matches.
+- `GET /api/v1/search?q=Vanadzor&limit=3`: returned a local Vanadzor place-cache match with `0` current real-peek media assets, which is expected for the current bounded Yerevan dataset.
+- `GET /api/v1/ocr/runs`: returned the OCR contract with English/Russian/Armenian/Chinese language codes and `0` stored real-peek OCR blocks.
+- `GET /api/v1/assets/e8ba8b1b-2266-48a6-ba6d-a9171d2693ae`: returned cache-only place rows for Yerevan and Armenia from `asset_geo` and EXIF metadata.
+
+### Known Limitations
+
+- OCR runtime installation was not performed in this pass. The app now has the job/API/UI contract and searchable metadata storage; Tesseract/language-pack installation remains the next supervised system-package step.
+- Place lookup is still local/cache-only. No public geocoder is called automatically.
+- `place_cache` and `asset_places` durable database tables remain future work; current place rows are computed from local cache plus existing geotag metadata.
+- Long-caption workflows, safety/private hiding, WebDAV, and full multi-storage adapters remain future hardening tasks.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, OCR cache, model files, previews, transcodes, exports, database files, or caches were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
