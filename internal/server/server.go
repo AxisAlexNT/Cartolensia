@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,6 +94,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
 	s.mux.HandleFunc("/api/v1/config/effective", s.handleConfig)
 	s.mux.HandleFunc("/api/v1/settings", s.handleSettings)
+	s.mux.HandleFunc("/api/v1/settings/schema", s.handleSettingsSchema)
 	s.mux.HandleFunc("/api/v1/settings/effective", s.handleSettingsEffective)
 	s.mux.HandleFunc("/api/v1/settings/runtime", s.handleSettingsRuntime)
 	s.mux.HandleFunc("/api/v1/settings/pending/download", s.handleSettingsPendingDownload)
@@ -111,6 +112,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.handleAuthTokens)
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.handleAuthTokenByID)
 	s.mux.HandleFunc("/api/v1/storages", s.handleStorages)
+	s.mux.HandleFunc("/api/v1/storages/", s.handleStorageByName)
 	s.mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	s.mux.HandleFunc("/api/v1/plugins/", s.handlePluginByID)
 	s.mux.HandleFunc("/api/v1/plugins/rescan", s.handlePluginsRescan)
@@ -132,6 +134,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/assets/months", s.handleAssetMonths)
 	s.mux.HandleFunc("/api/v1/assets", s.handleAssets)
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
+	s.mux.HandleFunc("/api/v1/search", s.handleSearch)
 	s.mux.HandleFunc("/api/v1/duplicates", s.handleDuplicates)
 	s.mux.HandleFunc("/api/v1/albums", s.handleAlbums)
 	s.mux.HandleFunc("/api/v1/albums/", s.handleAlbumByID)
@@ -148,9 +151,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/map/", s.handleMapSubroute)
 	s.mux.HandleFunc("/api/v1/transcoding/status", s.handleTranscodingStatus)
 	s.mux.HandleFunc("/api/v1/transcoding/capabilities", s.handleTranscodingCapabilities)
+	s.mux.HandleFunc("/api/v1/transcoding/hardware-test", s.handleTranscodingHardwareTest)
 	s.mux.HandleFunc("/api/v1/transcoding/presets", s.handleTranscodingPresets)
+	s.mux.HandleFunc("/api/v1/transcoding/presets/", s.handleTranscodingPresetByID)
 	s.mux.HandleFunc("/api/v1/ai/status", s.handleAIStatus)
 	s.mux.HandleFunc("/api/v1/ai/accelerators", s.handleAIAccelerators)
+	s.mux.HandleFunc("/api/v1/ai/workers", s.handleAIWorkers)
+	s.mux.HandleFunc("/api/v1/ai/workers/", s.handleAIWorkerByID)
+	s.mux.HandleFunc("/api/v1/ai/jobs/classify", s.handleAIJobRequest("classify_image"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/faces", s.handleAIJobRequest("detect_faces"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/describe", s.handleAIJobRequest("describe_image"))
 	s.mux.HandleFunc("/api/v1/vector/status", s.handleVectorStatus)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/backend/status", s.handleBackendStatus)
@@ -404,11 +414,165 @@ func (s *Server) handleAuthTokenByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.deps.Registry.ListStorages())
+	case http.MethodPost:
+		if !s.requireWrite(w, r, "storages.create") {
+			return
+		}
+		var req storageMutationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg, warnings, err := validateStorageMutation(req.Config(), "")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.ValidateOnly {
+			writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": cfg, "warnings": warnings})
+			return
+		}
+		added, err := s.deps.Registry.AddStorage(cfg)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"storage": added, "warnings": warnings, "active": true})
+	default:
 		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleStorageByName(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/storages/"), "/")
+	if rest == "" {
+		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.deps.Registry.ListStorages())
+	parts := strings.Split(rest, "/")
+	name, err := url.PathUnescape(parts[0])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "validate" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		cfg, err := s.deps.Registry.GetStorage(name)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		validated, warnings, err := validateStorageMutation(cfg, name)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"valid": false, "storage": cfg, "error": err.Error(), "warnings": warnings})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": validated, "warnings": warnings})
+		return
+	}
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err := s.deps.Registry.GetStorage(name)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, cfg)
+	case http.MethodPatch:
+		if !s.requireWrite(w, r, "storages.update") {
+			return
+		}
+		var req storageMutationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg := req.Config()
+		cfg.Name = name
+		updated, warnings, err := validateStorageMutation(cfg, name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.ValidateOnly {
+			writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": updated, "warnings": warnings})
+			return
+		}
+		applied, err := s.deps.Registry.UpdateStorage(name, updated)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"storage": applied, "warnings": warnings, "active": true})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+type storageMutationRequest struct {
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Root         string `json:"root"`
+	Mode         string `json:"mode"`
+	ValidateOnly bool   `json:"validate_only"`
+}
+
+func (r storageMutationRequest) Config() storage.Config {
+	return storage.Config{Name: r.Name, Kind: r.Kind, Root: r.Root, Mode: r.Mode}
+}
+
+func validateStorageMutation(cfg storage.Config, currentName string) (storage.Config, []string, error) {
+	warnings := []string{}
+	if strings.TrimSpace(cfg.Name) == "" && currentName != "" {
+		cfg.Name = currentName
+	}
+	if strings.TrimSpace(cfg.Mode) == "" {
+		cfg.Mode = "strict_read_only"
+	}
+	if cfg.Mode == "journaled_deferred" || cfg.Mode == "read_write" {
+		return storage.Config{}, warnings, fmt.Errorf("storage mode %q is not enabled; originals remain immutable in this build", cfg.Mode)
+	}
+	normalized, err := storage.ValidateConfig(cfg)
+	if err != nil {
+		return storage.Config{}, warnings, err
+	}
+	if storagePathIsRealArchive(normalized.Root) && normalized.Mode != "strict_read_only" {
+		return storage.Config{}, warnings, fmt.Errorf("real archive storage rooted at /mnt/Models/rclone must remain strict_read_only")
+	}
+	if normalized.Mode == "read_only" {
+		warnings = append(warnings, "read_only mode still exposes no write/delete/move operations through Cartolensia")
+	}
+	if storagePathIsRealArchive(normalized.Root) {
+		warnings = append(warnings, "real archive storage is locked to strict_read_only")
+	}
+	return normalized, warnings, nil
+}
+
+func storagePathIsRealArchive(root string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		absRoot = root
+	}
+	archive := "/mnt/Models/rclone"
+	absArchive, err := filepath.Abs(archive)
+	if err == nil {
+		archive = absArchive
+	}
+	rel, err := filepath.Rel(archive, absRoot)
+	if err != nil {
+		return absRoot == archive
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
 func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
@@ -449,6 +613,10 @@ func (s *Server) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[1] == "settings" {
 		s.handlePluginSettings(w, r, manifest.ID)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "settings" && parts[2] == "schema" {
+		s.handlePluginSettingsSchema(w, r, manifest.ID)
 		return
 	}
 	http.NotFound(w, r)
@@ -924,6 +1092,113 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Total-Count", strconv.Itoa(page.Page.Total))
 	writeJSON(w, http.StatusOK, page.Assets)
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := queryInt(r, "limit", 100)
+	offset := queryInt(r, "offset", 0)
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	tokens := searchTokens(raw)
+	page, err := s.deps.Store.QueryAssets(r.Context(), catalog.AssetQuery{Limit: 500, Sort: "taken_at"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	searchCtx := s.buildSearchContext(r.Context(), tokens)
+	type result struct {
+		Asset       catalog.Asset `json:"asset"`
+		Matched     []string      `json:"matched"`
+		Explanation string        `json:"explanation"`
+	}
+	all := make([]result, 0, len(page.Assets))
+	for _, asset := range page.Assets {
+		matched := assetSearchMatches(asset, tokens, searchCtx)
+		if len(tokens) > 0 && len(matched) == 0 {
+			continue
+		}
+		all = append(all, result{Asset: asset, Matched: matched, Explanation: searchExplanation(matched)})
+	}
+	total := len(all)
+	if offset >= len(all) {
+		all = []result{}
+	} else {
+		end := offset + limit
+		if end > len(all) {
+			end = len(all)
+		}
+		all = all[offset:end]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"query":    raw,
+		"tokens":   tokens,
+		"results":  all,
+		"warnings": searchWarnings(tokens),
+		"page":     catalog.Page{Limit: limit, Offset: offset, Total: total},
+	})
+}
+
+type assetSearchContext struct {
+	albumAssetMatches map[string]map[string]struct{}
+	trackNameMatches  map[string]map[string]struct{}
+}
+
+func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetSearchContext {
+	out := assetSearchContext{
+		albumAssetMatches: map[string]map[string]struct{}{},
+		trackNameMatches:  map[string]map[string]struct{}{},
+	}
+	for _, token := range tokens {
+		prefix, plain, ok := strings.Cut(token, ":")
+		if !ok {
+			continue
+		}
+		plain = strings.TrimSpace(strings.ToLower(plain))
+		if plain == "" {
+			continue
+		}
+		switch prefix {
+		case "album":
+			matches := map[string]struct{}{}
+			albums, err := s.deps.Store.ListAlbums(ctx, catalog.AlbumQuery{Tree: true, Limit: 1000})
+			if err == nil {
+				for _, album := range albums {
+					if !strings.Contains(strings.ToLower(album.Title+" "+album.Slug+" "+album.Description), plain) {
+						continue
+					}
+					items, err := s.deps.Store.ListAlbumItems(ctx, catalog.AlbumItemQuery{AlbumID: album.ID, Limit: 10000})
+					if err != nil {
+						continue
+					}
+					for _, item := range items.Items {
+						matches[item.Asset.ID] = struct{}{}
+					}
+				}
+			}
+			out.albumAssetMatches[token] = matches
+		case "track":
+			matches := map[string]struct{}{}
+			tracks, err := s.deps.Store.ListGPSTracks(ctx, catalog.GPSTrackQuery{Limit: 1000})
+			if err == nil {
+				for _, track := range tracks {
+					if strings.Contains(strings.ToLower(track.Name+" "+track.SourceFormat), plain) {
+						matches[track.TrackAssetID] = struct{}{}
+					}
+				}
+			}
+			out.trackNameMatches[token] = matches
+		}
+	}
+	return out
 }
 
 func (s *Server) handleAssetMonths(w http.ResponseWriter, r *http.Request) {
@@ -1488,14 +1763,75 @@ func (s *Server) handleTranscodingCapabilities(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleTranscodingPresets(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		presets := builtInTranscodingPresets(transcoding.Detect(r.Context()))
+		custom, err := s.deps.Store.ListTranscodingPresets(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		presets = append(presets, custom...)
+		writeJSON(w, http.StatusOK, presets)
+	case http.MethodPost:
+		if !s.requireWrite(w, r, "transcoding.presets.write") {
+			return
+		}
+		var req catalog.TranscodingPreset
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		for _, preset := range builtInTranscodingPresets(transcoding.Detect(r.Context())) {
+			if req.ID == preset.ID {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("custom preset cannot replace built-in preset %q", preset.ID))
+				return
+			}
+		}
+		req.BuiltIn = false
+		if err := validateTranscodingPreset(req, transcoding.Detect(r.Context())); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		preset, err := s.deps.Store.UpsertTranscodingPreset(r.Context(), req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, preset)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleTranscodingPresetByID(w http.ResponseWriter, r *http.Request) {
+	presetID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/transcoding/presets/"), "/")
+	if presetID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if presetID == "validate" {
+		s.handleTranscodingPresetValidate(w, r)
+		return
+	}
+	if r.Method != http.MethodDelete {
 		methodNotAllowed(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, []map[string]any{
-		{"id": "archive-h264", "name": "Archive H.264", "implemented": false},
-		{"id": "archive-av1", "name": "Archive AV1", "implemented": false},
-	})
+	if !s.requireWrite(w, r, "transcoding.presets.write") {
+		return
+	}
+	for _, preset := range builtInTranscodingPresets(transcoding.Detect(r.Context())) {
+		if preset.ID == presetID {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("built-in presets cannot be removed"))
+			return
+		}
+	}
+	if err := s.deps.Store.DeleteTranscodingPreset(r.Context(), presetID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
@@ -1503,12 +1839,16 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	workers := aiWorkerProfiles(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":            false,
+		"enabled":            aiWorkersConfigured(workers),
 		"inference_running":  false,
 		"vector_store":       "not_configured",
 		"embedding_jobs":     "not_implemented",
 		"accelerator_hints":  transcoding.AcceleratorHints(),
+		"workers":            workers,
+		"model_cache_dir":    ".cartolensia/models",
+		"model_policy":       "model downloads are explicit and never use original storage",
 		"planned_modalities": []string{"image", "video_frame", "audio_segment", "text_query"},
 	})
 }
@@ -1519,6 +1859,139 @@ func (s *Server) handleAIAccelerators(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, transcoding.AcceleratorHints())
+}
+
+func (s *Server) handleAIWorkers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workers":      aiWorkerProfiles(r.Context()),
+		"configured":   aiWorkersConfigured(aiWorkerProfiles(r.Context())),
+		"protocol":     "http_json",
+		"dummy_worker": "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
+	})
+}
+
+func (s *Server) handleAIWorkerByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	workerID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/ai/workers/"), "/")
+	for _, worker := range aiWorkerProfiles(r.Context()) {
+		if worker["id"] == workerID {
+			writeJSON(w, http.StatusOK, worker)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, fmt.Errorf("AI worker %q is not configured", workerID))
+}
+
+func (s *Server) handleAIJobRequest(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		if !s.requireWrite(w, r, "ai.jobs.write") {
+			return
+		}
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"kind":      kind,
+			"queued":    false,
+			"status":    "not_configured",
+			"reason":    "no AI sidecar worker is configured; use the optional ai-* Docker Compose profiles or services/ai dummy worker",
+			"scope":     req,
+			"safe_note": "no inference ran and no model files were downloaded",
+		})
+	}
+}
+
+func aiWorkerProfiles(ctx context.Context) []map[string]any {
+	hints := transcoding.AcceleratorHints()
+	localStatus, localHealth := aiWorkerHealth(ctx, "http://127.0.0.1:19090/health")
+	return []map[string]any{
+		{
+			"id":                "ai-dummy-local",
+			"profile":           "dummy",
+			"configured":        localStatus == "ok",
+			"status":            localStatus,
+			"available":         true,
+			"capabilities":      []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"endpoint":          "http://127.0.0.1:19090",
+			"native_entrypoint": "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
+			"health":            localHealth,
+			"note":              "dummy/no-model worker; no inference runs unless explicitly requested",
+		},
+		{
+			"id":           "ai-cpu",
+			"profile":      "cpu",
+			"configured":   false,
+			"status":       "not_configured",
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"endpoint":     "",
+		},
+		{
+			"id":           "ai-nvidia",
+			"profile":      "nvidia",
+			"configured":   false,
+			"status":       "not_configured",
+			"available":    hints["nvidia_smi"],
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"endpoint":     "",
+		},
+		{
+			"id":           "ai-rocm",
+			"profile":      "rocm",
+			"configured":   false,
+			"status":       "not_configured",
+			"available":    hints["dev_dri"],
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"endpoint":     "",
+		},
+		{
+			"id":           "ai-intel",
+			"profile":      "intel",
+			"configured":   false,
+			"status":       "not_configured",
+			"available":    hints["dev_dri"],
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"endpoint":     "",
+		},
+	}
+}
+
+func aiWorkersConfigured(workers []map[string]any) bool {
+	for _, worker := range workers {
+		if configured, _ := worker["configured"].(bool); configured {
+			return true
+		}
+	}
+	return false
+}
+
+func aiWorkerHealth(ctx context.Context, endpoint string) (string, map[string]any) {
+	probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "not_configured", map[string]any{"error": err.Error()}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "not_configured", map[string]any{"error": err.Error()}
+	}
+	defer resp.Body.Close()
+	var payload map[string]any
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "unhealthy", map[string]any{"status_code": resp.StatusCode, "response": payload}
+	}
+	return "ok", payload
 }
 
 func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
@@ -1585,6 +2058,10 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		s.handleStreamOptions(w, r, assetID)
 	case "transcode-session":
 		s.handleTranscodeSessionStart(w, r, assetID)
+	case "track-preview":
+		s.handleTrackPreview(w, r, assetID)
+	case "track-thumbnail":
+		s.handleTrackThumbnail(w, r, assetID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1605,9 +2082,38 @@ func (s *Server) handleStreamOptions(w http.ResponseWriter, r *http.Request, ass
 		return
 	}
 	loc, _ := catalog.FirstLocation(asset)
-	ffmpegAvailable := false
-	if _, err := exec.LookPath("ffmpeg"); err == nil && asset.MediaKind == "video" {
-		ffmpegAvailable = true
+	options := []map[string]any{{
+		"id":          "original",
+		"label":       "Original/direct",
+		"available":   true,
+		"url":         "/api/v1/media/" + asset.ID + "/original",
+		"description": "Streams the immutable original through Cartolensia with HTTP Range support.",
+	}}
+	if asset.MediaKind == "video" {
+		caps := transcoding.Detect(r.Context())
+		presets := builtInTranscodingPresets(caps)
+		custom, err := s.deps.Store.ListTranscodingPresets(r.Context())
+		if err == nil {
+			presets = append(presets, custom...)
+		}
+		for _, preset := range presets {
+			if preset.ID == "original" {
+				continue
+			}
+			options = append(options, map[string]any{
+				"id":               preset.ID,
+				"label":            preset.Name,
+				"available":        preset.Available,
+				"profile":          preset.ID,
+				"built_in":         preset.BuiltIn,
+				"hardware":         preset.Hardware,
+				"codec":            preset.Codec,
+				"mode":             preset.Mode,
+				"parameter_value":  preset.ParameterValue,
+				"session_endpoint": "/api/v1/media/" + asset.ID + "/transcode-session",
+				"disabled_reason":  preset.DisabledReason,
+			})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id":     asset.ID,
@@ -1616,37 +2122,7 @@ func (s *Server) handleStreamOptions(w http.ResponseWriter, r *http.Request, ass
 		"range":        true,
 		"storage":      loc.StorageName,
 		"storage_mode": "strict_read_only",
-		"options": []map[string]any{
-			{
-				"id":          "original",
-				"label":       "Original/direct",
-				"available":   true,
-				"url":         "/api/v1/media/" + asset.ID + "/original",
-				"description": "Streams the immutable original through Cartolensia with HTTP Range support.",
-			},
-			{
-				"id":               "h264_720p_lan",
-				"label":            "Browser-compatible H.264 720p",
-				"available":        ffmpegAvailable,
-				"profile":          "h264_720p_lan",
-				"session_endpoint": "/api/v1/media/" + asset.ID + "/transcode-session",
-				"disabled_reason":  disabledReason(!ffmpegAvailable, "ffmpeg is unavailable or asset is not a video"),
-			},
-			{
-				"id":               "h264_low_bitrate",
-				"label":            "Low bitrate LAN",
-				"available":        ffmpegAvailable,
-				"profile":          "h264_low_bitrate",
-				"session_endpoint": "/api/v1/media/" + asset.ID + "/transcode-session",
-				"disabled_reason":  disabledReason(!ffmpegAvailable, "ffmpeg is unavailable or asset is not a video"),
-			},
-			{
-				"id":              "av1_low_bitrate",
-				"label":           "AV1 preview/transcode",
-				"available":       false,
-				"disabled_reason": "Transcoding jobs are planned; original streaming is active.",
-			},
-		},
+		"options":      options,
 	})
 }
 
@@ -2376,6 +2852,225 @@ func payloadStringSlice(value any) []string {
 	default:
 		return nil
 	}
+}
+
+func searchTokens(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var tokens []string
+	var b strings.Builder
+	inQuote := false
+	for _, r := range raw {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+			if !inQuote && b.Len() > 0 {
+				tokens = append(tokens, strings.ToLower(strings.TrimSpace(b.String())))
+				b.Reset()
+			}
+		case !inQuote && (r == ' ' || r == '\t' || r == '\n'):
+			if b.Len() > 0 {
+				tokens = append(tokens, strings.ToLower(strings.TrimSpace(b.String())))
+				b.Reset()
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() > 0 {
+		tokens = append(tokens, strings.ToLower(strings.TrimSpace(b.String())))
+	}
+	return compactStrings(tokens)
+}
+
+func assetSearchMatches(asset catalog.Asset, tokens []string, searchCtx assetSearchContext) []string {
+	if len(tokens) == 0 {
+		return []string{"all indexed assets"}
+	}
+	var matched []string
+	for _, token := range tokens {
+		fields := assetTokenMatches(asset, token, searchCtx)
+		if len(fields) == 0 {
+			return nil
+		}
+		matched = append(matched, fields...)
+	}
+	sort.Strings(matched)
+	return uniqueStrings(matched)
+}
+
+func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchContext) []string {
+	token = strings.TrimSpace(strings.ToLower(token))
+	if token == "" {
+		return nil
+	}
+	var out []string
+	plain := token
+	prefix := ""
+	if before, after, ok := strings.Cut(token, ":"); ok {
+		prefix = before
+		plain = after
+	}
+	if prefix == "type" || prefix == "kind" || prefix == "media" {
+		if strings.EqualFold(asset.MediaKind, plain) {
+			return []string{"media kind"}
+		}
+		return nil
+	}
+	metadataText := ""
+	if len(asset.Metadata) > 0 {
+		if data, err := json.Marshal(asset.Metadata); err == nil {
+			metadataText = strings.ToLower(string(data))
+		}
+	}
+	if prefix == "camera" || prefix == "exif" || prefix == "tag" {
+		if strings.Contains(metadataText, plain) {
+			return []string{"metadata/EXIF"}
+		}
+		return nil
+	}
+	if prefix == "hash" {
+		for _, loc := range asset.Locations {
+			if strings.HasPrefix(strings.ToLower(loc.SHA512Hex), plain) {
+				return []string{"SHA-512 prefix"}
+			}
+		}
+		return nil
+	}
+	if prefix == "album" {
+		if _, ok := searchCtx.albumAssetMatches[token][asset.ID]; ok {
+			return []string{"album"}
+		}
+		return nil
+	}
+	if prefix == "track" {
+		if _, ok := searchCtx.trackNameMatches[token][asset.ID]; ok {
+			return []string{"track"}
+		}
+		return nil
+	}
+	if prefix == "ext" || prefix == "extension" {
+		for _, loc := range asset.Locations {
+			if strings.TrimPrefix(strings.ToLower(loc.Extension), ".") == strings.TrimPrefix(plain, ".") {
+				return []string{"extension"}
+			}
+		}
+		return nil
+	}
+	if strings.Contains(token, "..") {
+		if assetMatchesDateRange(asset, token) {
+			return []string{"date range"}
+		}
+		return nil
+	}
+	if strings.Contains(strings.ToLower(asset.DisplayName), plain) {
+		out = append(out, "filename")
+	}
+	if strings.Contains(strings.ToLower(asset.MediaKind), plain) {
+		out = append(out, "media kind")
+	}
+	if asset.TakenAt != nil && strings.Contains(asset.TakenAt.Format("2006-01-02 2006-01 2006"), plain) {
+		out = append(out, "date")
+	}
+	if strings.Contains(metadataText, plain) {
+		out = append(out, "metadata/EXIF")
+	}
+	for _, loc := range asset.Locations {
+		if strings.Contains(strings.ToLower(loc.RelativePath), plain) {
+			out = append(out, "path")
+		}
+		if strings.TrimPrefix(strings.ToLower(loc.Extension), ".") == strings.TrimPrefix(plain, ".") {
+			out = append(out, "extension")
+		}
+		if strings.HasPrefix(strings.ToLower(loc.SHA512Hex), plain) && plain != "" {
+			out = append(out, "SHA-512 prefix")
+		}
+		if strings.Contains(strings.ToLower(loc.FileName), plain) {
+			out = append(out, "filename")
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func assetMatchesDateRange(asset catalog.Asset, token string) bool {
+	startRaw, endRaw, ok := strings.Cut(token, "..")
+	if !ok || asset.TakenAt == nil {
+		return false
+	}
+	start, startOK := parseSearchDateBound(startRaw, false)
+	end, endOK := parseSearchDateBound(endRaw, true)
+	if !startOK && !endOK {
+		return false
+	}
+	taken := *asset.TakenAt
+	if startOK && taken.Before(start) {
+		return false
+	}
+	if endOK && taken.After(end) {
+		return false
+	}
+	return true
+}
+
+func parseSearchDateBound(raw string, end bool) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"2006-01-02", "2006-01", "2006"} {
+		value, err := time.ParseInLocation(layout, raw, time.UTC)
+		if err != nil {
+			continue
+		}
+		if !end {
+			return value, true
+		}
+		switch layout {
+		case "2006":
+			return value.AddDate(1, 0, 0).Add(-time.Nanosecond), true
+		case "2006-01":
+			return value.AddDate(0, 1, 0).Add(-time.Nanosecond), true
+		default:
+			return value.AddDate(0, 0, 1).Add(-time.Nanosecond), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func searchExplanation(matched []string) string {
+	if len(matched) == 0 {
+		return "matched indexed asset"
+	}
+	return "matched by " + strings.Join(matched, ", ")
+}
+
+func searchWarnings(tokens []string) []string {
+	var warnings []string
+	for _, token := range tokens {
+		if strings.HasPrefix(token, "near:") {
+			warnings = append(warnings, token+" is recognized as a future structured filter; current search uses indexed asset fields.")
+		}
+	}
+	return uniqueStrings(warnings)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func canCancelJob(job jobs.Job) bool {

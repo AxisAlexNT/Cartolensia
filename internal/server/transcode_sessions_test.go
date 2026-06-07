@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
+	"github.com/AxisAlexNT/Cartolensia/internal/transcoding"
 )
 
 func TestHLSArgsProfiles(t *testing.T) {
@@ -41,5 +44,43 @@ func TestHLSReadyRequiresPlaylistAndSegment(t *testing.T) {
 	}
 	if !hlsReady(dir) {
 		t.Fatal("playlist and segment should be ready")
+	}
+}
+
+func TestTranscodePresetValidationAndNVENCArgs(t *testing.T) {
+	preset := catalog.TranscodingPreset{
+		ID:             "nv-test",
+		Name:           "NVENC test",
+		Hardware:       "nvidia",
+		Codec:          "h264",
+		FFmpegEncoder:  "h264_nvenc",
+		Mode:           "bitrate",
+		ParameterValue: "750",
+		Container:      "hls",
+	}
+	if warnings := transcodePresetWarnings(preset, transcoding.Capabilities{}); len(warnings) == 0 {
+		t.Fatal("expected bare numeric bitrate warning")
+	}
+	args, err := videoArgsForPreset(preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"h264_nvenc", "-preset p5", "-b:v 750k", "-maxrate 750k", "-bufsize 1500k"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in args %q", want, joined)
+		}
+	}
+	if got := safeBitrateParameter("1500k", "750k"); got != "1500k" {
+		t.Fatalf("unexpected explicit bitrate %q", got)
+	}
+	if got := safeBitrateParameter("1500", "750k"); got != "1500k" {
+		t.Fatalf("unexpected normalized bitrate %q", got)
+	}
+	av1 := preset
+	av1.Codec = "av1"
+	av1.FFmpegEncoder = "av1_nvenc"
+	if warnings := transcodePresetWarnings(av1, transcoding.Capabilities{}); len(warnings) == 0 {
+		t.Fatal("expected RTX 3090 Ti AV1 warning")
 	}
 }

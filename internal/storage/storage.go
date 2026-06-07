@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,7 +31,9 @@ type Config struct {
 }
 
 type Registry struct {
+	mu       sync.RWMutex
 	adapters map[string]*FSAdapter
+	configs  map[string]Config
 }
 
 type FileInfo struct {
@@ -63,10 +66,13 @@ type WalkReport struct {
 }
 
 func NewRegistry(configs []Config) (*Registry, error) {
-	reg := &Registry{adapters: map[string]*FSAdapter{}}
+	reg := &Registry{adapters: map[string]*FSAdapter{}, configs: map[string]Config{}}
 	for _, cfg := range configs {
 		if cfg.Kind != "fs" {
 			return nil, fmt.Errorf("unsupported storage kind %q", cfg.Kind)
+		}
+		if cfg.Mode == "" {
+			cfg.Mode = "strict_read_only"
 		}
 		adapter, err := NewFSAdapter(cfg.Name, cfg.Root)
 		if err != nil {
@@ -76,11 +82,14 @@ func NewRegistry(configs []Config) (*Registry, error) {
 			return nil, fmt.Errorf("duplicate storage %q", cfg.Name)
 		}
 		reg.adapters[cfg.Name] = adapter
+		reg.configs[cfg.Name] = Config{Name: cfg.Name, Kind: cfg.Kind, Root: adapter.Root(), Mode: cfg.Mode}
 	}
 	return reg, nil
 }
 
 func (r *Registry) ListStorages() []Config {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.adapters))
 	for name := range r.adapters {
 		names = append(names, name)
@@ -88,13 +97,87 @@ func (r *Registry) ListStorages() []Config {
 	sort.Strings(names)
 	out := make([]Config, 0, len(names))
 	for _, name := range names {
-		adapter := r.adapters[name]
-		out = append(out, Config{Name: name, Kind: "fs", Root: adapter.Root(), Mode: "strict_read_only"})
+		out = append(out, r.configs[name])
 	}
 	return out
 }
 
+func (r *Registry) GetStorage(name string) (Config, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cfg, ok := r.configs[name]
+	if !ok {
+		return Config{}, fmt.Errorf("%w: %s", ErrUnknownStorage, name)
+	}
+	return cfg, nil
+}
+
+func (r *Registry) AddStorage(cfg Config) (Config, error) {
+	normalized, adapter, err := normalizeConfig(cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.adapters[normalized.Name]; exists {
+		return Config{}, fmt.Errorf("storage %q already exists", normalized.Name)
+	}
+	r.adapters[normalized.Name] = adapter
+	r.configs[normalized.Name] = normalized
+	return normalized, nil
+}
+
+func (r *Registry) UpdateStorage(name string, cfg Config) (Config, error) {
+	if strings.TrimSpace(name) == "" {
+		return Config{}, errors.New("storage name is required")
+	}
+	cfg.Name = name
+	normalized, adapter, err := normalizeConfig(cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.adapters[name]; !exists {
+		return Config{}, fmt.Errorf("%w: %s", ErrUnknownStorage, name)
+	}
+	r.adapters[name] = adapter
+	r.configs[name] = normalized
+	return normalized, nil
+}
+
+func ValidateConfig(cfg Config) (Config, error) {
+	normalized, _, err := normalizeConfig(cfg)
+	return normalized, err
+}
+
+func normalizeConfig(cfg Config) (Config, *FSAdapter, error) {
+	cfg.Name = strings.TrimSpace(cfg.Name)
+	cfg.Kind = strings.TrimSpace(cfg.Kind)
+	cfg.Mode = strings.TrimSpace(cfg.Mode)
+	if cfg.Kind == "" {
+		cfg.Kind = "fs"
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = "strict_read_only"
+	}
+	if cfg.Kind != "fs" {
+		return Config{}, nil, fmt.Errorf("unsupported storage kind %q", cfg.Kind)
+	}
+	if cfg.Mode != "strict_read_only" && cfg.Mode != "read_only" {
+		return Config{}, nil, fmt.Errorf("storage mode %q is not enabled in this build", cfg.Mode)
+	}
+	adapter, err := NewFSAdapter(cfg.Name, cfg.Root)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	cfg.Root = adapter.Root()
+	return cfg, adapter, nil
+}
+
 func (r *Registry) Adapter(name string) (*FSAdapter, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	adapter, ok := r.adapters[name]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownStorage, name)

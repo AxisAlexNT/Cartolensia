@@ -21,8 +21,14 @@ Current implemented slices:
 * Server-side EXIF parsing for JPEG metadata and GPS extraction into typed geotag records.
 * GPX parsing, GPS track manager APIs, track/media lookup, conservative track-snapped geotags, map GeoJSON, live video-track sync link skeleton, ffprobe metadata extraction, and transcoding/AI/vector status contracts.
 * Photo/map plugin MVP in the WebUI using bundled OpenLayers vector layers and an optional Cartolensia OSM tile proxy/cache; no CDN.
+* Map interaction hardening: asset/cluster markers take click priority over track lines, track clicks open popups, and track point/media proximity APIs support GPS/KML workflows.
+* Track thumbnails and interactive track previews for GPX/KML/KMZ/GPZ assets, generated only in the Cartolensia cache.
 * Duplicate/content identity reporting based on SHA-512 plus size, with moved-file relinking once content equality is confirmed.
 * Persistent preview-cache index, preview-cache status endpoints, and dry-run cleanup controls.
+* Cache-scoped HLS video sessions with built-in and custom transcoding preset contracts; originals remain read-only and direct streaming stays the default.
+* Universal Explorer search across filenames, paths, extensions, dates, hashes, metadata, and tags, with match explanations.
+* Settings UI with categorized runtime/restart-required settings and schema-based per-plugin settings tabs.
+* Optional AI sidecar service scaffold, Docker Compose profiles, worker registry/status endpoints, and schema foundation for tags/predictions/faces. No model downloads or inference run by default.
 * Scoped discovery dry-run endpoint, scan-run report table, guarded `rclone_dryrun` example config, and future dry-run preflight script.
 * Synthetic fixture generation and bounded performance smoke scripts.
 
@@ -141,6 +147,18 @@ The admin password must come from `CARTOLENSIA_ADMIN_PASSWORD` or a configured `
 Original media is treated as immutable. The implemented filesystem adapter is strict read-only: list/stat/open are allowed; write/delete/move/mkdir are rejected. Preview files are generated only under the Cartolensia cache directory and never beside originals.
 
 The test and smoke workflows use `testdata/media_fixture/` or synthetic fixtures. `/mnt/Models/rclone` is not required and must not be touched by automated tests.
+
+## Current MVP Status
+
+The current vertical slice includes bounded discovery, hashing, EXIF/geotag metadata, GPX/KML/KMZ/GPZ track parsing, map clustering, albums, gallery/overlay viewing, cache-scoped HLS transcoding sessions, runtime-safe storage validation, and an optional dummy AI sidecar contract. Real AI models are not downloaded or run by default.
+
+For the live real-peek session, use:
+
+- `http://127.0.0.1:18080/?page=explorer`
+- `http://127.0.0.1:18080/?page=map`
+- `http://127.0.0.1:18080/?page=gps-tracks`
+- `http://127.0.0.1:18080/?page=settings`
+- `http://127.0.0.1:18080/?page=base-ai`
 
 ## License
 

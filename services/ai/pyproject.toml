@@ -1,0 +1,18 @@
+[project]
+name = "cartolensia-ai"
+version = "0.1.0"
+description = "Optional Cartolensia AI sidecar service contract"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "numpy",
+]
+
+[project.scripts]
+cartolensia-ai-server = "cartolensia_ai.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+

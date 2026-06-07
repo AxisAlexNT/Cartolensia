@@ -8,7 +8,7 @@ import VectorLayer from "ol/layer/Vector";
 import Overlay from "ol/Overlay";
 import VectorSource from "ol/source/Vector";
 import XYZ from "ol/source/XYZ";
-import { fromLonLat } from "ol/proj";
+import { fromLonLat, toLonLat } from "ol/proj";
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from "ol/style";
 import Hls from "hls.js";
 import "ol/ol.css";
@@ -17,6 +17,7 @@ import {
   type Album,
   type AlbumItemPage,
   type APIToken,
+  type Asset,
   type AssetDetail,
   type BackendStatus,
   type DuplicatePage,
@@ -31,15 +32,19 @@ import {
   type PreviewCacheStats,
   type Principal,
   type ScanRun,
+  type SearchResult,
   type SettingsPayload,
   type Stats,
   type StreamOptions,
   type TranscodeSession,
   type StorageConfig,
   type TileSource,
+  type TrackPointInfo,
   type TrackDetail,
+  type TrackProfile,
   type TrackSummary,
   type TranscodingCapabilities,
+  type TranscodingPreset,
   type DBExport
 } from "./api";
 
@@ -77,6 +82,7 @@ const navPageAliases: Record<string, string> = {
   tracks: "GPS/KML Tracks",
   transcoding: "Transcoding",
   "base-ai": "Base AI",
+  "asset-detail": "Asset Detail",
   ai: "Base AI",
   "ai-classification": "AI Classification"
 };
@@ -100,6 +106,27 @@ function pageSlug(label: string): string {
   return label.toLowerCase().replaceAll(" ", "-");
 }
 
+function navIcon(label: string): string {
+  const icons: Record<string, string> = {
+    Explorer: "bi-folder2-open",
+    Discovery: "bi-search",
+    Jobs: "bi-list-task",
+    Metadata: "bi-card-list",
+    Storages: "bi-hdd-network",
+    Plugins: "bi-puzzle",
+    Stats: "bi-bar-chart",
+    Duplicates: "bi-intersect",
+    Settings: "bi-gear",
+    Albums: "bi-collection",
+    Map: "bi-map",
+    "GPS/KML Tracks": "bi-signpost-split",
+    Transcoding: "bi-film",
+    "Base AI": "bi-cpu",
+    "AI Classification": "bi-tags"
+  };
+  return icons[label] ?? "bi-circle";
+}
+
 const active = ref(pageFromQuery() ?? safeRoute(localStorage.getItem("cartolensia.route")));
 const loading = ref(false);
 const error = ref("");
@@ -111,11 +138,15 @@ const explorerMediaKind = ref("");
 const explorerHashStatus = ref("");
 const explorerExtension = ref("");
 const explorerSort = ref("name");
+const searchResults = ref<SearchResult[]>([]);
+const searchWarnings = ref<string[]>([]);
 const assetDetail = ref<AssetDetail | null>(null);
 const jobs = ref<Job[]>([]);
 const jobStats = ref<JobStats | null>(null);
 const selectedJob = ref<Job | null>(null);
 const storages = ref<StorageConfig[]>([]);
+const storageDraft = ref<StorageConfig>({ name: "", kind: "fs", root: "", mode: "strict_read_only" });
+const storageMessage = ref("");
 const plugins = ref<PluginManifest[]>([]);
 const stats = ref<Stats | null>(null);
 const duplicatePage = ref<DuplicatePage | null>(null);
@@ -135,11 +166,16 @@ const settingsTab = ref("general");
 const settingsMessage = ref("");
 const pendingConfig = ref<Record<string, unknown>>({});
 const pluginSettingText = ref<Record<string, string>>({});
+const selectedPluginSettingsId = ref("");
+const pluginSettingsMode = ref<"ui" | "yaml">("ui");
 const dbExports = ref<DBExport[]>([]);
 const dbExportMessage = ref("");
 const tracks = ref<TrackSummary[]>([]);
 const selectedTrack = ref<TrackDetail | null>(null);
+const selectedTrackAltitude = ref<TrackProfile | null>(null);
+const selectedTrackSpeed = ref<TrackProfile | null>(null);
 const trackAssets = ref<AssetDetail["asset"][]>([]);
+const trackAssetsReason = ref("");
 const trackOffsetSeconds = ref(0);
 const trackMediaViewMode = ref<"table" | "tile">("tile");
 const mapData = ref<Record<string, unknown> | null>(null);
@@ -149,7 +185,7 @@ const mapCluster = ref(true);
 const mapAlbumId = ref("");
 const mapTrackId = ref("");
 const mapPopup = ref<{
-  kind: "cluster" | "asset";
+  kind: "cluster" | "asset" | "track";
   title: string;
   summary: string;
   assets: Array<{
@@ -162,20 +198,36 @@ const mapPopup = ref<{
   }>;
   bbox?: Record<string, number>;
   count?: number;
+  track_id?: string;
+  track_info?: TrackPointInfo | null;
+  track_info_loading?: boolean;
+  nearby_distance_m?: number;
 } | null>(null);
 const tileSources = ref<TileSource[]>([]);
 const tileStatus = ref("OpenStreetMap tiles load on demand through Cartolensia.");
 const mapElement = ref<HTMLDivElement | null>(null);
 const mapPopupElement = ref<HTMLDivElement | null>(null);
+const galleryTrackElement = ref<HTMLDivElement | null>(null);
+const selectedTrackMapElement = ref<HTMLDivElement | null>(null);
 const assetVideoElement = ref<HTMLVideoElement | null>(null);
 const galleryVideoElement = ref<HTMLVideoElement | null>(null);
 let olMap: OLMap | null = null;
+let galleryTrackMap: OLMap | null = null;
+const galleryTrackSource = new VectorSource();
+let selectedTrackMap: OLMap | null = null;
+const selectedTrackSource = new VectorSource();
 let mapOverlay: Overlay | null = null;
 let activeHls: Hls | null = null;
 let mapHasInitialFit = false;
-const mapSource = new VectorSource();
+const mapAssetSource = new VectorSource();
+const mapTrackSource = new VectorSource();
+let mapAssetLayer: VectorLayer<VectorSource> | null = null;
+let mapTrackLayer: VectorLayer<VectorSource> | null = null;
 const transcodingCapabilities = ref<TranscodingCapabilities | null>(null);
+const transcodePresets = ref<TranscodingPreset[]>([]);
 const aiStatus = ref<Record<string, unknown> | null>(null);
+const aiWorkers = ref<Record<string, unknown> | null>(null);
+const aiMessage = ref("");
 const vectorStatus = ref<Record<string, unknown> | null>(null);
 const albums = ref<Album[]>([]);
 const selectedAlbumId = ref("");
@@ -216,10 +268,24 @@ const dryRunReport = ref<ScanRun | null>(null);
 const streamOptions = ref<StreamOptions | null>(null);
 const transcodeSession = ref<TranscodeSession | null>(null);
 const transcodeMessage = ref("");
+const transcodeValidation = ref<Record<string, unknown> | null>(null);
+const showAdvancedTranscode = ref(false);
+const customPresetName = ref("Custom LAN preset");
+const customPresetHardware = ref("cpu");
+const customPresetCodec = ref("h264");
+const customPresetEncoder = ref("");
+const customPresetMode = ref("quality");
+const customPresetParameter = ref("28");
+const lastVideoPreset = ref(localStorage.getItem("cartolensia.videoPreset") || "original");
 const galleryZoomMode = ref<"fit" | "actual">("fit");
 const galleryScale = ref(1);
 const galleryPanX = ref(0);
 const galleryPanY = ref(0);
+const galleryPanning = ref(false);
+let galleryPointerLast: { x: number; y: number } | null = null;
+const galleryPointers = new Map<number, { x: number; y: number }>();
+let galleryPinchStartDistance = 0;
+let galleryPinchStartScale = 1;
 
 type GalleryItem = {
   id: string;
@@ -242,6 +308,8 @@ const activePlugin = computed(() => {
   const id = active.value.toLowerCase().replaceAll(" ", "-");
   return plugins.value.find((plugin) => plugin.id === id || plugin.name.toLowerCase() === active.value.toLowerCase());
 });
+
+const selectedPluginSettings = computed(() => plugins.value.find((plugin) => plugin.id === selectedPluginSettingsId.value) ?? plugins.value[0]);
 
 const breadcrumbs = computed(() => {
   const parts = explorerPath.value.split("/").filter(Boolean);
@@ -272,15 +340,31 @@ function setActive(next: string, updateURL = true) {
 }
 
 window.addEventListener("popstate", () => {
-  active.value = pageFromQuery() ?? safeRoute(localStorage.getItem("cartolensia.route"));
+  const page = pageFromQuery() ?? safeRoute(localStorage.getItem("cartolensia.route"));
+  active.value = page;
+  const assetID = new URLSearchParams(window.location.search).get("asset_id");
+  if (page === "Asset Detail" && assetID) {
+    void openAsset(assetID);
+  }
 });
 
 const visibleExplorerRows = computed(() => {
-  const files = asArray(explorer.value?.files);
-  const base = files.length > 0 || explorerPath.value ? files : rows.value;
-  if (!monthFilter.value) return base;
-  return base.filter((row) => monthKey(row.mtime) === monthFilter.value);
+	const files = asArray(explorer.value?.files);
+	const searchRows = searchResults.value.map((result) => assetToExplorerRow(result.asset)).filter((row): row is ExplorerRow => row !== null);
+	const base = explorerQ.value.trim() ? searchRows : (files.length > 0 || explorerPath.value ? files : rows.value);
+	if (!monthFilter.value) return base;
+	return base.filter((row) => monthKey(row.mtime) === monthFilter.value);
 });
+
+const searchExplanationByAsset = computed(() => {
+	const explanations = new Map<string, string>();
+	for (const result of searchResults.value) {
+		explanations.set(result.asset.id, result.explanation);
+	}
+	return explanations;
+});
+
+const aiWorkerRows = computed(() => asArray((aiWorkers.value?.workers as unknown[]) ?? []));
 
 const selectedAlbumItems = computed(() => asArray(albumItems.value?.items));
 const selectedAlbumAssets = computed(() => selectedAlbumItems.value.map((item) => item.asset));
@@ -304,16 +388,37 @@ function monthKey(value?: string): string {
 }
 
 function explorerQueryString(): string {
-  const params = new URLSearchParams();
+	const params = new URLSearchParams();
   if (explorerQ.value.trim()) params.set("q", explorerQ.value.trim());
   if (explorerMediaKind.value) params.set("media_kind", explorerMediaKind.value);
   if (explorerHashStatus.value) params.set("hash_status", explorerHashStatus.value);
   if (explorerExtension.value.trim()) params.set("extension", explorerExtension.value.trim());
   if (explorerSort.value) params.set("sort", explorerSort.value);
-  return params.toString();
+	return params.toString();
+}
+
+function assetToExplorerRow(asset: Asset): ExplorerRow | null {
+	const location = asArray(asset.locations)[0];
+	if (!location) return null;
+	return {
+		asset_id: asset.id,
+		name: asset.display_name,
+		media_kind: asset.media_kind,
+		storage_url: location.storage_url,
+		relative_path: location.relative_path,
+		size_bytes: location.size_bytes,
+		mtime: asset.taken_at ?? location.mtime,
+		hash_status: location.hash_status,
+		sha512_hex: location.sha512_hex
+	};
+}
+
+function searchExplanation(row: ExplorerRow): string {
+	return searchExplanationByAsset.value.get(row.asset_id) ?? "";
 }
 
 function rowToGallery(row: ExplorerRow): GalleryItem {
+  const mediaEndpoint = row.media_kind === "track" ? "track-thumbnail" : "preview";
   return {
     id: row.asset_id,
     name: row.name,
@@ -321,13 +426,14 @@ function rowToGallery(row: ExplorerRow): GalleryItem {
     relative_path: row.relative_path,
     date: row.mtime,
     size_bytes: row.size_bytes,
-    preview_url: `/api/v1/media/${encodeURIComponent(row.asset_id)}/preview`,
+    preview_url: `/api/v1/media/${encodeURIComponent(row.asset_id)}/${mediaEndpoint}`,
     original_url: `/api/v1/media/${encodeURIComponent(row.asset_id)}/original`
   };
 }
 
 function assetToGallery(asset: AssetDetail["asset"]): GalleryItem {
   const location = asArray(asset.locations)[0];
+  const mediaEndpoint = asset.media_kind === "track" ? "track-thumbnail" : "preview";
   return {
     id: asset.id,
     name: asset.display_name,
@@ -335,7 +441,7 @@ function assetToGallery(asset: AssetDetail["asset"]): GalleryItem {
     relative_path: location?.relative_path,
     date: asset.taken_at ?? location?.mtime,
     size_bytes: location?.size_bytes,
-    preview_url: `/api/v1/media/${encodeURIComponent(asset.id)}/preview`,
+    preview_url: `/api/v1/media/${encodeURIComponent(asset.id)}/${mediaEndpoint}`,
     original_url: `/api/v1/media/${encodeURIComponent(asset.id)}/original`
   };
 }
@@ -349,10 +455,12 @@ function openGallery(items: GalleryItem[], index: number) {
   galleryIndex.value = Math.max(0, Math.min(index, items.length - 1));
   resetGalleryZoom();
   void refreshStreamOptionsForGallery();
+  void refreshGalleryTrackPreview();
 }
 
 function closeGallery() {
   if (transcodeSession.value) void stopActiveTranscode();
+  galleryTrackMap?.setTarget(undefined);
   galleryItems.value = [];
   galleryIndex.value = 0;
 }
@@ -363,6 +471,7 @@ function nextGallery(delta: number) {
   galleryIndex.value = (galleryIndex.value + delta + galleryItems.value.length) % galleryItems.value.length;
   resetGalleryZoom();
   void refreshStreamOptionsForGallery();
+  void refreshGalleryTrackPreview();
 }
 
 function resetGalleryZoom() {
@@ -370,6 +479,11 @@ function resetGalleryZoom() {
   galleryScale.value = 1;
   galleryPanX.value = 0;
   galleryPanY.value = 0;
+  galleryPanning.value = false;
+  galleryPointerLast = null;
+  galleryPointers.clear();
+  galleryPinchStartDistance = 0;
+  galleryPinchStartScale = 1;
 }
 
 function toggleGalleryZoom() {
@@ -393,14 +507,175 @@ function galleryImageStyle() {
 function wheelGallery(event: WheelEvent) {
   if (galleryCurrent.value?.media_kind !== "photo") return;
   galleryZoomMode.value = "actual";
-  const next = galleryScale.value * (event.deltaY < 0 ? 1.12 : 0.88);
-  galleryScale.value = Math.max(0.25, Math.min(6, next));
+  const previous = galleryScale.value;
+  const next = Math.max(0.25, Math.min(6, previous * (event.deltaY < 0 ? 1.12 : 0.88)));
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const dx = event.clientX - (rect.left + rect.width / 2);
+  const dy = event.clientY - (rect.top + rect.height / 2);
+  const ratio = next / previous;
+  galleryPanX.value = dx - (dx - galleryPanX.value) * ratio;
+  galleryPanY.value = dy - (dy - galleryPanY.value) * ratio;
+  galleryScale.value = next;
 }
 
 function panGallery(dx: number, dy: number) {
   if (galleryZoomMode.value !== "actual") return;
   galleryPanX.value += dx;
   galleryPanY.value += dy;
+}
+
+function galleryPointerDown(event: PointerEvent) {
+  if (galleryCurrent.value?.media_kind !== "photo") return;
+  galleryZoomMode.value = "actual";
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  galleryPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  galleryPointerLast = { x: event.clientX, y: event.clientY };
+  galleryPanning.value = true;
+  if (galleryPointers.size === 2) {
+    const points = Array.from(galleryPointers.values());
+    galleryPinchStartDistance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+    galleryPinchStartScale = galleryScale.value;
+  }
+}
+
+function galleryPointerMove(event: PointerEvent) {
+  if (galleryCurrent.value?.media_kind !== "photo" || !galleryPointers.has(event.pointerId)) return;
+  galleryPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (galleryPointers.size >= 2) {
+    const points = Array.from(galleryPointers.values()).slice(0, 2);
+    const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+    if (galleryPinchStartDistance > 0) {
+      galleryScale.value = Math.max(0.25, Math.min(6, galleryPinchStartScale * (distance / galleryPinchStartDistance)));
+    }
+    return;
+  }
+  if (!galleryPointerLast) {
+    galleryPointerLast = { x: event.clientX, y: event.clientY };
+    return;
+  }
+  panGallery(event.clientX - galleryPointerLast.x, event.clientY - galleryPointerLast.y);
+  galleryPointerLast = { x: event.clientX, y: event.clientY };
+}
+
+function galleryPointerUp(event: PointerEvent) {
+  galleryPointers.delete(event.pointerId);
+  if (galleryPointers.size === 0) {
+    galleryPanning.value = false;
+    galleryPointerLast = null;
+    galleryPinchStartDistance = 0;
+  } else {
+    const points = Array.from(galleryPointers.values());
+    galleryPointerLast = points[0] ?? null;
+  }
+}
+
+async function refreshGalleryTrackPreview() {
+  const current = galleryCurrent.value;
+  if (!current || current.media_kind !== "track") {
+    galleryTrackSource.clear();
+    return;
+  }
+  await nextTick();
+  if (!galleryTrackElement.value) return;
+  const preview = await api.trackPreview(current.id).catch(() => null);
+  if (!preview || galleryCurrent.value?.id !== current.id) return;
+  renderGalleryTrackMap(preview);
+}
+
+function renderGalleryTrackMap(preview: Record<string, unknown>) {
+  if (!galleryTrackElement.value) return;
+  if (!galleryTrackMap) {
+    const layer = new VectorLayer({
+      source: galleryTrackSource,
+      style: new Style({ stroke: new Stroke({ color: "#f8fafc", width: 3 }) })
+    });
+    galleryTrackMap = new OLMap({
+      target: galleryTrackElement.value,
+      layers: [layer],
+      view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
+    });
+  } else {
+    galleryTrackMap.setTarget(galleryTrackElement.value);
+  }
+  const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
+  galleryTrackSource.clear();
+  galleryTrackSource.addFeatures(features);
+  if (features.length > 0) {
+    const extent = galleryTrackSource.getExtent();
+    if (extent) {
+      galleryTrackMap.getView().fit(extent, { padding: [24, 24, 24, 24], maxZoom: 16, duration: 120 });
+    }
+  }
+  galleryTrackMap.updateSize();
+}
+
+async function refreshSelectedTrackMap() {
+  const detail = selectedTrack.value;
+  if (!detail) {
+    selectedTrackSource.clear();
+    return;
+  }
+  await nextTick();
+  if (!selectedTrackMapElement.value) return;
+  const preview = await api.trackPreview(detail.summary.track_asset_id, 4000).catch(() => null);
+  if (!preview || selectedTrack.value?.summary.track_asset_id !== detail.summary.track_asset_id) return;
+  renderSelectedTrackMap(preview);
+}
+
+function renderSelectedTrackMap(preview: Record<string, unknown>) {
+  if (!selectedTrackMapElement.value) return;
+  if (!selectedTrackMap) {
+    const layer = new VectorLayer({
+      source: selectedTrackSource,
+      style: new Style({ stroke: new Stroke({ color: "#e6edf3", width: 3 }) })
+    });
+    selectedTrackMap = new OLMap({
+      target: selectedTrackMapElement.value,
+      layers: [layer],
+      view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
+    });
+  } else {
+    selectedTrackMap.setTarget(selectedTrackMapElement.value);
+  }
+  const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
+  selectedTrackSource.clear();
+  selectedTrackSource.addFeatures(features);
+  if (features.length > 0) {
+    const extent = selectedTrackSource.getExtent();
+    if (extent) {
+      selectedTrackMap.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom: 16, duration: 120 });
+    }
+  }
+  selectedTrackMap.updateSize();
+}
+
+function trackProfilePath(profile: TrackProfile | null): string {
+  const points = asArray(profile?.series).filter((point) => typeof point.value === "number");
+  if (points.length === 0) return "";
+  const minX = Math.min(...points.map((point) => point.distance_m));
+  const maxX = Math.max(...points.map((point) => point.distance_m));
+  const values = points.map((point) => Number(point.value));
+  const minY = Math.min(...values);
+  const maxY = Math.max(...values);
+  const width = 520;
+  const height = 140;
+  const pad = 14;
+  const xRange = Math.max(1, maxX - minX);
+  const yRange = Math.max(1e-9, maxY - minY);
+  return points
+    .map((point, index) => {
+      const x = pad + ((point.distance_m - minX) / xRange) * (width - pad * 2);
+      const y = height - pad - ((Number(point.value) - minY) / yRange) * (height - pad * 2);
+      return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
+function trackProfileRange(profile: TrackProfile | null): string {
+  if (!profile?.has_values || typeof profile.min !== "number" || typeof profile.max !== "number") {
+    return "No values";
+  }
+  return `${profile.min.toFixed(profile.metric === "speed" ? 2 : 1)}-${profile.max.toFixed(profile.metric === "speed" ? 2 : 1)} ${profile.unit}`;
 }
 
 function markPreviewFailed(id: string) {
@@ -482,21 +757,25 @@ async function stopActiveTranscode() {
 async function selectTranscodeOption(assetId: string, event: Event) {
   const select = event.target as HTMLSelectElement;
   const optionID = select.value;
-  transcodeMessage.value = "";
-  if (!optionID || optionID === "original") {
-    await stopActiveTranscode();
-    return;
-  }
+	transcodeMessage.value = "";
+	if (!optionID || optionID === "original") {
+		lastVideoPreset.value = "original";
+		localStorage.setItem("cartolensia.videoPreset", "original");
+		await stopActiveTranscode();
+		return;
+	}
   const option = asArray(streamOptions.value?.options).find((candidate) => candidate.id === optionID);
-  if (!option || !option.available) {
-    transcodeMessage.value = option?.disabled_reason ?? "This stream option is not available.";
-    select.value = "original";
-    return;
-  }
-  if (!option.profile && !option.session_endpoint) {
-    await stopActiveTranscode();
-    return;
-  }
+	if (!option || !option.available) {
+		transcodeMessage.value = option?.disabled_reason ?? "This stream option is not available.";
+		select.value = "original";
+		return;
+	}
+	lastVideoPreset.value = optionID;
+	localStorage.setItem("cartolensia.videoPreset", optionID);
+	if (!option.profile && !option.session_endpoint) {
+		await stopActiveTranscode();
+		return;
+	}
   await stopActiveTranscode();
   transcodeMessage.value = "Starting cache-scoped transcode session...";
   try {
@@ -510,7 +789,146 @@ async function selectTranscodeOption(assetId: string, event: Event) {
     transcodeMessage.value = err instanceof Error ? err.message : String(err);
     await stopActiveTranscode();
     select.value = "original";
-  }
+	}
+}
+
+const supportedTranscodeEncoders = computed(() => asArray(transcodingCapabilities.value?.encoders));
+
+const groupedTranscodeHardware = computed(() => {
+	const hardware = transcodingCapabilities.value?.hardware ?? {};
+	return [
+		{ id: "cpu", label: "CPU", available: true, reason: "" },
+		{ id: "nvidia", label: "NVIDIA GPU", available: !!hardware.nvidia_smi, reason: hardware.nvidia_smi ? "" : "Not present" },
+		{
+			id: "amd",
+			label: "AMD GPU",
+			available: !!hardware.vaapi || !!hardware.dev_dri,
+			reason: hardware.vaapi || hardware.dev_dri ? "" : "No VAAPI/DRI device detected"
+		},
+		{
+			id: "intel",
+			label: "Intel GPU",
+			available: !!hardware.qsv || !!hardware.dev_dri,
+			reason: hardware.qsv || hardware.dev_dri ? "" : "No QSV/DRI device detected"
+		}
+	];
+});
+
+const availableEncodersForCustom = computed(() => {
+	const hardware = customPresetHardware.value;
+	const codec = customPresetCodec.value;
+	return supportedTranscodeEncoders.value.filter((encoder) => {
+		const name = encoder.name.toLowerCase();
+		const family = (encoder.codec_family ?? "").toLowerCase();
+		const hw = (encoder.hardware ?? "").toLowerCase();
+		const codecMatches =
+			codec === "custom" ||
+			family === codec ||
+			(codec === "h264" && name.includes("264")) ||
+			(codec === "h265" && (name.includes("265") || name.includes("hevc"))) ||
+			(codec === "av1" && name.includes("av1"));
+		const hardwareMatches =
+			hardware === "cpu"
+				? !hw || hw === "software"
+				: hardware === "nvidia"
+					? hw === "nvidia" || name.includes("nvenc")
+					: hardware === "amd"
+						? hw === "amd" || name.includes("amf") || name.includes("vaapi")
+						: hardware === "intel"
+							? hw === "intel" || name.includes("qsv") || name.includes("vaapi")
+							: true;
+		return codecMatches && hardwareMatches;
+	});
+});
+
+watch([customPresetHardware, customPresetCodec], () => {
+	const first = availableEncodersForCustom.value[0]?.name ?? "";
+	if (!availableEncodersForCustom.value.some((encoder) => encoder.name === customPresetEncoder.value)) {
+		customPresetEncoder.value = first;
+	}
+});
+
+function currentCustomTranscodePreset(): Partial<TranscodingPreset> {
+	return {
+		name: customPresetName.value.trim() || "Custom preset",
+		hardware: customPresetHardware.value,
+		codec: customPresetCodec.value,
+		ffmpeg_encoder: customPresetEncoder.value || availableEncodersForCustom.value[0]?.name || "",
+		mode: customPresetMode.value,
+		parameter_value: customPresetParameter.value,
+		container: "hls"
+	};
+}
+
+async function saveCustomTranscodePreset() {
+	const hardware = groupedTranscodeHardware.value.find((item) => item.id === customPresetHardware.value);
+	if (!hardware?.available) {
+		transcodeMessage.value = hardware?.reason || "Selected hardware is unavailable.";
+		return;
+	}
+	try {
+		const preset = currentCustomTranscodePreset();
+		const validation = await api.validateTranscodingPreset(preset);
+		transcodeValidation.value = validation;
+		if (validation.valid === false) {
+			transcodeMessage.value = String(validation.error ?? "Preset validation failed.");
+			return;
+		}
+		const saved = await api.saveTranscodingPreset(preset);
+		transcodePresets.value = await api.transcodingPresets();
+		lastVideoPreset.value = saved.id;
+		localStorage.setItem("cartolensia.videoPreset", saved.id);
+		transcodeMessage.value = `Saved preset ${saved.name}.`;
+	} catch (err) {
+		transcodeMessage.value = err instanceof Error ? err.message : String(err);
+	}
+}
+
+async function applyCustomTranscodePreset(assetId: string) {
+	await stopActiveTranscode();
+	const preset = currentCustomTranscodePreset();
+	transcodeMessage.value = "Validating custom preset and starting a cache-scoped session...";
+	try {
+		const validation = await api.validateTranscodingPreset(preset);
+		transcodeValidation.value = validation;
+		if (validation.valid === false) {
+			transcodeMessage.value = String(validation.error ?? "Preset validation failed.");
+			return;
+		}
+		transcodeSession.value = await api.startTranscodeSession(assetId, "custom_inline", preset);
+		transcodeSession.value = await waitForTranscodeReady(transcodeSession.value.id);
+		await nextTick();
+		await attachHLSPlayback();
+		transcodeMessage.value = "Applied unsaved preset. Streaming from the Cartolensia cache.";
+	} catch (err) {
+		transcodeMessage.value = err instanceof Error ? err.message : String(err);
+		await stopActiveTranscode();
+	}
+}
+
+async function testCustomTranscodePreset(assetId: string) {
+	const preset = currentCustomTranscodePreset();
+	transcodeMessage.value = "Running a short hardware validation dry-run...";
+	try {
+		const result = await api.testTranscodingHardware(preset, assetId);
+		transcodeValidation.value = result;
+		transcodeMessage.value = result.valid === false
+			? `Hardware test failed: ${String(result.dry_run_error ?? result.error ?? "unknown error")}`
+			: "Hardware test passed. The preset can be applied or saved.";
+	} catch (err) {
+		transcodeMessage.value = err instanceof Error ? err.message : String(err);
+	}
+}
+
+async function removeTranscodePreset(id: string) {
+	const preset = transcodePresets.value.find((candidate) => candidate.id === id);
+	if (!preset || preset.built_in) return;
+	await api.deleteTranscodingPreset(id);
+	transcodePresets.value = await api.transcodingPresets();
+	if (lastVideoPreset.value === id) {
+		lastVideoPreset.value = "original";
+		localStorage.setItem("cartolensia.videoPreset", "original");
+	}
 }
 
 async function waitForTranscodeReady(sessionId: string): Promise<TranscodeSession> {
@@ -598,11 +1016,13 @@ async function refresh() {
       previewStatus,
       previewEntries,
       transcodeCaps,
-      tileSourceRows,
-      ai,
-      vector,
-      settingsPayload,
-      exportRows
+      presetRows,
+	      tileSourceRows,
+	      ai,
+	      aiWorkerRows,
+	      vector,
+	      settingsPayload,
+	      exportRows
     ] = await Promise.all([
       api.explorer(explorerQueryString()),
       api.jobs(),
@@ -620,18 +1040,36 @@ async function refresh() {
       api.previewStatus(),
       api.previewCache(),
       api.transcodingCapabilities(),
-      api.tileSources(),
-      api.aiStatus(),
-      api.vectorStatus(),
-      api.settings(),
+      api.transcodingPresets(),
+	      api.tileSources(),
+	      api.aiStatus(),
+	      api.aiWorkers(),
+	      api.vectorStatus(),
+	      api.settings(),
       api.dbExports()
-    ]);
-    rows.value = asArray(explorerRows);
-    explorer.value = await api.explorerFolders(explorerPath.value, explorerQueryString());
-    jobs.value = asArray(jobRows);
+		]);
+		rows.value = asArray(explorerRows);
+		explorer.value = await api.explorerFolders(explorerPath.value, explorerQueryString());
+		if (explorerQ.value.trim()) {
+			const search = await api.search(explorerQ.value.trim(), 100);
+			searchResults.value = asArray(search.results);
+			searchWarnings.value = asArray(search.warnings);
+		} else {
+			searchResults.value = [];
+			searchWarnings.value = [];
+		}
+		jobs.value = asArray(jobRows);
     jobStats.value = jobStatData;
     storages.value = asArray(storageRows);
     plugins.value = asArray(pluginRows);
+    if (!selectedPluginSettingsId.value && plugins.value.length > 0) {
+      selectedPluginSettingsId.value = plugins.value[0].id;
+    }
+    await Promise.all(plugins.value.map(async (plugin) => {
+      if (pluginSettingText.value[plugin.id]) return;
+      const payload = await api.pluginSettings(plugin.id).catch(() => ({ settings: {} }));
+      pluginSettingText.value[plugin.id] = JSON.stringify((payload.settings ?? {}) as Record<string, unknown>, null, 2);
+    }));
     stats.value = statData;
     duplicatePage.value = duplicateData;
     backendMonthBuckets.value = asArray(monthData);
@@ -654,9 +1092,11 @@ async function refresh() {
       albumItems.value = await api.albumItems(selectedAlbumId.value).catch(() => null);
     }
     await refreshIndexingStatus();
-    transcodingCapabilities.value = transcodeCaps;
-    aiStatus.value = ai;
-    vectorStatus.value = vector;
+	    transcodingCapabilities.value = transcodeCaps;
+	    transcodePresets.value = asArray(presetRows);
+	    aiStatus.value = ai;
+	    aiWorkers.value = aiWorkerRows;
+	    vectorStatus.value = vector;
     settings.value = settingsPayload;
     initializePendingConfig(settingsPayload);
     dbExports.value = asArray(exportRows);
@@ -896,8 +1336,21 @@ async function startPreviews() {
 }
 
 async function cleanupPreviews(dryRun = true) {
-  await api.previewCleanup(dryRun);
-  await refresh();
+	await api.previewCleanup(dryRun);
+	await refresh();
+}
+
+async function requestAIJob(kind: "classify" | "faces" | "describe") {
+	try {
+		const result = await api.aiJob(kind, {
+			scope: selectedAssets.value.size > 0 ? "selected" : "current_indexed_subset",
+			asset_ids: Array.from(selectedAssets.value),
+			max_files: 50
+		});
+		aiMessage.value = String(result.reason ?? result.status ?? "AI request accepted.");
+	} catch (err) {
+		aiMessage.value = err instanceof Error ? err.message : String(err);
+	}
 }
 
 async function startDryRun() {
@@ -982,14 +1435,25 @@ async function removeAlbumItem(assetId: string) {
 
 async function openTrack(id: string) {
   selectedTrack.value = await api.gpsTrack(id);
+  selectedTrackAltitude.value = await api.gpsTrackProfile(id, "altitude", 1200).catch(() => null);
+  selectedTrackSpeed.value = await api.gpsTrackProfile(id, "speed", 1200).catch(() => null);
   mapTrackId.value = id;
   trackAssets.value = [];
+  trackAssetsReason.value = "";
   setActive("GPS/KML Tracks");
+  await refreshSelectedTrackMap();
 }
 
 async function findTrackAssets(id: string) {
   const result = await api.gpsTrackAssets(id, trackOffsetSeconds.value);
   trackAssets.value = asArray(result.assets);
+  trackAssetsReason.value = result.reason ?? (trackAssets.value.length === 0 ? "No matching photo/video assets were found for this track." : "");
+}
+
+async function findNearbyTrackAssets(id: string) {
+  const result = await api.gpsTrackNearbyAssets(id, 100);
+  trackAssets.value = asArray(result.assets).map((item) => item.asset);
+  trackAssetsReason.value = trackAssets.value.length === 0 ? "No geotagged photo/video assets were found within the default 100 m distance." : "";
 }
 
 async function snapTrackMedia(id: string) {
@@ -1031,6 +1495,158 @@ async function saveRuntimeSettings() {
   const result = await api.patchRuntimeSettings(settings.value.runtime_settings);
   settings.value.runtime_settings = (result.runtime_settings ?? settings.value.runtime_settings) as Record<string, unknown>;
   settingsMessage.value = "Runtime settings saved and applied where supported.";
+}
+
+async function validateStorageDraft() {
+  storageMessage.value = "Validating storage draft...";
+  try {
+    const result = await api.createStorage(storageDraft.value, true);
+    storageMessage.value = JSON.stringify(result, null, 2);
+  } catch (err) {
+    storageMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function addRuntimeStorage() {
+  storageMessage.value = "Adding storage to the active read-only registry...";
+  try {
+    const result = await api.createStorage(storageDraft.value, false);
+    storageMessage.value = JSON.stringify(result, null, 2);
+    storages.value = await api.storages();
+  } catch (err) {
+    storageMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function validateExistingStorage(name: string) {
+  storageMessage.value = `Validating ${name}...`;
+  try {
+    const result = await api.validateStorage(name);
+    storageMessage.value = JSON.stringify(result, null, 2);
+  } catch (err) {
+    storageMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+type RuntimeSettingSpec = { key: string; label: string; help: string; kind?: "text" | "number" | "boolean" };
+
+const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
+  indexing: [
+    { key: "indexing.default_max_files", label: "Default max files", help: "Bounded default for real-peek and dry-run forms.", kind: "number" },
+    { key: "indexing.hash_after_index", label: "Hash after indexing", help: "Default pipeline stage.", kind: "boolean" },
+    { key: "indexing.metadata_after_index", label: "Extract metadata after indexing", help: "Default pipeline stage.", kind: "boolean" },
+    { key: "indexing.previews_after_index", label: "Generate previews after indexing", help: "Default pipeline stage.", kind: "boolean" }
+  ],
+  preview: [
+    { key: "preview.cache_max_bytes", label: "Preview cache max bytes", help: "Cleanup target for generated previews and thumbnails.", kind: "number" },
+    { key: "gallery.default_view", label: "Default gallery view", help: "Preferred table/tile gallery mode.", kind: "text" }
+  ],
+  map: [
+    { key: "map.cluster_radius_px", label: "Cluster radius px", help: "Screen distance used for marker clustering.", kind: "number" },
+    { key: "map.tiles_enabled", label: "OSM tiles enabled", help: "On-demand tile proxy; no bulk prefetch.", kind: "boolean" }
+  ],
+  transcoding: [
+    { key: "transcode.session_ttl", label: "Transcode session TTL", help: "Cleanup age for cache-scoped HLS sessions.", kind: "text" }
+  ]
+};
+
+const pendingSettingTabs: Record<string, RuntimeSettingSpec[]> = {
+  metadata: [
+    { key: "metadata.exif_enabled", label: "EXIF enabled", help: "Parse JPEG EXIF where supported.", kind: "boolean" },
+    { key: "metadata.exif_gps_enabled", label: "EXIF GPS geotagging", help: "Write GPS coordinates into asset_geo.", kind: "boolean" },
+    { key: "metadata.ffprobe_enabled", label: "ffprobe video metadata", help: "Best-effort video duration/dimension extraction.", kind: "boolean" },
+    { key: "metadata.timezone_policy", label: "Timezone policy", help: "Timezone-less EXIF stays raw unless configured.", kind: "text" }
+  ],
+  gps: [
+    { key: "gps.parse_gpx_enabled", label: "Parse GPX", help: "Enable GPX track parsing.", kind: "boolean" },
+    { key: "gps.parse_kml_enabled", label: "Parse KML", help: "Enable KML line/point parsing.", kind: "boolean" },
+    { key: "gps.parse_kmz_enabled", label: "Parse KMZ", help: "Enable zipped KML parsing.", kind: "boolean" },
+    { key: "gps.parse_gpz_enabled", label: "Parse GPZ", help: "Try zipped GPX/KML track parsing.", kind: "boolean" },
+    { key: "gps.synthetic_timestamps_for_notime", label: "Synthetic timestamps for no-time KML", help: "Allows geometry to display when source has no timestamps.", kind: "boolean" },
+    { key: "gps.default_simplification_max_points", label: "Simplification max points", help: "Default points in UI track previews.", kind: "number" },
+    { key: "gps.track_thumbnail_osm_background", label: "OSM background for track thumbnails", help: "Optional; falls back to dark local renderer.", kind: "boolean" },
+    { key: "gps.track_thumbnail_width", label: "Track thumbnail width", help: "Generated thumbnail width.", kind: "number" },
+    { key: "gps.track_thumbnail_height", label: "Track thumbnail height", help: "Generated thumbnail height.", kind: "number" },
+    { key: "gps.default_nearby_distance_m", label: "Default nearby-media distance", help: "Meters used by track popup nearby query.", kind: "number" },
+    { key: "gps.default_time_offset_seconds", label: "Default media time offset", help: "Seconds applied to time-overlap media lookup.", kind: "number" }
+  ],
+  map: [
+    { key: "map.tile_source_template", label: "Tile source template", help: "YAML-bound tile source; requires restart.", kind: "text" },
+    { key: "map.tile_attribution", label: "Tile attribution", help: "Attribution shown in the UI.", kind: "text" },
+    { key: "map.tile_cache_dir", label: "Tile cache dir", help: "Must stay outside original storage.", kind: "text" },
+    { key: "map.popup_gallery_limit", label: "Popup gallery limit", help: "Max sample assets in cluster popup.", kind: "number" }
+  ],
+  transcoding: [
+    { key: "transcoding.ffmpeg_path", label: "ffmpeg path", help: "YAML-bound executable path.", kind: "text" },
+    { key: "transcoding.ffprobe_path", label: "ffprobe path", help: "YAML-bound executable path.", kind: "text" },
+    { key: "transcoding.hls_segment_duration", label: "HLS segment duration", help: "Seconds per segment.", kind: "number" },
+    { key: "transcoding.cache_dir", label: "Transcode cache dir", help: "Must stay outside original storage.", kind: "text" },
+    { key: "transcoding.max_concurrent_sessions", label: "Max concurrent sessions", help: "Bound write amplification.", kind: "number" },
+    { key: "transcoding.hardware_preference", label: "Hardware preference", help: "cpu, nvidia, amd, intel.", kind: "text" }
+  ]
+};
+
+function runtimeSpecsForTab(tab: string): RuntimeSettingSpec[] {
+  return runtimeSettingTabs[tab] ?? [];
+}
+
+function pendingSpecsForTab(tab: string): RuntimeSettingSpec[] {
+  return pendingSettingTabs[tab] ?? [];
+}
+
+function pluginSpecs(pluginId: string): RuntimeSettingSpec[] {
+  const common: RuntimeSettingSpec[] = [
+    { key: "enabled", label: "Enabled", help: "Plugin stays loaded when enabled.", kind: "boolean" as const },
+    { key: "notes", label: "Operator notes", help: "Free-form local notes for this plugin.", kind: "text" as const }
+  ];
+  const byPlugin: Record<string, RuntimeSettingSpec[]> = {
+    albums: [
+      { key: "default_sort", label: "Default album sort", help: "name, sort_order, or created_at.", kind: "text" },
+      { key: "show_virtual_warning", label: "Show virtual album warning", help: "Remind users albums never move originals.", kind: "boolean" }
+    ],
+    mapview: [
+      { key: "default_cluster_distance_px", label: "Default cluster distance px", help: "Screen-space clustering distance.", kind: "number" },
+      { key: "popup_gallery_limit", label: "Popup gallery limit", help: "Max assets shown in cluster popup.", kind: "number" }
+    ],
+    gpstracks: [
+      { key: "default_nearby_distance_m", label: "Nearby media distance", help: "Default geotag distance for track media lookup.", kind: "number" },
+      { key: "thumbnail_osm_background", label: "OSM track thumbnail background", help: "Falls back to dark local renderer.", kind: "boolean" }
+    ],
+    transcoding: [
+      { key: "default_preset", label: "Default preset", help: "Preset selected for new video sessions.", kind: "text" },
+      { key: "max_concurrent_sessions", label: "Max concurrent sessions", help: "Bound server-side transcoding load.", kind: "number" }
+    ],
+    "ai-base": [
+      { key: "worker_endpoint", label: "Worker endpoint", help: "Future AI sidecar HTTP endpoint.", kind: "text" },
+      { key: "model_cache_dir", label: "Model cache dir", help: "Must stay outside original storage.", kind: "text" }
+    ],
+    "ai-classification": [
+      { key: "taxonomy", label: "Taxonomy", help: "Category taxonomy namespace.", kind: "text" },
+      { key: "confidence_threshold", label: "Confidence threshold", help: "Minimum score for automatic tags.", kind: "number" }
+    ]
+  };
+  return common.concat(byPlugin[pluginId] ?? []);
+}
+
+function parsedPluginSettings(pluginId: string): Record<string, unknown> {
+  try {
+    return JSON.parse(pluginSettingText.value[pluginId] || "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function pluginSettingValue(pluginId: string, key: string): string {
+  const settings = parsedPluginSettings(pluginId);
+  const value = settings[key];
+  if (value === undefined || value === null) return "";
+  return String(value);
+}
+
+function setPluginSettingValue(pluginId: string, key: string, value: string | number | boolean) {
+  const settings = parsedPluginSettings(pluginId);
+  settings[key] = value;
+  pluginSettingText.value[pluginId] = JSON.stringify(settings, null, 2);
 }
 
 function setRuntimeSetting(key: string, value: string) {
@@ -1234,6 +1850,53 @@ function normalizeMapAsset(value: unknown) {
   };
 }
 
+function assetToMapPopupAsset(asset: AssetDetail["asset"]) {
+  const location = asArray(asset.locations)[0];
+  return {
+    id: asset.id,
+    name: asset.display_name,
+    media_kind: asset.media_kind,
+    preview_url: `/api/v1/media/${asset.id}/${asset.media_kind === "track" ? "track-thumbnail" : "preview"}`,
+    detail_url: `/?page=asset-detail&asset_id=${asset.id}`,
+    original_url: `/api/v1/media/${asset.id}/original`,
+    relative_path: location?.relative_path
+  };
+}
+
+async function mapLoadTrackTimeAssets() {
+  const popup = mapPopup.value;
+  if (!popup?.track_id) return;
+  popup.summary = "Loading media taken during this track...";
+  const result = await api.gpsTrackAssets(popup.track_id, trackOffsetSeconds.value);
+  if (mapPopup.value?.track_id === popup.track_id) {
+    mapPopup.value.assets = asArray(result.assets).map(assetToMapPopupAsset);
+    mapPopup.value.summary = mapPopup.value.assets.length > 0
+      ? `${mapPopup.value.assets.length} photo/video assets overlap this track by time.`
+      : (result.reason ?? "No matching photo/video assets overlap this track by time.");
+  }
+}
+
+async function mapLoadTrackNearbyAssets() {
+  const popup = mapPopup.value;
+  if (!popup?.track_id) return;
+  const distance = popup.nearby_distance_m && popup.nearby_distance_m > 0 ? popup.nearby_distance_m : 100;
+  popup.summary = `Loading geotagged media within ${distance} m of this track...`;
+  const result = await api.gpsTrackNearbyAssets(popup.track_id, distance);
+  if (mapPopup.value?.track_id === popup.track_id) {
+    mapPopup.value.assets = asArray(result.assets).map((item) => {
+      const asset = assetToMapPopupAsset(item.asset);
+      asset.name = `${asset.name} · ${Math.round(item.distance_m)} m`;
+      return asset;
+    });
+    mapPopup.value.summary = `${mapPopup.value.assets.length} geotagged media assets are within ${distance} m.`;
+  }
+}
+
+function showOnlyMapTrack(trackId: string) {
+  mapTrackId.value = trackId;
+  void refreshMap();
+}
+
 function maybeZoomCluster(feature: { get: (name: string) => unknown }) {
   const bbox = (feature.get("bbox") ?? {}) as Record<string, number>;
   const centroid = (feature.get("centroid") ?? {}) as Record<string, number>;
@@ -1271,7 +1934,32 @@ function openMapPopup(feature: { get: (name: string) => unknown }, coordinate?: 
   }
   if (kind === "track") {
     const id = String(feature.get("id") ?? "");
-    if (id) void openTrack(id);
+    if (!id) return;
+    const lonLat = coordinate ? toLonLat(coordinate) : [0, 0];
+    mapPopup.value = {
+      kind: "track",
+      title: String(feature.get("name") ?? id),
+      summary: `${String(feature.get("source_format") ?? "track")} · ${feature.get("point_count") ?? 0} points`,
+      assets: [],
+      track_id: id,
+      track_info: null,
+      track_info_loading: true,
+      nearby_distance_m: 100
+    };
+    if (coordinate && mapOverlay) mapOverlay.setPosition(coordinate);
+    api.gpsTrackPointInfo(id, Number(lonLat[1]), Number(lonLat[0]))
+      .then((info) => {
+        if (mapPopup.value?.track_id === id) {
+          mapPopup.value.track_info = info;
+          mapPopup.value.track_info_loading = false;
+        }
+      })
+      .catch((err) => {
+        if (mapPopup.value?.track_id === id) {
+          mapPopup.value.summary = err instanceof Error ? err.message : String(err);
+          mapPopup.value.track_info_loading = false;
+        }
+      });
     return;
   }
   const asset = mapFeatureAsset(feature);
@@ -1287,6 +1975,13 @@ function openMapPopup(feature: { get: (name: string) => unknown }, coordinate?: 
 
 function handleKeydown(event: KeyboardEvent) {
   if (!galleryOpen.value) return;
+  if (showAdvancedTranscode.value) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      showAdvancedTranscode.value = false;
+    }
+    return;
+  }
   if (event.key === "Escape") {
     closeGallery();
   } else if (event.key === "ArrowRight") {
@@ -1323,13 +2018,20 @@ function ensureOpenLayersMap() {
     tileLayer.getSource()?.on("tileloaderror", () => {
       tileStatus.value = "Base tiles are unavailable right now; vector asset and track layers remain active.";
     });
-    const vectorLayer = new VectorLayer({
-      source: mapSource,
+    mapTrackLayer = new VectorLayer({
+      source: mapTrackSource,
       style: (feature) => {
         const kind = String(feature.get("kind") ?? feature.get("asset_type") ?? "");
         if (kind === "track") {
           return new Style({ stroke: new Stroke({ color: "#1a7f37", width: 3 }) });
         }
+        return undefined;
+      }
+    });
+    mapAssetLayer = new VectorLayer({
+      source: mapAssetSource,
+      style: (feature) => {
+        const kind = String(feature.get("kind") ?? feature.get("asset_type") ?? "");
         if (kind === "cluster") {
           const count = Number(feature.get("count") ?? 0);
           return new Style({
@@ -1357,7 +2059,7 @@ function ensureOpenLayersMap() {
     });
     olMap = new OLMap({
       target: mapElement.value,
-      layers: [tileLayer, vectorLayer],
+      layers: [tileLayer, mapTrackLayer, mapAssetLayer],
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 9 })
     });
     if (mapPopupElement.value) {
@@ -1370,9 +2072,26 @@ function ensureOpenLayersMap() {
       olMap.addOverlay(mapOverlay);
     }
     olMap.on("singleclick", (event) => {
-      olMap?.forEachFeatureAtPixel(event.pixel, (feature) => {
-        openMapPopup(feature, event.coordinate);
-      });
+      if (!olMap) return;
+      let handled = false;
+      olMap.forEachFeatureAtPixel(
+        event.pixel,
+        (feature) => {
+          openMapPopup(feature, event.coordinate);
+          handled = true;
+          return true;
+        },
+        { layerFilter: (layer) => layer === mapAssetLayer }
+      );
+      if (handled) return;
+      olMap.forEachFeatureAtPixel(
+        event.pixel,
+        (feature) => {
+          openMapPopup(feature, event.coordinate);
+          return true;
+        },
+        { layerFilter: (layer) => layer === mapTrackLayer }
+      );
     });
   } else {
     olMap.setTarget(mapElement.value);
@@ -1384,10 +2103,14 @@ function renderOpenLayers() {
   ensureOpenLayersMap();
   if (!olMap || !mapData.value) return;
   const features = new GeoJSON().readFeatures(mapData.value, { featureProjection: "EPSG:3857" });
-  mapSource.clear();
-  mapSource.addFeatures(features);
+  const assetFeatures = features.filter((feature) => String(feature.get("kind") ?? feature.get("asset_type") ?? "") !== "track");
+  const trackFeatures = features.filter((feature) => String(feature.get("kind") ?? feature.get("asset_type") ?? "") === "track");
+  mapAssetSource.clear();
+  mapTrackSource.clear();
+  mapTrackSource.addFeatures(trackFeatures);
+  mapAssetSource.addFeatures(assetFeatures);
   if (features.length > 0 && !mapHasInitialFit) {
-    const extent = mapSource.getExtent();
+    const extent = mapAssetSource.getFeatures().length > 0 ? mapAssetSource.getExtent() : mapTrackSource.getExtent();
     if (extent) {
       olMap.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom: 14, duration: 150 });
       mapHasInitialFit = true;
@@ -1424,12 +2147,18 @@ function formatBytes(value: number): string {
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   await refresh();
+  const assetID = new URLSearchParams(window.location.search).get("asset_id");
+  if (active.value === "Asset Detail" && assetID) {
+    await openAsset(assetID);
+  }
   await nextTick();
   renderOpenLayers();
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeydown);
+  galleryTrackMap?.setTarget(undefined);
+  olMap?.setTarget(undefined);
 });
 </script>
 
@@ -1460,9 +2189,10 @@ onBeforeUnmount(() => {
           type="button"
           :class="{ active: item === active }"
           @click="setActive(item)"
-        >
-          {{ item }}
-        </button>
+	        >
+	          <i :class="['bi', navIcon(item)]" aria-hidden="true"></i>
+	          {{ item }}
+	        </button>
       </nav>
 
       <section class="content">
@@ -1528,10 +2258,15 @@ onBeforeUnmount(() => {
               </select>
             </label>
             <button type="submit">Apply filters</button>
-            <button type="button" @click="explorerQ = ''; explorerMediaKind = ''; explorerHashStatus = ''; explorerExtension = ''; explorerSort = 'name'; refresh()">
-              Clear filters
-            </button>
-          </form>
+	            <button type="button" @click="explorerQ = ''; explorerMediaKind = ''; explorerHashStatus = ''; explorerExtension = ''; explorerSort = 'name'; refresh()">
+	              Clear filters
+	            </button>
+	          </form>
+	          <div v-if="explorerQ.trim()" class="search-summary">
+	            <strong>Universal search:</strong>
+	            <span>{{ visibleExplorerRows.length }} results for "{{ explorerQ.trim() }}"</span>
+	            <span v-for="warning in searchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
+	          </div>
           <div class="month-strip" v-if="monthBuckets.length > 0">
             <button type="button" :class="{ active: monthFilter === '' }" @click="monthFilter = ''">All months</button>
             <button
@@ -1590,10 +2325,23 @@ onBeforeUnmount(() => {
             </tbody>
           </table>
           <div v-else class="tile-grid">
-            <article
-              v-for="(row, index) in visibleExplorerRows"
-              :key="row.asset_id"
-              class="asset-tile"
+	            <article
+	              v-if="!explorerQ.trim()"
+	              v-for="folder in explorer?.folders ?? []"
+	              :key="folder.path"
+	              class="asset-tile folder-tile"
+	            >
+	              <button type="button" class="tile-media folder-media" @click="openFolder(folder.path)">
+	                <i class="bi bi-folder2-open" aria-hidden="true"></i>
+	              </button>
+	              <button type="button" class="tile-title link-button" @click="openFolder(folder.path)">{{ folder.name }}</button>
+	              <small>{{ folder.file_count }} files · {{ formatBytes(folder.total_bytes) }}</small>
+	              <small>{{ folder.path }}</small>
+	            </article>
+	            <article
+	              v-for="(row, index) in visibleExplorerRows"
+	              :key="row.asset_id"
+	              class="asset-tile"
               @dblclick="openGallery(explorerGalleryItems(), index)"
             >
               <label class="tile-check">
@@ -1605,8 +2353,8 @@ onBeforeUnmount(() => {
               </label>
               <button type="button" class="tile-media" @click="openGallery(explorerGalleryItems(), index)">
                 <img
-                  v-if="row.media_kind === 'photo' && !failedPreviewIds.has(row.asset_id)"
-                  :src="`/api/v1/media/${row.asset_id}/preview`"
+                  v-if="(row.media_kind === 'photo' || row.media_kind === 'track') && !failedPreviewIds.has(row.asset_id)"
+                  :src="`/api/v1/media/${row.asset_id}/${row.media_kind === 'track' ? 'track-thumbnail' : 'preview'}`"
                   alt=""
                   loading="lazy"
                   @error="markPreviewFailed(row.asset_id)"
@@ -1614,8 +2362,9 @@ onBeforeUnmount(() => {
                 <span v-else class="media-fallback">{{ row.media_kind }}</span>
               </button>
               <button type="button" class="tile-title link-button" @click="openAsset(row.asset_id)">{{ row.name }}</button>
-              <small>{{ row.media_kind }} · {{ formatBytes(row.size_bytes) }}</small>
-              <small class="tile-badges">
+	              <small>{{ row.media_kind }} · {{ formatBytes(row.size_bytes) }}</small>
+	              <small v-if="searchExplanation(row)" class="search-match">{{ searchExplanation(row) }}</small>
+	              <small class="tile-badges">
                 <span :class="['status-badge', row.hash_status === 'hashed' ? 'ok' : 'warn']">{{ row.hash_status }}</span>
                 <span v-if="shortHash(row.sha512_hex)" class="status-badge">{{ shortHash(row.sha512_hex) }}</span>
               </small>
@@ -1869,7 +2618,7 @@ onBeforeUnmount(() => {
           <div v-if="assetDetail" class="media-panel">
             <img
               v-if="assetDetail.asset.media_kind === 'photo'"
-              :src="assetDetail.preview_url || assetDetail.original_url"
+              :src="assetDetail.original_url || assetDetail.preview_url"
               alt=""
               @error="markPreviewFailed(assetDetail.asset.id)"
             />
@@ -1905,9 +2654,75 @@ onBeforeUnmount(() => {
                   "Original/direct streaming is active."
                 }}
               </p>
-              <button v-if="transcodeSession?.asset_id === assetDetail.asset.id" type="button" @click="stopActiveTranscode">
-                Stop transcode session
-              </button>
+	              <button v-if="transcodeSession?.asset_id === assetDetail.asset.id" type="button" @click="stopActiveTranscode">
+	                Stop transcode session
+	              </button>
+	              <button type="button" class="icon-button" @click="showAdvancedTranscode = !showAdvancedTranscode">
+	                <i class="bi bi-gear" aria-hidden="true"></i>
+	                {{ showAdvancedTranscode ? "Hide advanced" : "Advanced" }}
+	              </button>
+	              <div v-if="showAdvancedTranscode" class="transcode-advanced" role="dialog" aria-label="Advanced transcode settings" tabindex="-1" @keydown.stop>
+	                <h3>Custom Transcode Preset</h3>
+	                <label>Preset name <input v-model="customPresetName" type="text" /></label>
+	                <label>
+	                  Hardware
+	                  <select v-model="customPresetHardware">
+	                    <option
+	                      v-for="hardware in groupedTranscodeHardware"
+	                      :key="hardware.id"
+	                      :disabled="!hardware.available"
+	                      :value="hardware.id"
+	                    >
+	                      {{ hardware.label }}{{ hardware.available ? "" : ` — ${hardware.reason}` }}
+	                    </option>
+	                  </select>
+	                </label>
+	                <label>
+	                  Codec
+	                  <select v-model="customPresetCodec">
+	                    <option value="h264">H.264</option>
+	                    <option value="h265">H.265 / HEVC</option>
+	                    <option value="av1">AV1</option>
+	                    <option value="custom">Custom encoder</option>
+	                  </select>
+	                </label>
+	                <label>
+	                  Encoder
+	                  <select v-model="customPresetEncoder">
+	                    <option value="">Auto</option>
+	                    <option v-for="encoder in availableEncodersForCustom" :key="encoder.name" :value="encoder.name">
+	                      {{ encoder.name }}{{ encoder.description ? ` · ${encoder.description}` : "" }}
+	                    </option>
+	                  </select>
+	                </label>
+	                <label>
+	                  Mode
+	                  <select v-model="customPresetMode">
+	                    <option value="quality">Quality / CRF</option>
+	                    <option value="quantizer">Quantizer / CQ</option>
+	                    <option value="bitrate">Bitrate</option>
+	                  </select>
+	                </label>
+	                <label>Value <input v-model="customPresetParameter" type="text" placeholder="28 or 1500k" /></label>
+	                <div class="actions">
+	                  <button type="button" @click="applyCustomTranscodePreset(assetDetail.asset.id)">Apply</button>
+	                  <button type="button" @click="testCustomTranscodePreset(assetDetail.asset.id)">Test current hardware configuration</button>
+	                  <button type="button" @click="saveCustomTranscodePreset">Save preset</button>
+	                  <button
+	                    v-if="lastVideoPreset !== 'original' && transcodePresets.some((preset) => preset.id === lastVideoPreset && !preset.built_in)"
+	                    type="button"
+	                    @click="removeTranscodePreset(lastVideoPreset)"
+	                  >
+	                    Remove selected custom preset
+	                  </button>
+	                </div>
+	                <pre v-if="transcodeValidation" class="logbox">{{ JSON.stringify(transcodeValidation, null, 2) }}</pre>
+	                <p class="muted">HLS output is written only into the Cartolensia transcode cache and cleaned through session controls.</p>
+	              </div>
+	            </div>
+            <div v-else-if="assetDetail.asset.media_kind === 'track'" class="track-detail-preview">
+              <img :src="`/api/v1/media/${assetDetail.asset.id}/track-thumbnail?width=720&height=360`" alt="" />
+              <button type="button" @click="openGallery([assetToGallery(assetDetail.asset)], 0)">Open interactive track preview</button>
             </div>
             <div v-else class="media-fallback">Unsupported media preview</div>
           </div>
@@ -2128,22 +2943,66 @@ onBeforeUnmount(() => {
             <button type="button" @click="parseTrackFilesForCurrentPrefix">Parse track files for current prefix</button>
             <small>Current prefix: {{ adapterRelativePrefixes().join(", ") || "not set" }}</small>
           </p>
-          <div v-if="selectedTrack" class="track-detail">
+          <div v-if="selectedTrack" class="track-detail track-detail-page">
+            <header class="track-detail-header">
+              <div>
+                <h3>{{ selectedTrack.summary.name }}</h3>
+                <p class="muted">
+                  {{ selectedTrack.summary.source_format ?? "track" }}
+                  · {{ selectedTrack.summary.start_time ?? "no start time" }}
+                  <span v-if="selectedTrack.summary.end_time">→ {{ selectedTrack.summary.end_time }}</span>
+                </p>
+              </div>
+              <div class="actions">
+                <button type="button" @click="openAsset(selectedTrack.summary.track_asset_id)">Open source asset</button>
+                <button type="button" @click="setActive('Map')">Show on map</button>
+              </div>
+            </header>
+            <div class="track-detail-grid">
+              <div ref="selectedTrackMapElement" class="track-detail-map"></div>
+              <div class="track-profiles">
+                <article class="profile-card">
+                  <header>
+                    <strong>Altitude</strong>
+                    <span>{{ trackProfileRange(selectedTrackAltitude) }}</span>
+                  </header>
+                  <svg viewBox="0 0 520 140" role="img" aria-label="Altitude profile">
+                    <path v-if="trackProfilePath(selectedTrackAltitude)" :d="trackProfilePath(selectedTrackAltitude)" />
+                    <text v-else x="20" y="76">No altitude values</text>
+                  </svg>
+                </article>
+                <article class="profile-card">
+                  <header>
+                    <strong>Speed</strong>
+                    <span>{{ trackProfileRange(selectedTrackSpeed) }}</span>
+                  </header>
+                  <svg viewBox="0 0 520 140" role="img" aria-label="Speed profile">
+                    <path v-if="trackProfilePath(selectedTrackSpeed)" :d="trackProfilePath(selectedTrackSpeed)" />
+                    <text v-else x="20" y="76">No speed/timestamp values</text>
+                  </svg>
+                </article>
+              </div>
+            </div>
             <div class="metrics">
               <article><strong>{{ selectedTrack.summary.point_count }}</strong><span>Points</span></article>
-              <article><strong>{{ selectedTrack.summary.distance_m ? `${(selectedTrack.summary.distance_m / 1000).toFixed(2)} km` : "" }}</strong><span>Distance</span></article>
-              <article><strong>{{ selectedTrack.summary.duration_seconds ? `${Math.round(selectedTrack.summary.duration_seconds / 60)} min` : "" }}</strong><span>Duration</span></article>
+              <article><strong>{{ selectedTrack.summary.distance_m ? `${(selectedTrack.summary.distance_m / 1000).toFixed(2)} km` : "n/a" }}</strong><span>Distance</span></article>
+              <article><strong>{{ selectedTrack.summary.duration_seconds ? `${Math.round(selectedTrack.summary.duration_seconds / 60)} min` : "No timestamps" }}</strong><span>Duration</span></article>
+              <article><strong>{{ selectedTrack.summary.elevation_min_m !== undefined ? `${selectedTrack.summary.elevation_min_m.toFixed(1)}-${selectedTrack.summary.elevation_max_m?.toFixed(1) ?? "?"} m` : "n/a" }}</strong><span>Elevation</span></article>
+              <article><strong>{{ selectedTrack.summary.min_lat?.toFixed(5) ?? "n/a" }}</strong><span>Min lat</span></article>
+              <article><strong>{{ selectedTrack.summary.max_lon?.toFixed(5) ?? "n/a" }}</strong><span>Max lon</span></article>
             </div>
             <div class="actions">
               <label class="inline-label">
                 Offset seconds
                 <input v-model.number="trackOffsetSeconds" type="number" />
               </label>
-              <button type="button" @click="findTrackAssets(selectedTrack.summary.track_asset_id)">Find media</button>
+              <button type="button" @click="findTrackAssets(selectedTrack.summary.track_asset_id)">Show media during track</button>
+              <button type="button" @click="findNearbyTrackAssets(selectedTrack.summary.track_asset_id)">Show geotagged media within 100 m</button>
               <button type="button" @click="snapTrackMedia(selectedTrack.summary.track_asset_id)">Snap media</button>
-              <button type="button" @click="setActive('Map')">Show on map</button>
             </div>
-            <p v-if="trackAssets.length === 0" class="empty-state">No media results loaded for this track yet.</p>
+            <p v-if="trackAssets.length === 0" class="empty-state">
+              {{ trackAssetsReason || "No media results loaded for this track yet." }}
+            </p>
             <table v-if="trackAssets.length > 0 && trackMediaViewMode === 'table'">
               <thead><tr><th>Asset</th><th>Kind</th><th>Taken</th></tr></thead>
               <tbody>
@@ -2257,6 +3116,46 @@ onBeforeUnmount(() => {
             <p v-if="mapPopup?.kind === 'cluster' && mapPopup.count && mapPopup.assets.length < mapPopup.count" class="muted">
               Zooming in tries to split this cluster. If points share identical coordinates, use the gallery below.
             </p>
+            <div v-if="mapPopup?.kind === 'track'" class="track-popup-details">
+              <p v-if="mapPopup.track_info_loading" class="muted">Loading nearest track point...</p>
+              <template v-if="mapPopup.track_info">
+                <p>
+                  Clicked {{ mapPopup.track_info.clicked.lat.toFixed(6) }},
+                  {{ mapPopup.track_info.clicked.lon.toFixed(6) }}
+                </p>
+                <p>
+                  Nearest {{ mapPopup.track_info.nearest.lat.toFixed(6) }},
+                  {{ mapPopup.track_info.nearest.lon.toFixed(6) }} ·
+                  {{ Math.round(mapPopup.track_info.distance_m) }} m from click
+                </p>
+	                <p v-if="mapPopup.track_info.timestamp">
+	                  Time {{ mapPopup.track_info.timestamp }}
+	                  <span v-if="typeof mapPopup.track_info.relative_time_seconds === 'number'">
+	                    · +{{ Math.round(mapPopup.track_info.relative_time_seconds) }} s
+	                  </span>
+	                </p>
+	                <p>
+	                  <span v-if="typeof mapPopup.track_info.speed_mps === 'number'">Speed {{ mapPopup.track_info.speed_mps.toFixed(2) }} m/s</span>
+	                  <span v-if="typeof mapPopup.track_info.elevation_m === 'number'"> · Elevation {{ Math.round(mapPopup.track_info.elevation_m) }} m</span>
+	                </p>
+              </template>
+              <div class="actions">
+                <button type="button" @click="mapPopup?.track_id && openTrack(mapPopup.track_id)">Open in Track Manager</button>
+                <button type="button" @click="mapLoadTrackTimeAssets">List media during track</button>
+                <label class="inline-field">
+                  Within meters
+                  <input
+                    :value="mapPopup.nearby_distance_m ?? 100"
+                    type="number"
+                    min="1"
+                    max="5000"
+                    @input="mapPopup && (mapPopup.nearby_distance_m = Number(($event.target as HTMLInputElement).value))"
+                  />
+                </label>
+                <button type="button" @click="mapLoadTrackNearbyAssets">List nearby media</button>
+                <button type="button" @click="mapPopup?.track_id && showOnlyMapTrack(mapPopup.track_id)">Show only this track</button>
+              </div>
+            </div>
             <div class="mini-gallery">
               <article v-for="asset in mapPopup?.assets ?? []" :key="asset.id" class="mini-card">
                 <img
@@ -2311,35 +3210,52 @@ onBeforeUnmount(() => {
           </table>
         </section>
 
-        <section v-else-if="active === 'Base AI'" class="panel">
-          <header class="panel-head">
-            <h2>Base AI</h2>
-            <span>Inference is disabled until an AI sidecar/vector store is configured.</span>
-          </header>
-          <div class="metrics">
-            <article><strong>{{ aiStatus?.accelerators ? "detected" : "basic" }}</strong><span>Accelerators</span></article>
-            <article><strong>{{ vectorStatus?.backend ?? "not configured" }}</strong><span>Vector store</span></article>
-            <article><strong>{{ vectorStatus?.pgvector_available ? "yes" : "optional" }}</strong><span>pgvector</span></article>
-            <article><strong>disabled</strong><span>Model downloads</span></article>
-          </div>
-          <div class="settings-grid">
-            <article class="settings-form">
-              <h3>Planned Workers</h3>
-              <p>ai-cpu · ai-nvidia · ai-rocm · ai-intel</p>
-              <p class="muted">Workers are future sidecars. Cartolensia will not download models or run inference in this mode.</p>
-            </article>
-            <article class="settings-form">
-              <h3>Modalities</h3>
-              <p>image · video_frame · audio_segment · text_query</p>
-              <button disabled type="button">Configure vector store</button>
-              <button disabled type="button">Run embedding job</button>
-            </article>
-          </div>
-          <details>
-            <summary>Raw AI status</summary>
-            <pre class="geojson">{{ JSON.stringify({ aiStatus, vectorStatus }, null, 2) }}</pre>
-          </details>
-        </section>
+	        <section v-else-if="active === 'Base AI'" class="panel">
+	          <header class="panel-head">
+	            <h2>Base AI</h2>
+	            <span>Optional sidecar workers; no model downloads run automatically.</span>
+	          </header>
+	          <div class="metrics">
+	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.cpu ? "yes" : "unknown" }}</strong><span>CPU</span></article>
+	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.nvidia_smi ? "yes" : "no" }}</strong><span>NVIDIA</span></article>
+	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.dev_dri ? "yes" : "no" }}</strong><span>/dev/dri</span></article>
+	            <article><strong>{{ vectorStatus?.backend ?? "none" }}</strong><span>Vector store</span></article>
+	          </div>
+	          <div class="settings-grid">
+	            <article class="settings-form settings-wide">
+	              <h3>Worker Profiles</h3>
+	              <div class="cards">
+	                <article v-for="worker in aiWorkerRows" :key="String((worker as Record<string, unknown>).id)" class="card">
+	                  <strong>{{ (worker as Record<string, unknown>).id }}</strong>
+	                  <span>{{ (worker as Record<string, unknown>).profile }} · {{ (worker as Record<string, unknown>).status }}</span>
+	                  <small>{{ (worker as Record<string, unknown>).available === false ? "hardware not detected" : "profile available as optional sidecar" }}</small>
+	                </article>
+	              </div>
+	              <p class="muted">Compose profiles are ai-cpu, ai-nvidia, ai-rocm, and ai-intel. Model cache defaults to .cartolensia/models, never original storage.</p>
+	            </article>
+	            <article class="settings-form">
+	              <h3>Modalities And Jobs</h3>
+	              <p>image · video_frame · audio_segment · text_query</p>
+	              <div class="actions">
+	                <button type="button" @click="requestAIJob('classify')">Classify selected/current scope</button>
+	                <button type="button" @click="requestAIJob('faces')">Detect faces</button>
+	                <button type="button" @click="requestAIJob('describe')">Describe images</button>
+	              </div>
+	              <p class="muted">{{ aiMessage || "Requests return a clear not-configured response until a sidecar worker is configured." }}</p>
+	            </article>
+	            <article class="settings-form">
+	              <h3>Vector Store</h3>
+	              <p>Backend: {{ vectorStatus?.backend ?? "none" }}</p>
+	              <p>pgvector: {{ vectorStatus?.pgvector ? "available" : "optional/not enabled" }}</p>
+	              <button disabled type="button">Configure vector store</button>
+	              <button disabled type="button">Run embedding job</button>
+	            </article>
+	          </div>
+	          <details>
+	            <summary>Raw AI status</summary>
+	            <pre class="geojson">{{ JSON.stringify({ aiStatus, aiWorkers, vectorStatus }, null, 2) }}</pre>
+	          </details>
+	        </section>
 
         <section v-else-if="active === 'Settings'" class="panel">
           <header class="panel-head">
@@ -2374,26 +3290,77 @@ onBeforeUnmount(() => {
             </article>
           </div>
 
-          <div v-else-if="settingsTab === 'indexing' || settingsTab === 'metadata' || settingsTab === 'preview' || settingsTab === 'map' || settingsTab === 'transcoding'" class="settings-grid">
-            <article class="settings-form settings-wide">
+          <div v-else-if="['indexing', 'metadata', 'preview', 'map', 'gps', 'transcoding'].includes(settingsTab)" class="settings-grid">
+            <article v-if="runtimeSpecsForTab(settingsTab).length > 0" class="settings-form settings-wide">
               <h3>Runtime Settings</h3>
-              <p class="muted">These preferences are accepted by the runtime settings endpoint. Existing long-running jobs keep their current payloads.</p>
-              <table>
-                <thead><tr><th>Key</th><th>Value</th></tr></thead>
-                <tbody>
-                  <tr v-for="(value, key) in settings?.runtime_settings ?? {}" :key="key">
-                    <td>{{ key }}</td>
-                    <td>
-                      <select v-if="typeof value === 'boolean'" :value="String(value)" @change="setRuntimeSetting(String(key), ($event.target as HTMLSelectElement).value)">
-                        <option value="true">true</option>
-                        <option value="false">false</option>
-                      </select>
-                      <input v-else :value="String(value)" type="text" @input="setRuntimeSetting(String(key), ($event.target as HTMLInputElement).value)" />
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <p class="muted">Runtime values apply immediately where supported. Existing long-running jobs keep their current payloads.</p>
+              <div class="form-stack">
+                <label v-for="spec in runtimeSpecsForTab(settingsTab)" :key="spec.key">
+                  {{ spec.label }}
+                  <select
+                    v-if="spec.kind === 'boolean'"
+                    :value="String(settings?.runtime_settings?.[spec.key] ?? false)"
+                    @change="setRuntimeSetting(spec.key, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                  <input
+                    v-else
+                    :type="spec.kind === 'number' ? 'number' : 'text'"
+                    :value="String(settings?.runtime_settings?.[spec.key] ?? '')"
+                    @input="setRuntimeSetting(spec.key, ($event.target as HTMLInputElement).value)"
+                  />
+                  <small>{{ spec.help }}</small>
+                </label>
+              </div>
               <button type="button" @click="saveRuntimeSettings">Save runtime settings</button>
+            </article>
+            <article v-if="pendingSpecsForTab(settingsTab).length > 0" class="settings-form settings-wide">
+              <h3>Restart-Required Settings</h3>
+              <p class="muted">These are saved as pending YAML and take effect after restart.</p>
+              <div class="form-stack">
+                <label v-for="spec in pendingSpecsForTab(settingsTab)" :key="spec.key">
+                  {{ spec.label }}
+                  <select
+                    v-if="spec.kind === 'boolean'"
+                    :value="pendingValue(spec.key, 'false')"
+                    @change="setPendingValue(spec.key, ($event.target as HTMLSelectElement).value === 'true')"
+                  >
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                  <input
+                    v-else
+                    :type="spec.kind === 'number' ? 'number' : 'text'"
+                    :value="pendingValue(spec.key)"
+                    @input="setPendingValue(spec.key, spec.kind === 'number' ? Number(($event.target as HTMLInputElement).value) : ($event.target as HTMLInputElement).value)"
+                  />
+                  <small>{{ spec.help }}</small>
+                </label>
+              </div>
+              <button type="button" @click="savePendingSettings">Save pending YAML</button>
+              <a href="/api/v1/settings/pending/download" target="_blank" rel="noreferrer">Download pending YAML</a>
+            </article>
+            <article v-if="settingsTab === 'gps'" class="settings-form">
+              <h3>Current GPS/KML State</h3>
+              <p>{{ tracks.length }} parsed tracks · {{ stats?.tracks ?? 0 }} track-like assets</p>
+              <p class="muted">Track thumbnails are generated into the Cartolensia cache. Originals stay immutable.</p>
+            </article>
+            <article v-if="settingsTab === 'map'" class="settings-form">
+              <h3>Tile And Cluster Status</h3>
+              <p>{{ mapStatus?.base_tiles ?? 'vector-only' }} · {{ mapStatus?.clustering ?? 'none' }}</p>
+              <p>{{ tileSources[0]?.policy ?? 'No tile source configured.' }}</p>
+            </article>
+            <article v-if="settingsTab === 'preview'" class="settings-form">
+              <h3>Preview Cache</h3>
+              <p>{{ previewCacheStats?.entries ?? 0 }} entries · {{ formatBytes(previewCacheStats?.bytes ?? 0) }}</p>
+              <button type="button" @click="cleanupPreviews(true)">Preview cleanup report</button>
+            </article>
+            <article v-if="settingsTab === 'transcoding'" class="settings-form">
+              <h3>Detected Encoders</h3>
+              <p>ffmpeg {{ transcodingCapabilities?.ffmpeg.available ? 'available' : 'missing' }}</p>
+              <p>{{ transcodingCapabilities?.encoders.length ?? 0 }} encoders detected.</p>
             </article>
           </div>
 
@@ -2423,7 +3390,28 @@ onBeforeUnmount(() => {
 
           <div v-else-if="settingsTab === 'storage'" class="settings-grid">
             <article class="settings-form">
-              <h3>Primary Storage Draft</h3>
+              <h3>Add Runtime Storage</h3>
+              <p class="muted">Adds a filesystem adapter to the active process. Only non-destructive modes are enabled.</p>
+              <label>Name <input v-model="storageDraft.name" type="text" placeholder="synthetic_fixture" /></label>
+              <label>Kind <input v-model="storageDraft.kind" type="text" /></label>
+              <label>Root <input v-model="storageDraft.root" type="text" placeholder="/tmp/cartolensia_synthetic_media" /></label>
+              <label>Mode
+                <select v-model="storageDraft.mode">
+                  <option value="strict_read_only">strict_read_only</option>
+                  <option value="read_only">read_only</option>
+                  <option value="journaled_deferred" disabled>journaled_deferred (disabled)</option>
+                  <option value="read_write" disabled>read_write (disabled)</option>
+                </select>
+              </label>
+              <div class="actions">
+                <button type="button" @click="validateStorageDraft">Validate</button>
+                <button type="button" @click="addRuntimeStorage">Add runtime storage</button>
+              </div>
+              <p class="muted">Roots under /mnt/Models/rclone are locked to strict_read_only.</p>
+            </article>
+            <article class="settings-form">
+              <h3>Pending Restart Storage</h3>
+              <p class="muted">Use this for YAML-bound storage changes that should survive a restart.</p>
               <label>Name <input :value="pendingStorageField(0, 'name')" type="text" @input="setPendingStorageField(0, 'name', ($event.target as HTMLInputElement).value)" /></label>
               <label>Root <input :value="pendingStorageField(0, 'root')" type="text" @input="setPendingStorageField(0, 'root', ($event.target as HTMLInputElement).value)" /></label>
               <label>Mode
@@ -2432,18 +3420,19 @@ onBeforeUnmount(() => {
                   <option value="read_only">read_only</option>
                 </select>
               </label>
-              <p class="muted">Active storage roots are not changed until restart. Real-peek must remain strict_read_only.</p>
               <button type="button" @click="savePendingSettings">Save pending YAML</button>
             </article>
             <article class="settings-form settings-wide">
               <h3>Configured Storages</h3>
+              <div v-if="storageMessage" class="alert"><pre>{{ storageMessage }}</pre></div>
               <table>
-                <thead><tr><th>Name</th><th>Root</th><th>Mode</th></tr></thead>
+                <thead><tr><th>Name</th><th>Root</th><th>Mode</th><th>Action</th></tr></thead>
                 <tbody>
                   <tr v-for="storage in storages" :key="storage.name">
                     <td>{{ storage.name }}</td>
                     <td>{{ storage.root }}</td>
                     <td>{{ storage.mode }}</td>
+                    <td><button type="button" @click="validateExistingStorage(storage.name)">Validate</button></td>
                   </tr>
                 </tbody>
               </table>
@@ -2507,15 +3496,56 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="settingsTab === 'plugins'" class="settings-grid">
-            <article v-for="plugin in plugins" :key="plugin.id" class="settings-form">
-              <h3>{{ plugin.name }}</h3>
-              <p>{{ plugin.id }} · {{ plugin.status }} · {{ plugin.runtime }}</p>
-              <textarea
-                :value="pluginSettingText[plugin.id] ?? '{}'"
-                rows="6"
-                @input="pluginSettingText[plugin.id] = ($event.target as HTMLTextAreaElement).value"
-              ></textarea>
-              <button type="button" @click="savePluginSettings(plugin.id)">Save plugin settings</button>
+            <article class="settings-form settings-wide">
+              <h3>Plugin Settings</h3>
+              <div class="settings-tabs secondary-tabs">
+                <button
+                  v-for="plugin in plugins"
+                  :key="plugin.id"
+                  type="button"
+                  :class="{ active: selectedPluginSettingsId === plugin.id }"
+                  @click="selectedPluginSettingsId = plugin.id"
+                >
+                  {{ plugin.name }}
+                </button>
+              </div>
+              <div class="actions">
+                <button type="button" :class="{ active: pluginSettingsMode === 'ui' }" @click="pluginSettingsMode = 'ui'">UI config</button>
+                <button type="button" :class="{ active: pluginSettingsMode === 'yaml' }" @click="pluginSettingsMode = 'yaml'">YAML/JSON config</button>
+              </div>
+              <template v-if="selectedPluginSettings">
+                <p>{{ selectedPluginSettings.id }} · {{ selectedPluginSettings.status }} · {{ selectedPluginSettings.runtime }}</p>
+                <div v-if="pluginSettingsMode === 'ui'" class="form-stack">
+                  <label v-for="spec in pluginSpecs(selectedPluginSettings.id)" :key="spec.key">
+                    {{ spec.label }}
+                    <select
+                      v-if="spec.kind === 'boolean'"
+                      :value="pluginSettingValue(selectedPluginSettings.id, spec.key) || 'false'"
+                      @change="setPluginSettingValue(selectedPluginSettings.id, spec.key, ($event.target as HTMLSelectElement).value === 'true')"
+                    >
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                    <input
+                      v-else
+                      :type="spec.kind === 'number' ? 'number' : 'text'"
+                      :value="pluginSettingValue(selectedPluginSettings.id, spec.key)"
+                      @input="setPluginSettingValue(selectedPluginSettings.id, spec.key, spec.kind === 'number' ? Number(($event.target as HTMLInputElement).value) : ($event.target as HTMLInputElement).value)"
+                    />
+                    <small>{{ spec.help }}</small>
+                  </label>
+                </div>
+                <textarea
+                  v-else
+                  :value="pluginSettingText[selectedPluginSettings.id] ?? '{}'"
+                  rows="12"
+                  @input="pluginSettingText[selectedPluginSettings.id] = ($event.target as HTMLTextAreaElement).value"
+                ></textarea>
+                <div class="actions">
+                  <button type="button" @click="savePluginSettings(selectedPluginSettings.id)">Save plugin settings</button>
+                  <button type="button" @click="pluginSettingText[selectedPluginSettings.id] = '{}'">Reset to defaults</button>
+                </div>
+              </template>
               <p class="muted">Settings persist through the plugin settings endpoint; plugins opt into using them.</p>
             </article>
           </div>
@@ -2574,6 +3604,10 @@ onBeforeUnmount(() => {
           :alt="galleryCurrent.name"
           @wheel.prevent="wheelGallery"
           @dblclick="toggleGalleryZoom"
+          @pointerdown.prevent="galleryPointerDown"
+          @pointermove.prevent="galleryPointerMove"
+          @pointerup="galleryPointerUp"
+          @pointercancel="galleryPointerUp"
         />
         <video
           v-else-if="galleryCurrent.media_kind === 'video'"
@@ -2583,6 +3617,13 @@ onBeforeUnmount(() => {
           controls
           preload="metadata"
         ></video>
+        <div
+          v-else-if="galleryCurrent.media_kind === 'track'"
+          ref="galleryTrackElement"
+          class="gallery-track-map"
+          role="img"
+          aria-label="Interactive track preview"
+        ></div>
         <div v-else class="gallery-fallback">
           <strong>{{ galleryCurrent.media_kind }}</strong>
           <span>Inline preview is unavailable for this asset type.</span>
@@ -2610,14 +3651,71 @@ onBeforeUnmount(() => {
               </select>
             </label>
             <span>{{ transcodeMessage || "Original streaming is active; safe transcode sessions use the Cartolensia cache only." }}</span>
-            <button v-if="transcodeSession?.asset_id === galleryCurrent.id" type="button" @click="stopActiveTranscode">
-              Stop session
-            </button>
-          </div>
+	            <button v-if="transcodeSession?.asset_id === galleryCurrent.id" type="button" @click="stopActiveTranscode">
+	              Stop session
+	            </button>
+	            <button type="button" class="icon-button" @click="showAdvancedTranscode = !showAdvancedTranscode">
+	              <i class="bi bi-gear" aria-hidden="true"></i>
+	              Advanced
+	            </button>
+	          </div>
+	          <div v-if="galleryCurrent.media_kind === 'video' && showAdvancedTranscode" class="transcode-advanced" role="dialog" aria-label="Advanced transcode settings" tabindex="-1" @keydown.stop>
+	            <label>Preset name <input v-model="customPresetName" type="text" /></label>
+	            <label>
+	              Hardware
+	              <select v-model="customPresetHardware">
+	                <option v-for="hardware in groupedTranscodeHardware" :key="hardware.id" :disabled="!hardware.available" :value="hardware.id">
+	                  {{ hardware.label }}{{ hardware.available ? "" : ` — ${hardware.reason}` }}
+	                </option>
+	              </select>
+	            </label>
+	            <label>
+	              Codec
+	              <select v-model="customPresetCodec">
+	                <option value="h264">H.264</option>
+	                <option value="h265">H.265 / HEVC</option>
+	                <option value="av1">AV1</option>
+	                <option value="custom">Custom encoder</option>
+	              </select>
+	            </label>
+	            <label>
+	              Encoder
+	              <select v-model="customPresetEncoder">
+	                <option value="">Auto</option>
+	                <option v-for="encoder in availableEncodersForCustom" :key="encoder.name" :value="encoder.name">
+	                  {{ encoder.name }}
+	                </option>
+	              </select>
+	            </label>
+	            <label>
+	              Mode
+	              <select v-model="customPresetMode">
+	                <option value="quality">Quality / CRF</option>
+	                <option value="quantizer">Quantizer / CQ</option>
+	                <option value="bitrate">Bitrate</option>
+	              </select>
+	            </label>
+	            <label>Value <input v-model="customPresetParameter" type="text" placeholder="28 or 1500k" /></label>
+	            <div class="actions">
+	              <button type="button" @click="applyCustomTranscodePreset(galleryCurrent.id)">Apply</button>
+	              <button type="button" @click="testCustomTranscodePreset(galleryCurrent.id)">Test current hardware configuration</button>
+	              <button type="button" @click="saveCustomTranscodePreset">Save preset</button>
+	              <button
+	                v-if="lastVideoPreset !== 'original' && transcodePresets.some((preset) => preset.id === lastVideoPreset && !preset.built_in)"
+	                type="button"
+	                @click="removeTranscodePreset(lastVideoPreset)"
+	              >
+	                Remove selected custom preset
+	              </button>
+	            </div>
+	            <pre v-if="transcodeValidation" class="logbox">{{ JSON.stringify(transcodeValidation, null, 2) }}</pre>
+	          </div>
           <div class="actions">
             <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="toggleGalleryZoom">
               {{ galleryZoomMode === "fit" ? "100% zoom" : "Fit to screen" }}
             </button>
+            <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="resetGalleryZoom">Fit</button>
+            <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="galleryZoomMode = 'actual'; galleryScale = 1; galleryPanX = 0; galleryPanY = 0">100%</button>
             <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="resetGalleryZoom">Reset zoom</button>
             <span v-if="galleryCurrent.media_kind === 'photo'">{{ Math.round(galleryScale * 100) }}%</span>
             <a :href="galleryCurrent.original_url" target="_blank" rel="noreferrer">Open Original</a>

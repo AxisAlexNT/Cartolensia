@@ -29,9 +29,11 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
 	srv := New(Dependencies{
 		Version:      "test",
-		Config:       config.Defaults(),
+		Config:       cfg,
 		Plugins:      plugins.BuiltIns(),
 		Registry:     registry,
 		Store:        store,
@@ -136,6 +138,36 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		t.Fatalf("track detail status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/gps/tracks/"+tracks[0].TrackAssetID+"/point-info?lat=40.001&lon=44.001", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"distance_m"`) {
+		t.Fatalf("track point info status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/gps/tracks/"+tracks[0].TrackAssetID+"/profile?metric=altitude&max_points=100", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"metric":"altitude"`) || !strings.Contains(rec.Body.String(), `"series"`) {
+		t.Fatalf("track profile status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/gps/tracks/"+tracks[0].TrackAssetID+"/nearby-assets?distance_m=1000", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"assets"`) {
+		t.Fatalf("track nearby assets status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/media/"+tracks[0].TrackAssetID+"/track-preview", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"FeatureCollection"`) {
+		t.Fatalf("track preview status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/media/"+tracks[0].TrackAssetID+"/track-thumbnail?width=240&height=120", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("track thumbnail status %d content-type %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=photo_001", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"explanation"`) || !strings.Contains(rec.Body.String(), "photo_001") {
+		t.Fatalf("search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/map?bbox=43.9,39.9,44.1,40.1&zoom=10", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"FeatureCollection"`) {
 		t.Fatalf("map status %d body %s", rec.Code, rec.Body.String())
@@ -159,6 +191,11 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/gps/tracks/"+tracks[0].TrackAssetID+"/assets?exclude_track_assets=true", nil))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"media_kind":"track"`) {
+		t.Fatalf("track media status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sync/candidates?asset_id="+videoID, nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tracks[0].TrackAssetID) {
 		t.Fatalf("sync candidates status %d body %s", rec.Code, rec.Body.String())
@@ -168,6 +205,21 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/sync/links", body))
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"time_offset_ms":1200`) {
 		t.Fatalf("sync link status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/ai/workers", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ai-cpu"`) {
+		t.Fatalf("ai workers status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ai/jobs/classify", strings.NewReader(`{"scope":"selected"}`)))
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"not_configured"`) {
+		t.Fatalf("ai classify status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/transcoding/presets", strings.NewReader(`{"id":"original","name":"bad","hardware":"cpu","codec":"h264","ffmpeg_encoder":"libx264","mode":"quality","parameter_value":"28","container":"hls"}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "built-in") {
+		t.Fatalf("preset collision status %d body %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -418,6 +470,21 @@ func TestSettingsAndDBExportStayInCache(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/settings/runtime", strings.NewReader(`{"indexing.default_max_files":25,"unknown":"ignored"}`)))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "indexing.default_max_files") || strings.Contains(rec.Body.String(), "unknown") {
 		t.Fatalf("runtime settings status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/storages", strings.NewReader(`{"name":"synthetic","kind":"fs","root":"`+filepath.ToSlash(t.TempDir())+`","mode":"strict_read_only"}`)))
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"synthetic"`) {
+		t.Fatalf("storage add status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/storages/synthetic/validate", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"valid":true`) {
+		t.Fatalf("storage validate status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/storages", strings.NewReader(`{"name":"realbad","kind":"fs","root":"/mnt/Models/rclone","mode":"read_only"}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "strict_read_only") {
+		t.Fatalf("real archive mode guard status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/db/export", strings.NewReader(`{}`)))

@@ -89,7 +89,11 @@ The guarded real-peek scripts use a temporary PostgreSQL Compose project, repo-l
 
 ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery or core startup. Stream options expose direct original streaming by default. If ffmpeg is available, cache-scoped HLS transcode sessions can be started manually; generated HLS files stay under the configured Cartolensia cache directory and must never be written into original storage.
 
+Transcoding preset records are metadata only. Built-in presets cannot be deleted, custom presets are validated before use, and session output is scoped to the configured transcode cache. The browser uses locally bundled `hls.js` where native HLS playback is unavailable; it does not fetch player code from a CDN.
+
 The OpenStreetMap tile proxy is on-demand only. It caches tiles actively viewed by the browser under the Cartolensia cache directory, provides attribution metadata, and does not implement public-OSM region prefetching.
+
+Track thumbnails/previews for GPX/KML/KMZ/GPZ assets are generated under the Cartolensia preview/cache root. They are never written beside original track files.
 
 Settings DB exports are metadata/config JSON files written under the configured Cartolensia cache export directory. Import planning is validation-only and does not perform destructive restore while the app is live.
 
@@ -99,13 +103,18 @@ Plain HTTP is the default and should be bound to localhost for development. HTTP
 
 ## AI And Dependency Provenance
 
-AI/vector APIs are status and contract stubs. The backend does not download models, run inference, or require PyTorch. Future AI plugins should declare model namespace/version, modality, provenance, and permissions in manifests.
+AI/vector APIs are status and contract stubs. The backend does not download models, run inference, or require PyTorch. The optional dummy sidecar worker is explicit and returns `not_configured` unless real model services are configured. Future AI plugins should declare model namespace/version, modality, provenance, and permissions in manifests.
+
+Model caches, worker scratch space, generated predictions, and exports must stay under `.cartolensia/models`, `.cartolensia/exports`, or another configured non-archive path. They must never be placed under `/mnt/Models/rclone`.
 
 Do not copy third-party source into the repository. Add dependencies only through normal package managers and document why they are needed.
 
 Current added dependency notes:
 
 - `ol` is bundled through npm for OpenLayers map rendering; local package metadata reports `BSD-2-Clause`.
+- `bootstrap` is bundled through npm for local UI styling; local package metadata reports `MIT`.
+- `bootstrap-icons` is bundled through npm for local icons; local package metadata reports `MIT`.
+- `hls.js` is bundled through npm for browser HLS playback; local package metadata reports `Apache-2.0`.
 - `github.com/rwcarlsen/goexif` is used for server-side JPEG EXIF parsing; the cached module license is BSD-style and compatible with the project policy.
 - EXIF parsing errors are non-fatal and are recorded as metadata; timezone-less EXIF datetimes are stored as raw metadata instead of being blindly promoted to `taken_at`.
 
@@ -118,4 +127,12 @@ Current added dependency notes:
 - Sidecar plugin health probing is a stub and sidecar execution is not implemented.
 - Real archive scan procedures must be supervised and bounded until rescan/missing-file semantics are fully hardened.
 - The OSM tile cache depends on network availability unless the tiles have already been viewed and cached; future fully-offline tile packs are not implemented yet.
-- HLS playback support varies by browser; a future `hls.js` or progressive fragmented-MP4 fallback may be needed for universal browser playback.
+- HLS playback now uses native browser HLS where available and locally bundled `hls.js` elsewhere, but manual browser testing across Chromium/Firefox/Safari is still required.
+
+## 2026-06-07 Safety Notes
+
+- Runtime storage changes are limited to non-destructive filesystem adapters. `journaled_deferred` and `read_write` remain disabled.
+- Storage roots at or under `/mnt/Models/rclone` are rejected unless their mode is `strict_read_only`.
+- The AI sidecar dummy service does not download models, does not run inference, and stores model/cache paths outside original media roots.
+- The approved NVENC validation used null-output ffmpeg dry-runs only. No transcoded file was written to the archive or cache during the validation command.
+- On-demand previews remain the preferred default to avoid write amplification; persistent preview generation is opt-in.

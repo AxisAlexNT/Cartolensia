@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -291,17 +293,33 @@ func (s *Server) handleGPSTrackByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, points)
+	case "profile":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		s.handleGPSTrackProfile(w, r, trackID)
 	case "assets":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
 		}
-		page, err := s.deps.Store.QueryTrackAssets(r.Context(), trackAssetQueryFromURL(r, trackID))
+		query := trackAssetQueryFromURL(r, trackID)
+		detail, err := s.deps.Store.GetTrack(r.Context(), trackID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, page)
+		page, err := s.deps.Store.QueryTrackAssets(r.Context(), query)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, trackAssetResponse(detail.Summary, page, query))
+	case "point-info":
+		s.handleGPSTrackPointInfo(w, r, trackID)
+	case "nearby-assets":
+		s.handleGPSTrackNearbyAssets(w, r, trackID)
 	case "snap-media":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
@@ -331,6 +349,136 @@ func (s *Server) handleGPSTrackByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleGPSTrackProfile(w http.ResponseWriter, r *http.Request, trackID string) {
+	metric := strings.ToLower(strings.TrimSpace(firstNonEmpty(r.URL.Query().Get("metric"), "altitude")))
+	if metric != "altitude" && metric != "speed" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("metric must be altitude or speed"))
+		return
+	}
+	detail, err := s.deps.Store.GetTrack(r.Context(), trackID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	points, err := s.deps.Store.QueryTrackPoints(r.Context(), trackPointQueryFromURL(r, trackID))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	profile := buildTrackProfile(detail.Summary, points, metric)
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s *Server) handleGPSTrackPointInfo(w http.ResponseWriter, r *http.Request, trackID string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	lat, err := strconv.ParseFloat(r.URL.Query().Get("lat"), 64)
+	if err != nil || lat < -90 || lat > 90 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("valid lat query parameter is required"))
+		return
+	}
+	lon, err := strconv.ParseFloat(r.URL.Query().Get("lon"), 64)
+	if err != nil || lon < -180 || lon > 180 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("valid lon query parameter is required"))
+		return
+	}
+	detail, err := s.deps.Store.GetTrack(r.Context(), trackID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	points, err := s.deps.Store.QueryTrackPoints(r.Context(), catalog.TrackPointQuery{TrackAssetID: trackID})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	info, ok := nearestTrackPointInfo(detail.Summary, points, lat, lon)
+	if !ok {
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleGPSTrackNearbyAssets(w http.ResponseWriter, r *http.Request, trackID string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	distanceM, err := strconv.ParseFloat(firstNonEmpty(r.URL.Query().Get("distance_m"), "100"), 64)
+	if err != nil || distanceM <= 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("distance_m must be a positive number"))
+		return
+	}
+	limit := queryInt(r, "limit", 200)
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	detail, err := s.deps.Store.GetTrack(r.Context(), trackID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	points, err := s.deps.Store.QueryTrackPoints(r.Context(), catalog.TrackPointQuery{TrackAssetID: trackID, Simplify: true, MaxPoints: 3000})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if len(points) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"track": detail.Summary, "assets": []any{}, "distance_m": distanceM, "page": catalog.Page{Limit: limit, Offset: 0, Total: 0}})
+		return
+	}
+	geoAssets, err := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{Limit: 10000})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	type nearby struct {
+		Asset           catalog.Asset `json:"asset"`
+		DistanceM       float64       `json:"distance_m"`
+		NearestLat      float64       `json:"nearest_lat"`
+		NearestLon      float64       `json:"nearest_lon"`
+		TrackAssetID    string        `json:"track_asset_id"`
+		TrackSourceName string        `json:"track_name"`
+	}
+	matches := make([]nearby, 0, len(geoAssets))
+	for _, geoAsset := range geoAssets {
+		if geoAsset.Asset.ID == trackID || geoAsset.Asset.MediaKind == "track" {
+			continue
+		}
+		nearest, ok := nearestPointOnTrack(points, geoAsset.Geo.Lat, geoAsset.Geo.Lon)
+		if !ok || nearest.DistanceM > distanceM {
+			continue
+		}
+		matches = append(matches, nearby{
+			Asset:           geoAsset.Asset,
+			DistanceM:       nearest.DistanceM,
+			NearestLat:      nearest.Lat,
+			NearestLon:      nearest.Lon,
+			TrackAssetID:    trackID,
+			TrackSourceName: detail.Summary.Name,
+		})
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if math.Abs(matches[i].DistanceM-matches[j].DistanceM) < 0.001 {
+			return matches[i].Asset.DisplayName < matches[j].Asset.DisplayName
+		}
+		return matches[i].DistanceM < matches[j].DistanceM
+	})
+	total := len(matches)
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"track":      detail.Summary,
+		"assets":     matches,
+		"distance_m": distanceM,
+		"page":       catalog.Page{Limit: limit, Offset: 0, Total: total},
+	})
 }
 
 func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
@@ -689,6 +837,14 @@ func trackAssetQueryFromURL(r *http.Request, trackID string) catalog.TrackAssetQ
 	offsetSeconds, _ := strconv.ParseInt(firstNonEmpty(query.Get("offset_seconds"), query.Get("offset")), 10, 64)
 	limit, _ := strconv.Atoi(query.Get("limit"))
 	offset, _ := strconv.Atoi(query.Get("page_offset"))
+	mediaKind := strings.TrimSpace(query.Get("media_kind"))
+	if mediaKind == "" {
+		mediaKind = "photo,video"
+	}
+	excludeTrackAssets := true
+	if query.Has("exclude_track_assets") {
+		excludeTrackAssets = boolQuery(query.Get("exclude_track_assets"))
+	}
 	includeGeo := true
 	includeUngeo := true
 	if query.Has("include_geotagged") {
@@ -700,11 +856,36 @@ func trackAssetQueryFromURL(r *http.Request, trackID string) catalog.TrackAssetQ
 	return catalog.TrackAssetQuery{
 		TrackAssetID:       trackID,
 		OffsetSeconds:      offsetSeconds,
-		MediaKind:          query.Get("media_kind"),
+		MediaKind:          mediaKind,
+		ExcludeTrackAssets: excludeTrackAssets,
 		IncludeGeotagged:   includeGeo,
 		IncludeUngeotagged: includeUngeo,
 		Limit:              limit,
 		Offset:             offset,
+	}
+}
+
+func trackAssetResponse(summary catalog.TrackSummary, page catalog.AssetPage, query catalog.TrackAssetQuery) map[string]any {
+	if page.Assets == nil {
+		page.Assets = []catalog.Asset{}
+	}
+	reason := ""
+	switch {
+	case summary.StartTime == nil || summary.EndTime == nil:
+		reason = "This track has no usable timestamps, so time-based media lookup cannot run. Use nearby geotagged media instead."
+	case page.Page.Total == 0 && query.MediaKind != "":
+		reason = "No matching photo/video assets overlap this track with the current filters and time offset."
+	case page.Page.Total == 0:
+		reason = "No assets overlap this track with the current filters and time offset."
+	}
+	return map[string]any{
+		"track":                summary,
+		"assets":               page.Assets,
+		"page":                 page.Page,
+		"reason":               reason,
+		"media_kind":           query.MediaKind,
+		"exclude_track_assets": query.ExcludeTrackAssets,
+		"offset_seconds":       query.OffsetSeconds,
 	}
 }
 
@@ -855,14 +1036,24 @@ func (s *Server) mapTrackFeatures(r *http.Request) ([]map[string]any, error) {
 				"coordinates": coords,
 			},
 			"properties": map[string]any{
-				"id":          summary.TrackAssetID,
-				"name":        summary.Name,
-				"kind":        "track",
-				"asset_type":  "track",
-				"point_count": summary.PointCount,
-				"start_time":  summary.StartTime,
-				"end_time":    summary.EndTime,
-				"simplified":  len(points) < summary.PointCount,
+				"id":               summary.TrackAssetID,
+				"name":             summary.Name,
+				"kind":             "track",
+				"asset_type":       "track",
+				"source_file":      summary.Name,
+				"source_format":    summary.SourceFormat,
+				"point_count":      summary.PointCount,
+				"start_time":       summary.StartTime,
+				"end_time":         summary.EndTime,
+				"distance_m":       summary.DistanceM,
+				"duration_seconds": summary.DurationSec,
+				"bbox": map[string]any{
+					"min_lat": summary.MinLat,
+					"min_lon": summary.MinLon,
+					"max_lat": summary.MaxLat,
+					"max_lon": summary.MaxLon,
+				},
+				"simplified": len(points) < summary.PointCount,
 			},
 		})
 	}
@@ -943,4 +1134,234 @@ func removePreviewCacheFile(cacheRoot, target string) error {
 		return fmt.Errorf("preview cache deletion target escapes cache root")
 	}
 	return os.Remove(cleanTarget)
+}
+
+type nearestTrackResult struct {
+	Lat       float64
+	Lon       float64
+	DistanceM float64
+	Fraction  float64
+	Index     int
+	NextIndex int
+}
+
+func nearestTrackPointInfo(summary catalog.TrackSummary, points []catalog.TrackPoint, lat, lon float64) (map[string]any, bool) {
+	nearest, ok := nearestPointOnTrack(points, lat, lon)
+	if !ok {
+		return nil, false
+	}
+	point := points[nearest.Index]
+	var next *catalog.TrackPoint
+	if nearest.NextIndex >= 0 && nearest.NextIndex < len(points) {
+		next = &points[nearest.NextIndex]
+	}
+	timestamp := point.RecordedAt
+	if next != nil && !point.RecordedAt.IsZero() && !next.RecordedAt.IsZero() && nearest.Fraction > 0 {
+		delta := next.RecordedAt.Sub(point.RecordedAt)
+		timestamp = point.RecordedAt.Add(time.Duration(float64(delta) * nearest.Fraction))
+	}
+	var relativeSeconds *float64
+	if summary.StartTime != nil && !timestamp.IsZero() {
+		value := timestamp.Sub(*summary.StartTime).Seconds()
+		relativeSeconds = &value
+	}
+	var elevation *float64
+	switch {
+	case point.ElevationM != nil && next != nil && next.ElevationM != nil:
+		value := *point.ElevationM + (*next.ElevationM-*point.ElevationM)*nearest.Fraction
+		elevation = &value
+	case point.ElevationM != nil:
+		value := *point.ElevationM
+		elevation = &value
+	}
+	var speed *float64
+	if point.SpeedMPS != nil {
+		value := *point.SpeedMPS
+		speed = &value
+	} else if next != nil && !point.RecordedAt.IsZero() && !next.RecordedAt.IsZero() {
+		seconds := next.RecordedAt.Sub(point.RecordedAt).Seconds()
+		if seconds > 0 {
+			value := haversineMeters(point.Lat, point.Lon, next.Lat, next.Lon) / seconds
+			speed = &value
+		}
+	}
+	out := map[string]any{
+		"track":                  summary,
+		"clicked":                map[string]float64{"lat": lat, "lon": lon},
+		"nearest":                map[string]float64{"lat": nearest.Lat, "lon": nearest.Lon},
+		"nearest_point":          point,
+		"nearest_segment_index":  nearest.Index,
+		"distance_m":             nearest.DistanceM,
+		"relative_time_seconds":  relativeSeconds,
+		"timestamp":              nil,
+		"speed_mps":              speed,
+		"elevation_m":            elevation,
+		"has_timestamps":         summary.StartTime != nil && summary.EndTime != nil,
+		"source_format":          summary.SourceFormat,
+		"track_distance_m":       summary.DistanceM,
+		"track_duration_seconds": summary.DurationSec,
+	}
+	if !timestamp.IsZero() {
+		out["timestamp"] = timestamp
+	}
+	return out, true
+}
+
+func buildTrackProfile(summary catalog.TrackSummary, points []catalog.TrackPoint, metric string) map[string]any {
+	type profilePoint struct {
+		Index           int        `json:"index"`
+		DistanceM       float64    `json:"distance_m"`
+		RelativeSeconds *float64   `json:"relative_seconds,omitempty"`
+		Timestamp       *time.Time `json:"timestamp,omitempty"`
+		Value           *float64   `json:"value,omitempty"`
+		Lat             float64    `json:"lat"`
+		Lon             float64    `json:"lon"`
+	}
+	series := make([]profilePoint, 0, len(points))
+	var cumulative float64
+	var minValue *float64
+	var maxValue *float64
+	var previous *catalog.TrackPoint
+	for i := range points {
+		point := points[i]
+		if previous != nil {
+			cumulative += haversineMeters(previous.Lat, previous.Lon, point.Lat, point.Lon)
+		}
+		var value *float64
+		switch metric {
+		case "altitude":
+			value = point.ElevationM
+		case "speed":
+			if point.SpeedMPS != nil {
+				value = point.SpeedMPS
+			} else if previous != nil && !previous.RecordedAt.IsZero() && !point.RecordedAt.IsZero() {
+				seconds := point.RecordedAt.Sub(previous.RecordedAt).Seconds()
+				if seconds > 0 {
+					v := haversineMeters(previous.Lat, previous.Lon, point.Lat, point.Lon) / seconds
+					value = &v
+				}
+			}
+		}
+		var timestamp *time.Time
+		if !point.RecordedAt.IsZero() {
+			t := point.RecordedAt
+			timestamp = &t
+		}
+		var relativeSeconds *float64
+		if timestamp != nil && summary.StartTime != nil {
+			v := timestamp.Sub(*summary.StartTime).Seconds()
+			relativeSeconds = &v
+		}
+		if value != nil {
+			if minValue == nil || *value < *minValue {
+				v := *value
+				minValue = &v
+			}
+			if maxValue == nil || *value > *maxValue {
+				v := *value
+				maxValue = &v
+			}
+		}
+		series = append(series, profilePoint{
+			Index:           i,
+			DistanceM:       cumulative,
+			RelativeSeconds: relativeSeconds,
+			Timestamp:       timestamp,
+			Value:           value,
+			Lat:             point.Lat,
+			Lon:             point.Lon,
+		})
+		previous = &points[i]
+	}
+	unit := "m"
+	if metric == "speed" {
+		unit = "m/s"
+	}
+	return map[string]any{
+		"track":          summary,
+		"metric":         metric,
+		"unit":           unit,
+		"series":         series,
+		"min":            minValue,
+		"max":            maxValue,
+		"has_values":     minValue != nil,
+		"has_timestamps": summary.StartTime != nil && summary.EndTime != nil,
+	}
+}
+
+func nearestPointOnTrack(points []catalog.TrackPoint, lat, lon float64) (nearestTrackResult, bool) {
+	if len(points) == 0 {
+		return nearestTrackResult{}, false
+	}
+	if len(points) == 1 {
+		return nearestTrackResult{
+			Lat:       points[0].Lat,
+			Lon:       points[0].Lon,
+			DistanceM: haversineMeters(lat, lon, points[0].Lat, points[0].Lon),
+			Index:     0,
+			NextIndex: -1,
+		}, true
+	}
+	best := nearestTrackResult{DistanceM: math.MaxFloat64, Index: 0, NextIndex: 1}
+	for i := 0; i < len(points)-1; i++ {
+		candidate := nearestOnSegment(lat, lon, points[i], points[i+1])
+		candidate.Index = i
+		candidate.NextIndex = i + 1
+		if candidate.DistanceM < best.DistanceM {
+			best = candidate
+		}
+	}
+	return best, true
+}
+
+func nearestOnSegment(lat, lon float64, a, b catalog.TrackPoint) nearestTrackResult {
+	lat0 := (lat + a.Lat + b.Lat) / 3
+	ax, ay := lonLatMeters(a.Lat, a.Lon, lat0)
+	bx, by := lonLatMeters(b.Lat, b.Lon, lat0)
+	px, py := lonLatMeters(lat, lon, lat0)
+	dx := bx - ax
+	dy := by - ay
+	fraction := 0.0
+	denom := dx*dx + dy*dy
+	if denom > 0 {
+		fraction = ((px-ax)*dx + (py-ay)*dy) / denom
+	}
+	fraction = maxFloat(0, minFloat(1, fraction))
+	nearestX := ax + dx*fraction
+	nearestY := ay + dy*fraction
+	nearestLat, nearestLon := metersLonLat(nearestX, nearestY, lat0)
+	return nearestTrackResult{
+		Lat:       nearestLat,
+		Lon:       nearestLon,
+		DistanceM: math.Hypot(px-nearestX, py-nearestY),
+		Fraction:  fraction,
+	}
+}
+
+func lonLatMeters(lat, lon, refLat float64) (float64, float64) {
+	const metersPerDegreeLat = 111320.0
+	x := lon * metersPerDegreeLat * math.Cos(refLat*math.Pi/180)
+	y := lat * metersPerDegreeLat
+	return x, y
+}
+
+func metersLonLat(x, y, refLat float64) (float64, float64) {
+	const metersPerDegreeLat = 111320.0
+	lat := y / metersPerDegreeLat
+	cos := math.Cos(refLat * math.Pi / 180)
+	if math.Abs(cos) < 1e-9 {
+		return lat, 0
+	}
+	lon := x / (metersPerDegreeLat * cos)
+	return lat, lon
+}
+
+func haversineMeters(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadiusM = 6371008.8
+	phi1 := lat1 * math.Pi / 180
+	phi2 := lat2 * math.Pi / 180
+	dPhi := (lat2 - lat1) * math.Pi / 180
+	dLambda := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dPhi/2)*math.Sin(dPhi/2) + math.Cos(phi1)*math.Cos(phi2)*math.Sin(dLambda/2)*math.Sin(dLambda/2)
+	return 2 * earthRadiusM * math.Asin(math.Sqrt(a))
 }

@@ -32,7 +32,7 @@ Runtime migrations are embedded into the Go binary from `migrations/*.sql`. Disk
 - `internal/media`: SHA-512 streaming hash and optional ffprobe video metadata detection/extraction.
 - `internal/plugins`: built-in and filesystem plugin manifests, dependency topological sort, sidecar HTTP manifest validation, and plugin status/health stubs.
 - `internal/transcoding`: bounded ffmpeg/ffprobe capability inventory, encoder parsing, and hardware hints.
-- `internal/server`: REST API, indexing pipeline/status surface, original streaming, cached preview serving, cache-scoped HLS transcode sessions, settings/export MVP, tile proxy, and WebUI static serving.
+- `internal/server`: REST API, indexing pipeline/status surface, original streaming, cached preview serving, track preview/thumbnail rendering, cache-scoped HLS transcode sessions and preset APIs, search, settings/export MVP, tile proxy, AI worker registry stubs, and WebUI static serving.
 - `internal/tlsutil`: dependency-free in-memory self-signed TLS certificate generation for local/private HTTPS deployments.
 
 ## REST API
@@ -94,6 +94,8 @@ Implemented endpoints:
 - `PATCH /api/v1/gps/tracks/{track_asset_id}`
 - `GET /api/v1/gps/tracks/{track_asset_id}/points`
 - `GET /api/v1/gps/tracks/{track_asset_id}/assets`
+- `GET /api/v1/gps/tracks/{track_asset_id}/point-info?lat=...&lon=...`
+- `GET /api/v1/gps/tracks/{track_asset_id}/nearby-assets?distance_m=...`
 - `POST /api/v1/gps/tracks/{track_asset_id}/snap-media`
 - `GET /api/v1/sync/candidates?asset_id=...`
 - `GET /api/v1/sync/links`
@@ -108,25 +110,44 @@ Implemented endpoints:
 - `GET /api/v1/transcoding/status`
 - `GET /api/v1/transcoding/capabilities`
 - `GET /api/v1/transcoding/presets`
+- `POST /api/v1/transcoding/presets`
+- `DELETE /api/v1/transcoding/presets/{id}`
 - `GET /api/v1/settings`
 - `GET /api/v1/settings/effective`
+- `GET /api/v1/settings/schema`
 - `PATCH /api/v1/settings/runtime`
+- `GET /api/v1/settings/pending`
+- `PATCH /api/v1/settings/pending`
+- `DELETE /api/v1/settings/pending`
+- `GET /api/v1/settings/pending/download`
 - `GET /api/v1/settings/restart-required`
+- `GET /api/v1/plugins/{id}/settings`
+- `PATCH /api/v1/plugins/{id}/settings`
+- `GET /api/v1/plugins/{id}/settings/schema`
 - `POST /api/v1/admin/db/export`
 - `GET /api/v1/admin/db/exports`
 - `GET /api/v1/admin/db/exports/{id}/download`
 - `POST /api/v1/admin/db/import-plan`
 - `GET /api/v1/ai/status`
 - `GET /api/v1/ai/accelerators`
+- `GET /api/v1/ai/workers`
+- `GET /api/v1/ai/workers/{id}`
+- `POST /api/v1/ai/jobs/classify`
+- `POST /api/v1/ai/jobs/faces`
+- `POST /api/v1/ai/jobs/describe`
 - `GET /api/v1/vector/status`
+- `GET /api/v1/search?q=...`
 - `GET /api/v1/stats`
 - `GET /api/v1/backend/status`
 - `GET /api/v1/media/{asset_id}/original`
 - `GET /api/v1/media/{asset_id}/preview`
+- `GET /api/v1/media/{asset_id}/track-preview`
+- `GET /api/v1/media/{asset_id}/track-thumbnail`
 - `GET /api/v1/media/{asset_id}/stream-options`
 - `POST /api/v1/media/{asset_id}/transcode-session`
 - `GET /api/v1/media/transcode-sessions/{session_id}/master.m3u8`
 - `GET /api/v1/media/transcode-sessions/{session_id}/{segment}`
+- `GET /api/v1/media/transcode-sessions/{session_id}/status`
 - `DELETE /api/v1/media/transcode-sessions/{session_id}/stop`
 - `GET /api/v1/tiles/{source}/{z}/{x}/{y}.png`
 
@@ -134,7 +155,7 @@ Implemented endpoints:
 
 Original streaming uses the read-only storage registry and `http.ServeContent`, which provides HTTP Range and HEAD support when the underlying file supports seeking. Preview generation decodes standard-library-supported image formats, writes cached JPEG previews under the configured Cartolensia cache directory, serves the generated preview, and never writes near originals. Unsupported formats return a clean JSON status.
 
-Video stream options truthfully expose direct original streaming plus cache-scoped HLS transcode-session profiles only when `ffmpeg` is available. HLS session output is written under the configured Cartolensia cache directory and can be stopped through the API. Originals are never modified.
+Video stream options truthfully expose direct original streaming plus cache-scoped HLS transcode-session profiles only when `ffmpeg` is available. Built-in presets are protected and custom presets are persisted in metadata. HLS session output is written under the configured Cartolensia cache directory and can be stopped through the API. Originals are never modified.
 
 The tile proxy is intentionally on-demand only. It validates tile coordinates, caches only tiles actively requested by the browser under the Cartolensia cache directory, exposes attribution metadata through `/api/v1/map/tile-sources`, and provides no bulk prefetch endpoint against public OSM servers.
 
@@ -150,13 +171,16 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Metadata page with explicit enrichment and preview generation actions;
 - Albums page for virtual album creation, item management, and map handoff;
 - GPS Tracks page backed by parsed GPX/KML/KMZ track points and enriched distance/duration metadata, including media lookup and snap-media controls;
-- Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, clustering, clickable cluster/point popups, album filters, media filters, and track filters;
+- Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, screen-distance clustering, count labels, click-priority asset/cluster layers above tracks, cluster/point mini-gallery popups, track click popups, album filters, media filters, and track filters;
+- universal Explorer search with result explanations and table/tile/gallery reuse;
 - Duplicates page for report-only SHA-512+size content groups;
 - Storages page;
 - Plugins page and plugin detail health/status surface;
 - Stats page;
-- Settings page with tabs for effective config, runtime preferences, restart-required YAML settings, cache-scoped DB metadata export, password rotation, and API token management;
-- stub/control surfaces for Albums, Transcoding, Base AI, and AI Classification.
+- Settings page with categorized tabs for effective config, runtime preferences, restart-required YAML settings, schema-based per-plugin settings, cache-scoped DB metadata export, password rotation, and API token management;
+- Transcoding page with capability inventory, built-in presets, custom preset controls, and cache-scoped HLS session status;
+- Base AI dashboard with local hardware hints, optional sidecar worker profiles, and not-configured job controls;
+- AI Classification page foundation for tags/predictions.
 
 Browser route state is saved in `localStorage`.
 
@@ -186,9 +210,21 @@ The app serves one configured listener at `http.addr`. Plain HTTP is the default
 
 PostGIS, pgvector, and pg_trgm are detected at startup. PostGIS may be installed by the development Docker image. pgvector and pg_trgm are optional for the MVP. Missing optional extensions do not block core startup.
 
+## AI Sidecar Foundation
+
+The optional AI sidecar contract is HTTP JSON. The repository includes a minimal `services/ai/worker.py` dummy worker and Compose profiles for CPU, NVIDIA, ROCm, and Intel variants. These services are not built or run by default and do not download models. Model/cache paths are expected under repo-local `.cartolensia/models` or another configured non-archive directory. The backend can report worker profiles and accepts classification/face/description job requests as explicit not-configured stubs until a real worker endpoint is configured.
+
 ## Future Interfaces
 
 - Vector search should be implemented through a `VectorStore` abstraction. The schema stores JSON embedding placeholders without requiring pgvector.
 - Sidecar HTTP plugins are represented in manifests but are user-managed services; Cartolensia does not auto-start arbitrary plugin binaries.
 - Live video-track sync is represented in schema by `track_points` and `asset_track_links`, including `time_offset_ms`, with a marker interpolation API for linked videos.
-- Transcoding contracts and capability detection exist. Cache-scoped HLS sessions are implemented as a safe MVP; durable transcoding jobs and managed output libraries are still future work.
+- Transcoding contracts and capability detection exist. Cache-scoped HLS sessions and preset management are implemented as a safe MVP; durable transcoding jobs and managed output libraries are still future work.
+
+## 2026-06-07 Update
+
+- GPS/KML track detail now has a dedicated API/UI flow with OpenLayers geometry preview, altitude and speed profiles, point-info lookup, media-by-time lookup, and nearby-geotag media lookup.
+- Runtime storage management can add or validate non-destructive filesystem storages in the active registry. Real archive roots remain locked to `strict_read_only`; write-capable modes are disabled.
+- The AI sidecar is now a packaged FastAPI dummy/no-model service under `services/ai/cartolensia_ai`; backend AI worker status probes a local sidecar on `127.0.0.1:19090`.
+- Transcoding hardware validation has an explicit API and UI flow. NVIDIA H.264 NVENC command generation is validated with a short null-output dry run when approved.
+- Universal search now includes filename/path/extension/hash/date/metadata plus implemented `album:` and `track:` token handling through existing store data.

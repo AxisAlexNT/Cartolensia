@@ -100,3 +100,41 @@ func TestParseURLRejectsEncodedTraversal(t *testing.T) {
 		t.Fatalf("expected traversal error, got %v", err)
 	}
 }
+
+func TestRegistryAddUpdateAndValidateStorage(t *testing.T) {
+	root := t.TempDir()
+	reg, err := NewRegistry([]Config{{Name: "fixture", Kind: "fs", Root: root, Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reg.ListStorages()[0]; got.Mode != "strict_read_only" || got.Root == "" {
+		t.Fatalf("unexpected initial storage %#v", got)
+	}
+
+	second := t.TempDir()
+	added, err := reg.AddStorage(Config{Name: "synthetic", Kind: "fs", Root: second, Mode: "read_only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added.Mode != "read_only" {
+		t.Fatalf("expected read_only mode, got %#v", added)
+	}
+	if _, err := reg.Adapter("synthetic"); err != nil {
+		t.Fatalf("expected adapter for added storage: %v", err)
+	}
+
+	updated, err := reg.UpdateStorage("synthetic", Config{Kind: "fs", Root: second, Mode: "strict_read_only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "synthetic" || updated.Mode != "strict_read_only" {
+		t.Fatalf("unexpected update %#v", updated)
+	}
+
+	if _, err := ValidateConfig(Config{Name: "bad", Kind: "s3", Root: second, Mode: "strict_read_only"}); err == nil {
+		t.Fatal("expected unsupported kind error")
+	}
+	if _, err := ValidateConfig(Config{Name: "bad", Kind: "fs", Root: second, Mode: "read_write"}); err == nil {
+		t.Fatal("expected disabled write mode error")
+	}
+}

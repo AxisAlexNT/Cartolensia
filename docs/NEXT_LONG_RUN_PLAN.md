@@ -1,441 +1,613 @@
 # Next Long Run Plan
 
-This is the implementation target for the next unattended run. It must keep using `testdata/media_fixture/`, ignored synthetic fixtures, and `/tmp` fixtures only. It must not touch `/mnt/Models/rclone`.
+Date: 2026-06-07
 
-The goal is to make Cartolensia ready for a later tiny supervised real-archive dry run, not to run that dry run.
+This is the implementation target for the next large run. It must continue from the current live real-peek state without resetting PostgreSQL unless explicitly requested. It must not scan new real-data prefixes, mark missing files, or write anything under `/mnt/Models/rclone`.
 
-## Status After 2026-06-06 Implementation Run
+Safety baseline:
 
-Implemented from this plan:
+- Real archive storage `rclone_peek` remains `strict_read_only`.
+- Generated previews, tiles, transcodes, exports, model files, and temp files stay under repo-local ignored paths such as `.cartolensia/realpeek-cache`, `.cartolensia/exports`, and `.cartolensia/models`.
+- No model downloads, Docker image pulls, or long ffmpeg hardware tests happen without explicit approval.
+- No commit and no push.
 
-- Albums plugin MVP with virtual albums and album item membership.
-- Photo/map plugin MVP with OpenLayers, GeoJSON APIs, typed geotags, album/media/track filters, and deterministic grid clustering.
-- GPS track manager MVP with summaries, point queries, media lookup, offset controls, and snap-media job.
-- Server-side JPEG EXIF parsing through `github.com/rwcarlsen/goexif` with compatible BSD-style license.
-- Forward migration for albums, `asset_geo`, `gps_tracks`, `scan_runs`, `preview_cache_entries`, and `plugin_settings`.
-- Scoped discovery dry-run readiness with report-only API, scan-run records, guarded config example, and guarded preflight script.
-- Persistent preview cache index and cleanup/status APIs.
-- Worker stress script and additional unit tests around albums, geotag priority, dry-run reports, preview cache, and track snapping.
+Current audited state:
 
-Remaining next useful work:
+- `54` indexed assets, `54` hashed, `48` geotagged photos, `2` videos, `4` parsed GPX/KML track summaries.
+- Latest jobs are terminal; no running job was observed.
+- Host has AMD Ryzen 9 7900X and NVIDIA RTX 3090 Ti. `nvidia-smi` works.
+- Docker does not currently report an NVIDIA runtime.
+- ffmpeg advertises NVENC, VAAPI, QSV, and CPU encoders, but `/dev/dri` is absent in the shell environment.
+- AI workers are configured as contracts only and are not running real models.
 
-- Scoped rescan and missing-file marking semantics.
-- Deeper PostgreSQL integration tests for albums/geotags/dry-run/preview cache under large synthetic datasets.
-- Better real benchmark path that runs discovery against a synthetic temp storage instead of only generating fixtures.
-- Real map tile strategy and offline map packaging.
-- Video poster previews and richer typed metadata tables.
-
-## 1. Albums Plugin MVP
+## 1. GPS/KML Track Detail Page And Charts
 
 Files/packages likely to change:
 
-- `migrations/006_albums_and_dryrun.sql`
-- `internal/catalog`
-- `internal/database`
-- `internal/server`
-- `webui/src/api.ts`
+- `internal/server/extended.go`
+- `internal/catalog/extended_store.go`
+- `internal/database/extended.go`
 - `webui/src/App.vue`
+- `webui/src/api.ts`
 - `webui/src/style.css`
 
-APIs to add/change:
+APIs to add or harden:
 
-- `GET /api/v1/albums`
-- `POST /api/v1/albums`
-- `GET /api/v1/albums/{id}`
-- `PATCH /api/v1/albums/{id}`
-- `DELETE /api/v1/albums/{id}` as a metadata-only delete
-- `POST /api/v1/albums/{id}/items`
-- `DELETE /api/v1/albums/{id}/items/{asset_id}`
+- `GET /api/v1/gps/tracks/{track_asset_id}` with full summary, source asset, source format, bbox, distance, duration, elevation range, and timestamp policy.
+- `GET /api/v1/gps/tracks/{track_asset_id}/points?max_points=...&simplify=true`.
+- `GET /api/v1/gps/tracks/{track_asset_id}/profile?metric=altitude|speed`.
+- `GET /api/v1/gps/tracks/{track_asset_id}/assets?media_kind=photo,video&exclude_track_assets=true`.
+- `GET /api/v1/gps/tracks/{track_asset_id}/nearby-assets?distance_m=...&media_kind=photo,video`.
 
-Migrations to add:
+Frontend work:
 
-- `albums(id, parent_id, name, description, sort_order, created_at, updated_at)`
-- `album_items(album_id, asset_id, item_kind, sort_order, created_at)`
-- indexes on `albums(parent_id)`, `album_items(album_id)`, and `album_items(asset_id)`
+- Add a real track detail view instead of only a selected table panel.
+- Show OpenLayers track overlay.
+- Add altitude profile chart using plain SVG/canvas first; no chart dependency is needed unless SVG proves inadequate.
+- Add speed profile chart when timestamps exist.
+- Show stats: distance, duration, elevation min/max, point count, source file, source format, bbox.
+- Add buttons:
+  - show media during this track by time;
+  - show media near this track by geotag distance;
+  - show track on map;
+  - open original source asset.
 
-Frontend pages/components:
+Tests:
 
-- Albums page with album tree/list.
-- Album detail page with asset rows.
-- Add selected Explorer assets to album.
-- Clear warning that albums do not move or modify original files.
+- Track detail API returns no-time KML safely.
+- Profile API returns altitude and speed series for timestamped GPX.
+- Time-based media query excludes track assets by default.
+- Nearby media query uses geotags and bounded haversine/polyline distance when PostGIS is unavailable.
+- Frontend build.
 
-Tests to add:
+Acceptance:
 
-- Album CRUD in memory and PostgreSQL stores.
-- Nested albums.
-- Same asset in multiple albums.
-- Metadata-only delete does not affect assets/locations/originals.
-- Auth protects write endpoints.
+- Clicking a track in GPS/KML Track Manager opens a useful detail page with map and charts.
+- "Show media during track" returns photos/videos by default, not GPX/KML files.
+- Tracks without timestamps still render geometry and statistics.
 
-Acceptance criteria:
-
-- Fixture assets can be grouped into albums without changing storage paths.
-- Albums can be nested and listed efficiently.
-- Existing Explorer and asset detail links still work.
-- No storage write/delete/move calls are introduced.
-
-## 2. Photo/Map Plugin MVP
+## 2. Map Track Popups And Media Queries
 
 Files/packages likely to change:
 
-- `internal/catalog`
-- `internal/database`
-- `internal/server`
-- `internal/metadata`
-- `webui/src/api.ts`
+- `internal/server/extended.go`
+- `internal/catalog/extended_store.go`
+- `internal/database/extended.go`
 - `webui/src/App.vue`
-- `webui/src/style.css`
-- optionally `webui/package.json` and `webui/package-lock.json` if OpenLayers is approved
+- `webui/src/api.ts`
 
-APIs to add/change:
+APIs:
 
-- Extend `GET /api/v1/map` with stable cursor pagination.
-- Add `GET /api/v1/map/assets`.
-- Add `GET /api/v1/map/tracks`.
-- Add `GET /api/v1/map/status`.
-- Add bbox/time/media-kind filters consistently to assets and tracks.
+- Continue using `GET /api/v1/gps/tracks/{id}/point-info?lat=...&lon=...`.
+- Harden `GET /api/v1/gps/tracks/{id}/assets`.
+- Harden `GET /api/v1/gps/tracks/{id}/nearby-assets`.
+- Optionally add `GET /api/v1/map/track-click-info` if the map needs combined point/media data.
 
-Migrations to add:
+Frontend work:
 
-- Optional typed geotag columns/table only if needed:
-  - `asset_geo(asset_id, lat, lon, source, confidence, taken_at, created_at, updated_at)`
-  - indexes on `(lat, lon)`, `taken_at`, and `source`
-- If kept in `metadata_json` for this run, add no migration and document deferral.
+- Ensure layer priority remains base tiles, tracks, asset points/clusters, popups.
+- Track clicks open an OpenLayers popup, not immediate navigation.
+- Track popup shows nearest point, click coordinate, distance, relative time, absolute timestamp, speed, elevation, and summary stats.
+- Popup actions call the track media APIs and show results in a drawer or panel.
 
-Frontend pages/components:
+Tests:
 
-- Replace or extend the current SVG map with OpenLayers if approved.
-- If OpenLayers is not approved, keep SVG/GeoJSON and add better filters, selection, and popovers.
-- Map filters: media kind, time range, selected track IDs, show clusters/raw.
-- Asset/track click opens detail.
-- Visible "no real tile base map yet" state unless tiles are configured.
+- Asset/cluster click takes precedence over track click.
+- Track click returns point info with and without timestamps.
+- Nearby media works for geotagged assets.
 
-Tests to add:
+Acceptance:
 
-- bbox filtering for assets and tracks.
-- deterministic cluster output.
-- cursor/limit behavior.
-- time filter behavior.
-- map API does not require PostGIS.
+- Users can inspect track context on the map before navigating away.
+- Nearby and during-track media queries are clear and bounded.
 
-Acceptance criteria:
-
-- Synthetic geotagged fixtures render on the map.
-- Large synthetic responses are bounded by limit/cursor.
-- Map UI remains usable without network tiles.
-- OpenLayers is used only if approved.
-
-## 3. GPS Track Manager Plugin MVP
+## 3. Track Preview And Thumbnail Improvements
 
 Files/packages likely to change:
 
-- `internal/gpx`
-- `internal/catalog`
-- `internal/database`
-- `internal/server`
-- `webui/src/api.ts`
+- `internal/server/track_preview.go`
+- `internal/server/extended.go`
+- `internal/catalog/extended_store.go`
+- `internal/database/extended.go`
 - `webui/src/App.vue`
 - `webui/src/style.css`
 
-APIs to add/change:
+APIs:
 
-- `GET /api/v1/tracks` with limit/offset/cursor, time filters, bbox filters, and text search.
-- `GET /api/v1/tracks/{track_asset_id}` with simplified geometry option.
-- `GET /api/v1/tracks/{track_asset_id}/assets` for assets overlapping the track time span.
-- Extend sync APIs for offset testing and saved link inspection.
+- `GET /api/v1/media/{asset_id}/track-preview`
+- `GET /api/v1/media/{asset_id}/track-thumbnail`
+- Reuse `preview_cache_entries` for thumbnail metadata when practical.
 
-Migrations to add:
+Implementation:
 
-- Optional `track_summaries` table/cache if DB query cost becomes high:
-  - `track_asset_id`, point count, time range, bbox, distance, duration, elevation min/max.
-- Otherwise compute from `track_points` and metadata for this run.
+- Keep the dark fallback thumbnail renderer as the fast default path.
+- Add optional OSM-background thumbnail rendering only when configured and safe.
+- Use cached OSM tiles through Cartolensia tile proxy/cache only; no bulk prefetch.
+- Store thumbnails under preview cache root.
+- Add size and TTL limits through runtime settings.
 
-Frontend pages/components:
+Frontend work:
 
-- Track list filters and pagination.
-- Track detail page with metadata and simplified geometry.
-- "Assets near/along this track" section based on time overlap.
-- Manual time offset controls for sync testing.
+- Track tiles show track thumbnails.
+- Track assets in gallery overlay show an interactive OpenLayers preview instead of "preview not possible".
+- Asset detail for track assets shows track preview and source metadata.
 
-Tests to add:
+Tests:
 
-- multi-track and multi-segment GPX.
-- invalid GPX handling.
-- no-time GPX behavior.
-- track detail simplification.
-- track-to-asset overlap with +20 minute and +97 minute offsets.
+- Thumbnail path stays inside cache root.
+- Dark fallback renderer works without network.
+- OSM-background disabled setting is respected.
+- Track preview API returns valid GeoJSON/summary.
 
-Acceptance criteria:
+Acceptance:
 
-- Tracks page is useful with synthetic fixtures.
-- Track detail does not load unbounded point arrays by default.
-- Time offset workflows are testable without real video playback.
+- GPX/KML/KMZ/GPZ assets are first-class media in gallery/detail views.
+- Thumbnail generation never writes near originals.
 
-## 4. Scoped Dry-Run Readiness
+## 4. Gallery Modal Focus And Input Handling
+
+Files/packages likely to change:
+
+- `webui/src/App.vue`
+- `webui/src/style.css`
+
+Implementation:
+
+- Add explicit modal focus state for gallery, video settings, album picker, and track popups.
+- While advanced video settings are open, arrow keys and WASD must navigate controls or edit fields, not switch assets or pan images.
+- Preserve gallery behavior when no modal has focus:
+  - ArrowLeft/ArrowRight switch assets.
+  - WASD pans zoomed images.
+  - wheel zooms at cursor.
+  - mouse/touch/pen drag pans.
+  - pinch zooms.
+  - Escape closes active overlay/modal in correct order.
+
+Tests:
+
+- Frontend build.
+- Manual checklist in report for keyboard focus behavior.
+
+Acceptance:
+
+- Gallery navigation is predictable and does not fight form controls.
+
+## 5. Advanced Transcoding Modal, Presets, Apply, And Hardware Tests
+
+Files/packages likely to change:
+
+- `internal/server/transcode_sessions.go`
+- `internal/server/extended.go`
+- `internal/catalog/extended_store.go`
+- `internal/database/extended.go`
+- `migrations/009_transcoding_validation_preferences.sql` if needed
+- `webui/src/App.vue`
+- `webui/src/api.ts`
+
+APIs:
+
+- `POST /api/v1/transcoding/presets/validate`
+- `POST /api/v1/transcoding/hardware-test`
+- `POST /api/v1/media/{asset_id}/transcode-session` with either saved profile or inline unsaved preset.
+- `GET /api/v1/media/transcode-sessions/{id}/status` with stderr tail, command summary, output bytes, segment count, and readiness.
+
+Backend work:
+
+- Normalize bitrate input: bare numeric `750` should mean `750k` for video bitrate UI.
+- Use encoder-specific command rules:
+  - CPU/libx264: `-preset veryfast`, `-crf` or `-b:v`.
+  - NVIDIA/H.264: `h264_nvenc`, NVENC presets such as `p4`/`p5`, tested rate-control flags.
+  - NVIDIA/HEVC: `hevc_nvenc`, lower browser compatibility warning.
+  - AV1: disable on RTX 3090 Ti unless actual hardware dry-run proves support.
+  - VAAPI/QSV: mark unavailable/unverified unless `/dev/dri` is present and accessible.
+- Capture ffmpeg stderr and expose it in status.
+- Add bounded dry-run validation only behind user approval or explicit UI action.
+- All outputs stay under transcode cache or `/tmp` test root.
+
+Frontend work:
+
+- Basic quality dropdown:
+  - Original/direct;
+  - built-ins;
+  - saved custom presets;
+  - Advanced/Custom.
+- Advanced modal:
+  - hardware selector;
+  - codec selector;
+  - encoder selector;
+  - mode selector;
+  - parameter input;
+  - Apply button;
+  - Test current hardware configuration button;
+  - Save preset button;
+  - Remove custom preset button.
+- Hardware/preset validation status is visible before Save.
+- Failed transcode falls back to Original and shows actionable stderr summary.
+
+Tests:
+
+- Bitrate normalization.
+- NVENC command builder uses NVENC-compatible preset values.
+- Invalid encoder/hardware/mode rejected.
+- Inline preset sessions are path-safe.
+- Built-ins cannot be removed.
+- Frontend build.
+
+Acceptance:
+
+- Custom NVIDIA presets are validated before use and cannot silently fail with unsupported browser source errors.
+- "Apply" tests an unsaved configuration; "Save preset" persists metadata only.
+
+## 6. High-Resolution Asset View And Preview Policy
+
+Files/packages likely to change:
+
+- `internal/server/preview.go` or existing media/preview handlers
+- `internal/server/extended.go`
+- `webui/src/App.vue`
+- `webui/src/api.ts`
+- `webui/src/style.css`
+
+APIs:
+
+- Harden existing preview endpoint with variants:
+  - thumbnail;
+  - fit-to-view;
+  - original direct.
+- Add or extend `GET /api/v1/media/{asset_id}/view` if a dedicated view-size endpoint is cleaner.
+
+Policy:
+
+- Default should avoid write amplification:
+  - on-the-fly previews are default;
+  - persistent preview generation is optional;
+  - Discovery checkbox and Settings default must be synchronized.
+- Persistent preview jobs must be explicitly selected and bounded.
+- Originals are never modified.
+
+Frontend work:
+
+- Asset detail should use original-quality image or a view-size on-demand preview, not only low-resolution cached thumbnail.
+- Gallery overlay uses original-quality source for opened image, with preview only as placeholder.
+- Settings and Discovery show the same default preview policy.
+
+Tests:
+
+- View-size preview path safety.
+- Persistent preview disabled by default.
+- Discovery stage options mirror runtime settings.
+- Frontend build.
+
+Acceptance:
+
+- Detail page no longer looks low-resolution for photos.
+- Preview cache behavior is explicit and conservative.
+
+## 7. Runtime Storage Configuration
 
 Files/packages likely to change:
 
 - `internal/config`
 - `internal/storage`
-- `internal/discovery`
+- `internal/server`
 - `internal/catalog`
 - `internal/database`
-- `internal/server`
-- `webui/src/api.ts`
 - `webui/src/App.vue`
-- `docs/REAL_ARCHIVE_DRY_RUN.md`
-
-Guard design:
-
-- Real archive storage config name must be explicit, e.g. `rclone_dryrun`.
-- Storage mode must be `strict_read_only`; reject any other mode.
-- Require explicit path/prefix allowlist per dry-run request.
-- Default `max_files` must be `<= 50`.
-- Add a default `max_bytes`, initially conservative such as `2 GiB`.
-- No hashing unless separately requested.
-- No missing-file marking.
-- No preview generation unless separately requested.
-- Visible warning in UI for dry-run jobs.
-- Job cancellation must be one click from the dry-run report page.
-- Produce a dry-run report/log with scope, counters, skipped files, first errors, and exact safety settings.
-
-APIs to add/change:
-
-- `POST /api/v1/discovery/dry-run`
-- `GET /api/v1/discovery/dry-run/{job_id}/report`
-- Extend discovery payload with `storage`, `prefixes`, `max_files`, `max_bytes`, `hash`, `metadata`, `previews`, `mark_missing`.
-
-Migrations to add:
-
-- `scan_runs(id, job_id, storage_name, mode, prefixes_json, max_files, max_bytes, hash_requested, metadata_requested, previews_requested, mark_missing, started_at, finished_at, report_json)`
-- index on `scan_runs(job_id)`
-
-Frontend pages/components:
-
-- Dry Run page or Discovery section.
-- Storage scope form with storage name, prefixes, max files, max bytes.
-- Persistent warning banner.
-- Dry-run report view.
-- Cancel button linked to job cancellation.
-
-Tests to add:
-
-- Reject non-allowlisted prefixes.
-- Reject dry run with `max_files > 50` unless explicit future admin override exists.
-- Reject `mark_missing=true`.
-- Reject preview/hash unless explicitly requested.
-- Verify no writes occur under fixture storage roots.
-- Verify report content for synthetic fixture.
-
-Acceptance criteria:
-
-- A future supervised `/mnt/Models/rclone` dry run can be configured without code changes.
-- The implementation cannot accidentally scan the whole archive from a default request.
-- Hashing, previews, and missing marking are opt-in and default off.
-
-## 5. DB-Backed Pagination/Query Hardening
-
-Files/packages likely to change:
-
-- `internal/catalog`
-- `internal/database`
-- `internal/server`
-- `internal/database/integration_test.go`
 - `webui/src/api.ts`
+- `docs/SECURITY.md`
+- `docs/OPERATIONS.md`
+
+APIs:
+
+- `GET /api/v1/storages`
+- `POST /api/v1/storages`
+- `PATCH /api/v1/storages/{name}`
+- `GET /api/v1/storages/{name}/validate`
+- Optional pending-YAML path for restart-required storage root changes.
+
+Protection modes:
+
+- `strict_read_only`
+- `read_only`
+- `journaled_deferred`
+- `read_write` as future/disabled unless fully implemented
+
+Safety:
+
+- `/mnt/Models/rclone` and paths under it default to `strict_read_only`.
+- Changing real archive protection requires a confirmation phrase and remains blocked until destructive modes are implemented/tested.
+- Runtime additions can be used for synthetic/test roots first.
+
+Tests:
+
+- Adding a synthetic strict read-only storage.
+- Rejecting unsafe real archive protection downgrade.
+- Pending restart for root/mode changes.
+- No writes during validation.
+
+Acceptance:
+
+- Storage page can add/configure safe storages at runtime without weakening real archive safety.
+
+## 8. Map Layout, Debug Toggle, And Media-During-Track Fixes
+
+Files/packages likely to change:
+
 - `webui/src/App.vue`
+- `webui/src/style.css`
+- `internal/server/extended.go`
 
-APIs to add/change:
+Frontend work:
 
-- Introduce query option structs for assets, locations, explorer, jobs, tracks, albums.
-- Preserve current response shapes where possible.
-- Add `limit`, `cursor` or `offset`, `sort`, `q`, `media_kind`, `hash_status`, `storage`, `extension`, `taken_from`, `taken_to`.
-- Return total counts only when cheap or explicitly requested.
+- Make map occupy more of the viewport.
+- Hide raw JSON debug behind a collapsed toggle by default.
+- Add visible filter reset state.
+- Ensure track/media action results are shown as media cards/table, not mixed track assets.
 
-Migrations to add:
+Backend work:
 
-- Add indexes if query plans require them:
-  - `asset_locations(storage_id, media_kind, relative_path)`
-  - `asset_locations(extension)`
-  - `asset_locations(hash_status)`
-  - `assets(display_name)` basic btree only unless pg_trgm is explicitly enabled later
-  - `jobs(status, kind, created_at desc)`
+- Add media-kind defaults and `exclude_track_assets=true`.
+- Return reason fields when no media match:
+  - no timestamps;
+  - no geotags;
+  - filters exclude all;
+  - selected track has no temporal overlap.
 
-Frontend pages/components:
+Tests:
 
-- Explorer filters.
-- Jobs filters.
-- Track filters.
-- Preserve selection across pagination.
+- Map debug collapsed by default via build/manual checklist.
+- Track media query excludes tracks by default.
+- No-time KML returns a clear reason for time-based media.
 
-Tests to add:
+Acceptance:
 
-- PostgreSQL asset query filters.
-- Explorer folder query does not load all assets in DB mode.
-- Stable sort and pagination.
-- Search over name/path.
-- Normal memory-mode behavior remains compatible for fixture tests.
+- Map is usable for inspection without debug clutter.
+- "Show media during track" returns meaningful media or a clear explanation.
 
-Acceptance criteria:
-
-- PostgreSQL mode no longer relies on loading all assets for common list endpoints.
-- UI works on synthetic 1,000+ file fixture without unbounded API payloads.
-
-## 6. Worker Stress Tests
+## 9. Settings Tab Cleanup And Plugin Settings
 
 Files/packages likely to change:
 
-- `internal/workers`
-- `internal/jobs`
-- `internal/database/integration_test.go`
-- `scripts/test-db.sh`
-- optional `scripts/worker-stress-smoke.sh`
-
-APIs to add/change:
-
-- No public API required unless missing stats are needed.
-- Add backend status fields for active workers if useful.
-
-Migrations to add:
-
-- None expected unless job error classification needs a typed column.
-
-Frontend pages/components:
-
-- Jobs page should show active worker IDs and last errors from existing stats.
-
-Tests to add:
-
-- Multiple DB workers lease distinct jobs.
-- Expired lease can be acquired by another worker.
-- Stale worker cannot complete after lease loss.
-- Heartbeat extends leases.
-- Cancellation remains idempotent under concurrency.
-- Panic handler fails a job without crashing worker manager.
-
-Acceptance criteria:
-
-- DB-backed stress tests pass under `CARTOLENSIA_RUN_DB_TESTS=1`.
-- Normal `go test ./...` still passes without Docker.
-
-## 7. Metadata/Preview/Cache Hardening
-
-Files/packages likely to change:
-
-- `internal/metadata`
-- `internal/preview`
-- `internal/media`
-- `internal/catalog`
-- `internal/database`
-- `internal/server`
-- `webui/src/api.ts`
-- `webui/src/App.vue`
-
-APIs to add/change:
-
-- `GET /api/v1/previews/status`
-- `POST /api/v1/previews/cleanup`
-- `GET /api/v1/metadata/status`
-- Extend asset detail with typed metadata summary.
-
-Migrations to add:
-
-- `preview_cache_entries(asset_id, content_id, variant, width, height, format, cache_path, status, size_bytes, created_at, last_accessed_at, error)`
-- indexes on `(asset_id)`, `(content_id)`, `(status)`, `(last_accessed_at)`
-- Optional `asset_metadata_facts` only if typed metadata outgrows `metadata_json`.
-
-Frontend pages/components:
-
-- Preview cache status card.
-- Preview cleanup button, auth-protected.
-- Asset detail typed metadata panel.
-- Unsupported preview status remains visible and non-fatal.
-
-Tests to add:
-
-- Cache index insert/update on generation.
-- Cache hit updates access time.
-- Cleanup never deletes outside cache root.
-- Unsupported formats do not fail jobs.
-- Metadata enrichment cancellation.
-
-Acceptance criteria:
-
-- Preview cache is inspectable and cleanup is safe.
-- Metadata and preview jobs remain safe on dummy files.
-
-## 8. UI Integration
-
-Files/packages likely to change:
-
+- `internal/server/settings.go`
+- `internal/server/extended.go`
+- `internal/catalog/extended_store.go`
+- `internal/database/extended.go`
 - `webui/src/App.vue`
 - `webui/src/api.ts`
 - `webui/src/style.css`
-- optionally split into `webui/src/components/*` if the single-file UI becomes too large
 
-APIs to add/change:
+APIs:
 
-- Use APIs listed in sections above.
+- `GET /api/v1/settings`
+- `GET /api/v1/settings/schema`
+- `PATCH /api/v1/settings/runtime`
+- `GET /api/v1/settings/pending`
+- `PATCH /api/v1/settings/pending`
+- `DELETE /api/v1/settings/pending`
+- `GET /api/v1/settings/pending/download`
+- `GET /api/v1/plugins/{id}/settings/schema`
+- `GET /api/v1/plugins/{id}/settings`
+- `PATCH /api/v1/plugins/{id}/settings`
 
-Migrations to add:
+Frontend work:
 
-- None directly; UI follows backend migrations.
+- Tabs:
+  - General;
+  - Server/HTTP/HTTPS;
+  - Storage;
+  - Indexing/Discovery;
+  - Metadata/EXIF;
+  - Preview Cache;
+  - Map/Tiles;
+  - GPS/KML Tracks;
+  - Transcoding;
+  - AI/Vector;
+  - Auth/Security;
+  - Backups/DB Export;
+  - Plugins;
+  - Raw YAML / Effective Config.
+- Each tab shows only relevant settings.
+- Add margins, spacing, and state badges:
+  - Runtime;
+  - Restart required;
+  - Plugin setting.
+- Plugin tab gets second-row plugin tabs and UI/YAML toggle.
 
-Frontend pages/components:
+Tests:
 
-- Albums page and album detail.
-- Map page with approved OpenLayers integration or improved SVG fallback.
-- GPS track manager detail view.
-- Discovery dry-run page/report.
-- Explorer filters/pagination/selection.
-- Jobs filters and active worker state.
-- Preview/metadata cache/status controls.
+- Each settings tab renders a distinct schema group.
+- GPS/KML Tracks tab is not empty.
+- Runtime setting roundtrip.
+- Pending YAML setting roundtrip.
+- Plugin setting roundtrip.
+- Secret fields are masked.
 
-Tests to add:
+Acceptance:
 
-- `npm --prefix webui run build`.
-- If a JS test framework is introduced later, add component tests; do not add one in this run unless justified.
+- Settings page is usable as a product UI, not just raw config.
 
-Acceptance criteria:
+## 10. Bootstrap/Material-Like Polish
 
-- WebUI remains buildable without CDN resources.
-- Main workflows are visible from navigation.
-- Real-archive dry-run controls make unsafe defaults hard to choose.
+Current dependencies:
 
-## 9. Test And Verification Plan
+- `bootstrap` `5.3.8`, MIT.
+- `bootstrap-icons` `1.13.1`, MIT.
+- Bundled locally through Vite; no CDN required.
 
-Required commands before finishing the long run:
+Files likely to change:
+
+- `webui/src/main.ts`
+- `webui/src/App.vue`
+- `webui/src/style.css`
+
+Work:
+
+- Continue migrating forms/buttons/cards/nav toward Bootstrap styling.
+- Use Bootstrap Icons for nav/actions where helpful.
+- Preserve dark theme and dense workbench layout.
+- Do not add external fonts or CDN assets.
+
+Tests:
+
+- `npm --prefix webui run build`
+- Inspect built output for obvious remote CDN references if new packages are added.
+
+Acceptance:
+
+- UI is visually more consistent without changing safety-critical workflows.
+
+## 11. AI Sidecar Services And Model-Ready Foundation
+
+Detailed plan: [AI_SERVICE_PLAN.md](AI_SERVICE_PLAN.md)
+
+Files/packages likely to change:
+
+- `services/ai/`
+- `docker/ai/`
+- `docker-compose.yml`
+- `internal/server`
+- `internal/catalog`
+- `internal/database`
+- `internal/jobs`
+- `internal/workers`
+- `webui/src/App.vue`
+- `webui/src/api.ts`
+
+Implementation order:
+
+1. Package the dummy worker as `python -m cartolensia_ai.server`.
+2. Add native and Docker entrypoints named `server`.
+3. Add AI worker registry with health/capability polling.
+4. Add backend jobs:
+   - `ai_classify`;
+   - `ai_detect_faces`;
+   - `ai_describe`;
+   - `ai_embed`.
+5. Store dummy/no-model predictions in `ai_predictions` and `asset_tags` only when explicitly run on selected/bounded scopes.
+6. Add model-cache settings and docs.
+7. Add Docker Compose profiles for CPU/NVIDIA/ROCm/Intel, but do not pull/build heavy images by default.
+
+Approvals required before real inference:
+
+- Python dependency install into a venv or AI image build.
+- Model downloads into `.cartolensia/models`.
+- Docker GPU image pulls/builds.
+
+Acceptance:
+
+- AI worker service can run locally in dummy mode with the `server` entrypoint.
+- Backend can call dummy worker and persist structured no-model results.
+- UI clearly shows not-configured state and next actions.
+
+## 12. Universal Explorer Search Improvements
+
+Files/packages likely to change:
+
+- `internal/server/search.go` or `internal/server/extended.go`
+- `internal/catalog`
+- `internal/database`
+- `webui/src/App.vue`
+- `webui/src/api.ts`
+
+API:
+
+- Continue `GET /api/v1/search?q=...`.
+- Add structured filters:
+  - `media_kind`;
+  - `extension`;
+  - `hash_prefix`;
+  - `date_from`;
+  - `date_to`;
+  - `camera`;
+  - `album_id`;
+  - `track_id`;
+  - `tag`;
+  - pagination and sort.
+
+Query language:
+
+- Plain filename/path terms.
+- `ext:jpg`, `kind:photo`, `hash:abc123`.
+- Dates: `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, `YYYY-MM..YYYY-MM`.
+- `camera:Pixel`, `album:name`, `track:name`, `tag:name`.
+- Quoted phrases.
+
+Response:
+
+- Asset results.
+- Match explanations.
+- Parsed tokens.
+- Unsupported-token warnings.
+
+Tests:
+
+- Filename/path search.
+- Extension/media kind.
+- Date and date range.
+- Hash prefix.
+- EXIF camera make/model.
+- Album and track filters.
+- Tag/category filters.
+
+Acceptance:
+
+- Explorer has one central search box that explains why each result matched.
+
+## 13. Dependency And Model Approval List
+
+Already installed and license-checked locally:
+
+- `ol` `10.9.0`, BSD-2-Clause.
+- `bootstrap` `5.3.8`, MIT.
+- `bootstrap-icons` `1.13.1`, MIT.
+- `hls.js`, Apache-2.0.
+
+Recommended no-new-dependency path:
+
+- Track altitude/speed charts implemented as plain SVG/canvas.
+- Keep current frontend dependencies.
+
+Approvals required:
+
+- Short native ffmpeg NVENC validation on current 7-second real-peek video, output only to `/tmp` or `.cartolensia/realpeek-cache/transcode-test`.
+- Python venv/dependency install for AI service if moving beyond stdlib dummy worker.
+- Docker image pulls/builds for CUDA/PyTorch/ROCm/Intel images.
+- Model downloads into `.cartolensia/models`.
+
+Model proposals are documented in [AI_SERVICE_PLAN.md](AI_SERVICE_PLAN.md). Do not download models in the implementation pass unless the user explicitly approves them.
+
+## 14. Verification Plan
+
+Required before ending the next implementation run:
 
 ```bash
-gofmt -w <changed Go files>
+gofmt -w $(find internal cmd -name '*.go' -print)
 git diff --check
 GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...
 go test ./...
 npm --prefix webui run build
 bash scripts/smoke-test.sh
 docker compose -f docker-compose.yml -f docker-compose.dev.yml config
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
 bash scripts/test-db.sh
-docker compose -f docker-compose.yml -f docker-compose.dev.yml stop postgres
 ```
 
-Additional long-run checks:
+Additional targeted checks:
 
-```bash
-CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/generate-synthetic-fixture.sh
-CARTOLENSIA_SYNTHETIC_ROOT=/tmp/cartolensia_synthetic_media bash scripts/perf-smoke.sh
-```
+- Track detail page opens for all 4 current tracks.
+- Altitude/speed charts render for GPX and degrade cleanly for no-time KML.
+- Track media during-track returns photo/video results or a clear no-match reason.
+- Advanced transcode modal focus suppresses gallery arrow/WASD shortcuts.
+- Custom NVIDIA preset validation shows ffmpeg command/stderr status.
+- Asset detail photo view is high-resolution or view-size generated, not thumbnail-only.
+- Storage page refuses unsafe `/mnt/Models/rclone` mode downgrade.
+- Preview generation default is on-demand unless explicitly enabled.
+- Settings tabs show distinct settings.
+- AI dummy sidecar can start natively and report `/health`.
+- Explorer universal search supports filename/date/hash.
 
-Rules:
+End-of-run reports:
 
-- Do not reset a database unless explicitly approved.
-- Prefer isolated DB schemas/test data for integration tests.
-- Do not drop user databases.
-- Do not touch `/mnt/Models/rclone`.
-- Do not claim success unless the command actually passed.
-
-Acceptance criteria:
-
-- All feasible tests pass.
-- Any environment-only failure is documented.
-- `RUN_REPORT.md` is updated with implemented features, commands, failures, limitations, and whether `/mnt/Models/rclone` was touched.
+- Update `RUN_REPORT.md`.
+- Update `.cartolensia/runtime/REAL_PEEK_STATUS.md` if live state changes.
+- Update `.cartolensia/runtime/REAL_PEEK_FIX_STATUS.md` if live app is restarted or manually validated.
+- Confirm no writes to `/mnt/Models/rclone`, no commit, and no push.

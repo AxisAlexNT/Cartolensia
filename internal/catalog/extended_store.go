@@ -518,17 +518,26 @@ func (s *MemoryStore) QueryTrackAssets(ctx context.Context, query TrackAssetQuer
 	if err != nil {
 		return AssetPage{}, err
 	}
+	limit, offset := normalizePage(query.Limit, query.Offset)
 	if detail.Summary.StartTime == nil || detail.Summary.EndTime == nil {
-		return AssetPage{Page: Page{Limit: query.Limit, Offset: query.Offset}}, nil
+		return AssetPage{Assets: []Asset{}, Page: Page{Limit: limit, Offset: offset}}, nil
 	}
 	start := detail.Summary.StartTime.Add(time.Duration(query.OffsetSeconds) * time.Second)
 	end := detail.Summary.EndTime.Add(time.Duration(query.OffsetSeconds) * time.Second)
-	page, err := s.QueryAssets(ctx, AssetQuery{MediaKind: query.MediaKind, TakenFrom: &start, TakenTo: &end, Limit: query.Limit, Offset: query.Offset})
+	mediaKinds := TrackAssetAllowedMediaKinds(query.MediaKind, query.ExcludeTrackAssets)
+	assetQueryMediaKind := ""
+	if len(mediaKinds) == 1 {
+		assetQueryMediaKind = mediaKinds[0]
+	}
+	page, err := s.QueryAssets(ctx, AssetQuery{MediaKind: assetQueryMediaKind, TakenFrom: &start, TakenTo: &end, Limit: 10000, Offset: 0})
 	if err != nil {
 		return AssetPage{}, err
 	}
 	var filtered []Asset
 	for _, asset := range page.Assets {
+		if !TrackAssetMediaKindAllowed(asset.MediaKind, mediaKinds, query.ExcludeTrackAssets) {
+			continue
+		}
 		_, geotagged := s.assetGeo[asset.ID]
 		if geotagged && !query.IncludeGeotagged {
 			continue
@@ -538,9 +547,63 @@ func (s *MemoryStore) QueryTrackAssets(ctx context.Context, query TrackAssetQuer
 		}
 		filtered = append(filtered, asset)
 	}
+	total := len(filtered)
+	if offset >= len(filtered) {
+		filtered = []Asset{}
+	} else {
+		endIndex := offset + limit
+		if endIndex > len(filtered) {
+			endIndex = len(filtered)
+		}
+		filtered = filtered[offset:endIndex]
+	}
 	page.Assets = filtered
-	page.Page.Total = len(filtered)
+	page.Page = Page{Limit: limit, Offset: offset, Total: total}
 	return page, nil
+}
+
+func TrackAssetAllowedMediaKinds(raw string, excludeTracks bool) []string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" && excludeTracks {
+		return []string{"photo", "video"}
+	}
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == ';' })
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if excludeTracks && (part == "track" || part == "gps" || part == "gpx" || part == "kml") {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
+}
+
+func TrackAssetMediaKindAllowed(kind string, allowed []string, excludeTracks bool) bool {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if excludeTracks && kind == "track" {
+		return false
+	}
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if candidate == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *MemoryStore) CreateScanRun(_ context.Context, run ScanRun) (ScanRun, error) {
@@ -724,6 +787,62 @@ func (s *MemoryStore) CleanupPreviewCacheEntries(_ context.Context, olderThan ti
 		}
 	}
 	return deleted, nil
+}
+
+func (s *MemoryStore) ListTranscodingPresets(_ context.Context) ([]TranscodingPreset, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]TranscodingPreset, 0, len(s.transcodePresets))
+	for _, preset := range s.transcodePresets {
+		out = append(out, cloneTranscodingPreset(preset))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertTranscodingPreset(_ context.Context, preset TranscodingPreset) (TranscodingPreset, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if preset.ID == "" {
+		preset.ID = slugify(preset.Name)
+	}
+	if preset.Name == "" {
+		preset.Name = preset.ID
+	}
+	if preset.CreatedAt.IsZero() {
+		if current, ok := s.transcodePresets[preset.ID]; ok {
+			preset.CreatedAt = current.CreatedAt
+		} else {
+			preset.CreatedAt = now
+		}
+	}
+	preset.UpdatedAt = now
+	preset.BuiltIn = false
+	preset.Available = true
+	s.transcodePresets[preset.ID] = cloneTranscodingPreset(preset)
+	return cloneTranscodingPreset(preset), nil
+}
+
+func (s *MemoryStore) DeleteTranscodingPreset(_ context.Context, presetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.transcodePresets[presetID]; !ok {
+		return ErrNotFound
+	}
+	delete(s.transcodePresets, presetID)
+	return nil
+}
+
+func cloneTranscodingPreset(preset TranscodingPreset) TranscodingPreset {
+	if preset.ExtraArgs != nil {
+		extra := make(map[string]any, len(preset.ExtraArgs))
+		for key, value := range preset.ExtraArgs {
+			extra[key] = value
+		}
+		preset.ExtraArgs = extra
+	}
+	return preset
 }
 
 func previewEntryKey(assetID, variant string, width, height int, format string) string {

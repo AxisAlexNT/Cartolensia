@@ -21,7 +21,7 @@ var runtimeSettings = struct {
 	"indexing.default_max_files":    50,
 	"indexing.hash_after_index":     true,
 	"indexing.metadata_after_index": true,
-	"indexing.previews_after_index": true,
+	"indexing.previews_after_index": false,
 	"map.cluster_radius_px":         64,
 	"map.tiles_enabled":             true,
 	"preview.cache_max_bytes":       int64(10 * 1024 * 1024 * 1024),
@@ -40,6 +40,19 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.settingsPayload())
+}
+
+func (s *Server) handleSettingsSchema(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tabs":             s.settingsPayload()["tabs"],
+		"runtime_settings": runtimeSettingsSchema(),
+		"pending_settings": pendingSettingsSchema(),
+		"plugin_settings":  "see /api/v1/plugins/{id}/settings/schema",
+	})
 }
 
 func (s *Server) handleSettingsEffective(w http.ResponseWriter, r *http.Request) {
@@ -279,6 +292,18 @@ func (s *Server) handlePluginSettings(w http.ResponseWriter, r *http.Request, pl
 	}
 }
 
+func (s *Server) handlePluginSettingsSchema(w http.ResponseWriter, r *http.Request, pluginID string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plugin_id": pluginID,
+		"fields":    pluginSettingsSchema(pluginID),
+		"modes":     []string{"ui", "yaml"},
+	})
+}
+
 func runtimeSettingsSnapshot() map[string]any {
 	runtimeSettings.RLock()
 	defer runtimeSettings.RUnlock()
@@ -312,6 +337,59 @@ func restartRequiredSettings() map[string]any {
 		"required_for": yamlBoundSettings(),
 		"note":         "These values come from YAML or environment configuration and require an app restart.",
 	}
+}
+
+func runtimeSettingsSchema() []map[string]any {
+	return []map[string]any{
+		{"tab": "indexing", "key": "indexing.default_max_files", "type": "number", "label": "Default max files"},
+		{"tab": "indexing", "key": "indexing.hash_after_index", "type": "boolean", "label": "Hash after indexing"},
+		{"tab": "indexing", "key": "indexing.metadata_after_index", "type": "boolean", "label": "Extract metadata after indexing"},
+		{"tab": "indexing", "key": "indexing.previews_after_index", "type": "boolean", "label": "Generate previews after indexing"},
+		{"tab": "preview", "key": "preview.cache_max_bytes", "type": "number", "label": "Preview cache max bytes"},
+		{"tab": "map", "key": "map.cluster_radius_px", "type": "number", "label": "Cluster radius px"},
+		{"tab": "map", "key": "map.tiles_enabled", "type": "boolean", "label": "OSM tiles enabled"},
+		{"tab": "transcoding", "key": "transcode.session_ttl", "type": "text", "label": "Transcode session TTL"},
+	}
+}
+
+func pendingSettingsSchema() []map[string]any {
+	return []map[string]any{
+		{"tab": "metadata", "key": "metadata.exif_enabled", "type": "boolean", "restart_required": true},
+		{"tab": "metadata", "key": "metadata.exif_gps_enabled", "type": "boolean", "restart_required": true},
+		{"tab": "gps", "key": "gps.parse_gpx_enabled", "type": "boolean", "restart_required": true},
+		{"tab": "gps", "key": "gps.parse_kml_enabled", "type": "boolean", "restart_required": true},
+		{"tab": "gps", "key": "gps.parse_kmz_enabled", "type": "boolean", "restart_required": true},
+		{"tab": "gps", "key": "gps.parse_gpz_enabled", "type": "boolean", "restart_required": true},
+		{"tab": "preview", "key": "preview.cache_dir", "type": "text", "restart_required": true},
+		{"tab": "map", "key": "map.tile_cache_dir", "type": "text", "restart_required": true},
+		{"tab": "transcoding", "key": "transcoding.ffmpeg_path", "type": "text", "restart_required": true},
+	}
+}
+
+func pluginSettingsSchema(pluginID string) []map[string]any {
+	common := []map[string]any{
+		{"key": "enabled", "type": "boolean", "label": "Enabled"},
+		{"key": "notes", "type": "text", "label": "Operator notes"},
+	}
+	specific := map[string][]map[string]any{
+		"albums": []map[string]any{
+			{"key": "default_sort", "type": "text", "label": "Default album sort"},
+			{"key": "show_virtual_warning", "type": "boolean", "label": "Show virtual album warning"},
+		},
+		"mapview": []map[string]any{
+			{"key": "default_cluster_distance_px", "type": "number", "label": "Default cluster distance px"},
+			{"key": "popup_gallery_limit", "type": "number", "label": "Popup gallery limit"},
+		},
+		"gpstracks": []map[string]any{
+			{"key": "default_nearby_distance_m", "type": "number", "label": "Nearby media distance"},
+			{"key": "thumbnail_osm_background", "type": "boolean", "label": "OSM track thumbnail background"},
+		},
+		"transcoding": []map[string]any{
+			{"key": "default_preset", "type": "text", "label": "Default preset"},
+			{"key": "max_concurrent_sessions", "type": "number", "label": "Max concurrent sessions"},
+		},
+	}
+	return append(common, specific[pluginID]...)
 }
 
 func (s *Server) handleDBExport(w http.ResponseWriter, r *http.Request) {

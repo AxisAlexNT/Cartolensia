@@ -167,6 +167,42 @@ export type TrackDetail = {
   }>;
 };
 
+export type TrackPointInfo = {
+  track: TrackSummary;
+  clicked: { lat: number; lon: number };
+  nearest: { lat: number; lon: number };
+  nearest_point?: TrackDetail["points"][number];
+  nearest_segment_index?: number;
+  distance_m: number;
+  relative_time_seconds?: number;
+  timestamp?: string;
+  speed_mps?: number;
+  elevation_m?: number;
+  has_timestamps: boolean;
+  source_format?: string;
+  track_distance_m?: number;
+  track_duration_seconds?: number;
+};
+
+export type TrackProfile = {
+  track: TrackSummary;
+  metric: "altitude" | "speed" | string;
+  unit: string;
+  has_values: boolean;
+  has_timestamps: boolean;
+  min?: number;
+  max?: number;
+  series: Array<{
+    index: number;
+    distance_m: number;
+    relative_seconds?: number;
+    timestamp?: string;
+    value?: number;
+    lat: number;
+    lon: number;
+  }>;
+};
+
 export type Album = {
   id: string;
   parent_id?: string;
@@ -385,11 +421,47 @@ export type TranscodeSession = {
   id: string;
   asset_id: string;
   profile: string;
+  hardware?: string;
+  encoder?: string;
   playlist_url: string;
   status: string;
   created_at: string;
   error?: string;
   stderr_tail?: string;
+  command?: string[];
+  segment_count?: number;
+  output_bytes?: number;
+};
+
+export type TranscodingPreset = {
+  id: string;
+  name: string;
+  built_in: boolean;
+  available: boolean;
+  disabled_reason?: string;
+  hardware: string;
+  codec: string;
+  ffmpeg_encoder: string;
+  mode: string;
+  parameter_value: string;
+  container: string;
+  extra_args?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SearchResult = {
+  asset: Asset;
+  matched: string[];
+  explanation: string;
+};
+
+export type SearchResponse = {
+  query: string;
+  tokens: string[];
+  results: SearchResult[];
+  warnings: string[];
+  page: { limit: number; offset: number; total: number };
 };
 
 export type TileSource = {
@@ -522,6 +594,18 @@ export const api = {
     }),
   status: () => request<BackendStatus>("/api/v1/backend/status"),
   storages: async () => asArray(await request<StorageConfig[] | null>("/api/v1/storages")),
+  createStorage: (storage: StorageConfig, validateOnly = false) =>
+    request<Record<string, unknown>>("/api/v1/storages", {
+      method: "POST",
+      body: JSON.stringify({ ...storage, validate_only: validateOnly })
+    }),
+  updateStorage: (name: string, storage: StorageConfig, validateOnly = false) =>
+    request<Record<string, unknown>>(`/api/v1/storages/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...storage, validate_only: validateOnly })
+    }),
+  validateStorage: (name: string) =>
+    request<Record<string, unknown>>(`/api/v1/storages/${encodeURIComponent(name)}/validate`),
   plugins: async () => asArray(await request<PluginManifest[] | null>("/api/v1/plugins")),
   plugin: (id: string) => request<PluginManifest>(`/api/v1/plugins/${encodeURIComponent(id)}`),
   pluginHealth: (id: string) => request<Record<string, unknown>>(`/api/v1/plugins/${encodeURIComponent(id)}/health`),
@@ -579,10 +663,25 @@ export const api = {
     request<TrackDetail["points"] | null>(
       `/api/v1/gps/tracks/${encodeURIComponent(id)}/points?simplify=true&max_points=${maxPoints}`
     ).then(asArray),
-  gpsTrackAssets: (id: string, offsetSeconds = 0) =>
-    request<{ assets: Asset[]; page: { limit: number; offset: number; total: number } }>(
-      `/api/v1/gps/tracks/${encodeURIComponent(id)}/assets?offset_seconds=${offsetSeconds}&include_geotagged=true&include_ungeotagged=true`
+  gpsTrackPointInfo: (id: string, lat: number, lon: number) =>
+    request<TrackPointInfo>(
+      `/api/v1/gps/tracks/${encodeURIComponent(id)}/point-info?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}`
+    ),
+  gpsTrackProfile: (id: string, metric: "altitude" | "speed", maxPoints = 1000) =>
+    request<TrackProfile>(
+      `/api/v1/gps/tracks/${encodeURIComponent(id)}/profile?metric=${encodeURIComponent(metric)}&simplify=true&max_points=${maxPoints}`
+    ).then((profile) => ({ ...profile, series: asArray(profile.series) })),
+  gpsTrackAssets: (id: string, offsetSeconds = 0, mediaKind = "photo,video") =>
+    request<{ assets: Asset[]; page: { limit: number; offset: number; total: number }; reason?: string }>(
+      `/api/v1/gps/tracks/${encodeURIComponent(id)}/assets?offset_seconds=${offsetSeconds}&include_geotagged=true&include_ungeotagged=true&exclude_track_assets=true&media_kind=${encodeURIComponent(mediaKind)}`
     ).then((page) => ({ ...page, assets: asArray(page.assets).map(normalizeAsset) })),
+  gpsTrackNearbyAssets: (id: string, distanceM = 100) =>
+    request<{ assets: Array<{ asset: Asset; distance_m: number; nearest_lat: number; nearest_lon: number }>; page: { limit: number; offset: number; total: number } }>(
+      `/api/v1/gps/tracks/${encodeURIComponent(id)}/nearby-assets?distance_m=${encodeURIComponent(String(distanceM))}`
+    ).then((page) => ({
+      ...page,
+      assets: asArray(page.assets).map((item) => ({ ...item, asset: normalizeAsset(item.asset) }))
+    })),
   snapTrackMedia: (id: string, offsetSeconds = 0) =>
     request<Job>(`/api/v1/gps/tracks/${encodeURIComponent(id)}/snap-media`, {
       method: "POST",
@@ -600,6 +699,11 @@ export const api = {
     return request<Record<string, unknown> | null>(`/api/v1/map?${query.toString()}`).then(normalizeFeatureCollection);
   },
   mapStatus: () => request<Record<string, unknown>>("/api/v1/map/status"),
+  mapTracks: (params: Record<string, string | number | boolean> = {}) => {
+    const query = new URLSearchParams({ zoom: "10" });
+    Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
+    return request<Record<string, unknown> | null>(`/api/v1/map/tracks?${query.toString()}`).then(normalizeFeatureCollection);
+  },
   tileSources: async () => asArray(await request<TileSource[] | null>("/api/v1/map/tile-sources")),
   stats: () => request<Stats>("/api/v1/stats"),
   startDiscovery: (payload: {
@@ -715,10 +819,27 @@ export const api = {
       hardware: caps.hardware ?? {}
     })),
   streamOptions: (assetId: string) => request<StreamOptions>(`/api/v1/media/${encodeURIComponent(assetId)}/stream-options`),
-  startTranscodeSession: (assetId: string, profile: string) =>
+  trackPreview: (assetId: string, maxPoints = 1200) =>
+    request<Record<string, unknown>>(`/api/v1/media/${encodeURIComponent(assetId)}/track-preview?max_points=${maxPoints}`),
+  transcodingPresets: async () => asArray(await request<TranscodingPreset[] | null>("/api/v1/transcoding/presets")),
+  saveTranscodingPreset: (preset: Partial<TranscodingPreset>) =>
+    request<TranscodingPreset>("/api/v1/transcoding/presets", { method: "POST", body: JSON.stringify(preset) }),
+  validateTranscodingPreset: (preset: Partial<TranscodingPreset>, assetId?: string, dryRun = false) =>
+    request<Record<string, unknown>>("/api/v1/transcoding/presets/validate", {
+      method: "POST",
+      body: JSON.stringify({ preset, asset_id: assetId, dry_run: dryRun, duration_seconds: 2 })
+    }),
+  testTranscodingHardware: (preset: Partial<TranscodingPreset>, assetId: string) =>
+    request<Record<string, unknown>>("/api/v1/transcoding/hardware-test", {
+      method: "POST",
+      body: JSON.stringify({ preset, asset_id: assetId, dry_run: true, duration_seconds: 2 })
+    }),
+  deleteTranscodingPreset: (id: string) =>
+    request<{ status: string }>(`/api/v1/transcoding/presets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  startTranscodeSession: (assetId: string, profile: string, preset?: Partial<TranscodingPreset>) =>
     request<TranscodeSession>(`/api/v1/media/${encodeURIComponent(assetId)}/transcode-session`, {
       method: "POST",
-      body: JSON.stringify({ profile })
+      body: JSON.stringify({ profile, preset })
     }),
   transcodeSessionStatus: (sessionId: string) =>
     request<TranscodeSession>(`/api/v1/media/transcode-sessions/${encodeURIComponent(sessionId)}/status`),
@@ -726,7 +847,20 @@ export const api = {
     request<{ status: string }>(`/api/v1/media/transcode-sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   transcodingStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
+  aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
+  aiJob: (kind: "classify" | "faces" | "describe", payload: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
   vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status"),
+  search: (q: string, limit = 100, offset = 0) =>
+    request<SearchResponse>(
+      `/api/v1/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
+    ).then((response) => ({
+      ...response,
+      results: asArray(response.results).map((item) => ({ ...item, asset: normalizeAsset(item.asset) })),
+      warnings: asArray(response.warnings),
+      tokens: asArray(response.tokens),
+      page: response.page ?? { limit, offset, total: 0 }
+    })),
   settings: () => request<SettingsPayload>("/api/v1/settings"),
   pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
   patchPendingSettings: (settings: Record<string, unknown>) =>

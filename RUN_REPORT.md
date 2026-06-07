@@ -1025,3 +1025,482 @@ Other results:
 ```text
 Continue from the current Cartolensia repository and live real-peek service. Do not reset PostgreSQL unless explicitly asked. Manually inspect http://127.0.0.1:18080 and verify: Low bitrate LAN HLS playback, map cluster labels/popups, GPS/KML Tracks showing 4 tracks, Discovery shared pipeline settings, Settings pending YAML forms, and gallery wheel/WASD zoom. Keep /mnt/Models/rclone strict read-only, do not mark missing, do not run unbounded scans, do not commit, and do not push.
 ```
+
+## 2026-06-07 Long Productization Run: Track Popups, Search, Presets, Settings, AI Scaffold
+
+### Live Diagnosis
+
+Queried the current real-peek service before and after the run:
+
+- `/api/v1/stats`: `54` assets, `54` locations, `48` photos, `2` videos, `4` track files, `54` hashed, `0` unhashed, `619580406` total bytes.
+- `/api/v1/gps/tracks`: `4` parsed summaries, including `2` GPX and `2` KML tracks.
+- `/api/v1/map/status`: `48` geotagged assets, `4` tracks, PostGIS available, Cartolensia OSM tile proxy, `screen_distance` clustering.
+- `/api/v1/map/assets?limit=100&clusters=true`: far zoom clusters the current photo set; high zoom splits into individual points and same-coordinate clusters.
+- `/api/v1/transcoding/presets`: built-ins present; AV1 preset is disabled with a clear encoder/browser-safety reason.
+- `/api/v1/ai/workers`: CPU/NVIDIA/ROCm/Intel profile entries are present and `not_configured`.
+- `/api/v1/search?q=jpg&limit=3`: returned results with filename/path/extension match explanations.
+
+No new broad scan was run. No missing marking was run.
+
+### Dependencies Added
+
+- `bootstrap` via npm, license verified from package metadata as `MIT`.
+- `bootstrap-icons` via npm, license verified from package metadata as `MIT`.
+
+Previously added and still in use:
+
+- `ol` (`BSD-2-Clause`) for OpenLayers.
+- `hls.js` (`Apache-2.0`) for browser HLS playback.
+- `github.com/rwcarlsen/goexif` (BSD-style cached module license) for EXIF parsing.
+
+### Implemented
+
+- Fixed map click priority: asset and cluster markers are above track layers and win click handling before tracks.
+- Added track click popups:
+  - clicked coordinate;
+  - nearest track point and distance;
+  - relative/absolute time when timestamps exist;
+  - speed and elevation when available;
+  - buttons/actions for Track Manager, time-based media, nearby media by meters, and show-only-this-track.
+- Added backend track helper APIs:
+  - `GET /api/v1/gps/tracks/{id}/point-info`
+  - `GET /api/v1/gps/tracks/{id}/nearby-assets`
+- Added track asset previews:
+  - `GET /api/v1/media/{asset_id}/track-preview`
+  - `GET /api/v1/media/{asset_id}/track-thumbnail`
+  - generated thumbnails stay under `.cartolensia/realpeek-cache`.
+- Improved gallery overlay pan/zoom:
+  - wheel zoom at cursor;
+  - pointer/touch/pen drag pan;
+  - pinch zoom;
+  - double-click fit/100%;
+  - Fit/100/Reset buttons;
+  - WASD pan;
+  - ArrowLeft/ArrowRight always navigate.
+- Fixed Explorer nested-prefix usability: folder tiles now render when a scanned prefix only contains child folders, so `Root / Cartolensia-photos` is not a blank page.
+- Added universal Explorer search:
+  - endpoint `GET /api/v1/search?q=...`;
+  - filename/path/extension/media/date/hash/metadata/tag/album/track matching;
+  - result explanations.
+- Added transcoding preset persistence:
+  - built-in presets are non-removable;
+  - custom presets can be saved/removed;
+  - backend validates preset shape and HLS profile use.
+- Added advanced video-player controls:
+  - hardware selector;
+  - codec/encoder selector;
+  - quality/quantizer/bitrate mode;
+  - custom preset save/remove;
+  - browser local preference reuse.
+- Reorganized Settings:
+  - distinct category tabs instead of one repeated combined list;
+  - useful GPS/KML Tracks tab;
+  - Map/Tiles, Preview, Transcoding, Metadata, Indexing, AI, Backups tabs;
+  - second-row plugin tabs;
+  - UI/YAML config toggle per plugin;
+  - settings schema endpoints.
+- Added Bootstrap/Bootstrap Icons local bundle imports. No CDN is required.
+- Added AI sidecar foundation:
+  - `services/ai/worker.py` dummy HTTP JSON worker;
+  - Docker Compose profiles for `ai-cpu`, `ai-nvidia`, `ai-rocm`, `ai-intel`;
+  - AI worker registry/status APIs;
+  - not-configured classify/faces/describe job endpoints;
+  - schema migration for `asset_tags`, `ai_predictions`, `face_detections`, `face_clusters`, and `user_preferences`.
+- Updated README and docs for the implemented safety boundaries, APIs, settings, AI scaffold, search, track previews, and transcoding presets.
+
+### Verification Commands
+
+Passed:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Notes:
+
+- `npm --prefix webui run build` passes with Vite’s large chunk warning. The bundle now includes OpenLayers, Bootstrap, Bootstrap Icons, and HLS support.
+- The smoke test was run on `127.0.0.1:18081` to avoid disturbing the live app on `127.0.0.1:18080`.
+
+### Current Live State For Manual Inspection
+
+- App URL: `http://127.0.0.1:18080`
+- Config: `.cartolensia/runtime/realpeek.yaml`
+- Storage: `rclone_peek`
+- Root: `/mnt/Models/rclone`
+- Mode: `strict_read_only`
+- Assets: `54`
+- Hashed: `54`
+- Geotagged assets: `48`
+- Parsed GPX/KML tracks: `4`
+- Preview cache ready: `48`
+- Current live HLS inspection session: `cce1d680-88ea-419a-b47b-4cfef39f0113`, under `.cartolensia/realpeek-cache/transcode`.
+
+Pages to inspect:
+
+- Explorer/search: `http://127.0.0.1:18080/?page=explorer`
+- Map: `http://127.0.0.1:18080/?page=map`
+- GPS/KML Tracks: `http://127.0.0.1:18080/?page=gps-tracks`
+- Asset/video detail: `http://127.0.0.1:18080/?page=explorer`, then open a video asset.
+- Settings: `http://127.0.0.1:18080/?page=settings`
+- Base AI: `http://127.0.0.1:18080/?page=base-ai`
+
+### Known Limitations
+
+- Track thumbnails currently use the dark fallback renderer. OSM-background thumbnail compositing is represented in settings but not implemented.
+- Last selected video preset is stored in browser local storage. The `user_preferences` table exists, but user preference API wiring is future work.
+- Custom preset UI is functional for metadata/session selection, but hardware-specific encoder failure handling still depends on ffmpeg runtime feedback.
+- AI sidecar and schema foundation are present, but no real model inference, embeddings, face clustering, or caption generation runs yet.
+- Settings schemas are generic; custom plugin-provided WebUI components remain future work.
+- No local reverse geocoder exists, so map cluster `location_label` remains `null`.
+- Built assets may include upstream license/reference URLs in bundled package comments; runtime CSS/JS/icon assets are bundled locally and not loaded from a CDN.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not written to, deleted from, renamed in, moved in, chmodded, transcode-written, preview-cached, tile-cached, model-cached, exported into, dumped into, or temp-written.
+- Real storage remained `strict_read_only`.
+- No unbounded scan was run.
+- No `storage=all` real archive action was run.
+- No missing marking was run.
+- Cache/work outputs stayed under `.cartolensia/realpeek-cache`, `.cartolensia/exports`, `.cartolensia/models`, or other repo-local ignored paths.
+- No commit was made.
+- No push was done.
+
+### Recommended Next Prompt
+
+```text
+Continue from the current Cartolensia repository and live real-peek service. Do not reset PostgreSQL unless explicitly asked. Manually inspect http://127.0.0.1:18080 and verify: map marker/cluster click priority, track click popups, track thumbnails/gallery previews, gallery mouse/touch zoom, Explorer universal search, custom video transcoding presets, Settings category/plugin tabs, and Base AI dashboard. Keep /mnt/Models/rclone strict read-only, do not mark missing, do not run unbounded scans, do not commit, and do not push.
+```
+
+## 2026-06-07 Interactive Preflight For Next Implementation Pass
+
+### Scope
+
+This was a supervised preflight only. No large implementation was started.
+
+Hard safety status:
+
+- `/mnt/Models/rclone` was not written to, deleted from, renamed in, moved in, chmodded, transcode-written, preview-cached, tile-cached, model-cached, exported into, dumped into, temp-written, or newly scanned.
+- No new real-data prefixes were scanned.
+- PostgreSQL was not reset.
+- Missing-file marking was not run.
+- No Docker images were pulled.
+- No model files were downloaded.
+- No dependency installs were performed.
+- No commit was made.
+- No push was done.
+
+### Files Updated
+
+- `docs/NEXT_INTERACTIVE_PREFLIGHT.md`
+- `docs/NEXT_LONG_RUN_PLAN.md`
+- `docs/AI_SERVICE_PLAN.md`
+- `docs/TRANSCODING_HARDWARE_PLAN.md`
+- `RUN_REPORT.md`
+
+### Live API Audit
+
+Queried the current app at `http://127.0.0.1:18080`:
+
+- `GET /api/v1/stats`
+- `GET /api/v1/assets?limit=5`
+- `GET /api/v1/gps/tracks`
+- `GET /api/v1/map/status`
+- `GET /api/v1/map/assets?limit=100&clusters=true`
+- `GET /api/v1/map/tracks`
+- `GET /api/v1/transcoding/capabilities`
+- `GET /api/v1/transcoding/presets`
+- `GET /api/v1/ai/status`
+- `GET /api/v1/ai/workers`
+- `GET /api/v1/settings`
+- `GET /api/v1/settings/schema`
+- `GET /api/v1/storages`
+- `GET /api/v1/search?q=jpg`
+- `GET /api/v1/jobs?limit=20`
+- `GET /api/v1/assets?media_kind=video&limit=1`
+- `GET /api/v1/media/ce8b4866-33bd-474e-84ab-a0fd9388a313/stream-options`
+
+Current live counts:
+
+- Assets: `54`
+- Locations: `54`
+- Photos: `48`
+- Videos: `2`
+- Track files: `4`
+- Parsed GPX/KML summaries: `4`
+- Hashed: `54`
+- Unhashed: `0`
+- Geotagged assets: `48`
+- Duplicate groups: `0`
+- Total bytes: `619580406`
+
+Current storage:
+
+- Name: `rclone_peek`
+- Root: `/mnt/Models/rclone`
+- Mode: `strict_read_only`
+
+Jobs:
+
+- Latest 20 jobs were terminal; no active job was observed.
+- Recent bounded `Cartolensia-photos` discovery jobs reached `max_files=50` and report incomplete due to the explicit bound, not because of failure.
+- Historical zero-target hash/preview jobs remain in job history; the next run should make these explicit no-op/rejected jobs instead of confusing succeeded/queued jobs.
+
+Map/tracks:
+
+- `/api/v1/map/status` reports PostGIS available, `48` geotagged assets, `4` tracks, OSM tile proxy, and `screen_distance` clustering.
+- GPS/KML track summaries exist for `2` GPX and `2` KML files.
+- Track Manager still needs a dedicated detail route with OpenLayers map, altitude profile, speed profile, and media-query actions.
+
+Transcoding:
+
+- ffmpeg/ffprobe are available through the app.
+- Stream options for video asset `ce8b4866-33bd-474e-84ab-a0fd9388a313` include direct/original, CPU HLS presets, disabled AV1, and custom NVIDIA preset `nv-750k`.
+- The custom NVIDIA preset is only statically validated today. It needs real dry-run validation, bitrate normalization, NVENC-specific command flags, and stderr display.
+
+AI:
+
+- AI workers exist as not-configured profiles.
+- No real inference worker is running.
+- Dummy worker file exists, but native `python -m cartolensia_ai.server` packaging is not implemented yet.
+
+Settings/search:
+
+- Settings schema covers runtime indexing/preview/map/transcoding and pending metadata/GPS/preview/map/transcoding.
+- Settings layout still needs per-tab cleanup and stronger pending YAML UI.
+- Search MVP works for `jpg`, returning `48` results with match explanations.
+
+### Local Hardware And Tooling Probes
+
+Commands run:
+
+- `uname -a`
+- `lscpu | sed -n '1,80p' || true`
+- `lspci | grep -Ei 'vga|3d|display|nvidia|amd|intel|arc' || true`
+- `ls -l /dev/dri || true`
+- `nvidia-smi || true`
+- `ffmpeg -hide_banner -version || true`
+- `ffmpeg -hide_banner -hwaccels || true`
+- `ffmpeg -hide_banner -encoders | grep -Ei 'nvenc|vaapi|qsv|amf|av1|264|265|hevc' || true`
+- `ffprobe -hide_banner -version || true`
+- `docker --version || true`
+- `docker compose version || true`
+- `docker info --format '{{json .Runtimes}}' || true`
+- `docker images | grep -Ei 'cuda|pytorch|rocm|intel|cartolensia|ai' || true`
+- `docker compose --profile ai-nvidia -f docker-compose.yml -f docker-compose.dev.yml config`
+- `python3 --version`
+- Python import probe for `torch`, `torchvision`, `fastapi`, `uvicorn`, `PIL`, `cv2`, and `onnxruntime`.
+
+Hardware detected:
+
+- CPU: AMD Ryzen 9 7900X, 24 threads, AVX2/AVX512 available.
+- NVIDIA: GeForce RTX 3090 Ti detected by `nvidia-smi`.
+- NVIDIA driver: `570.124.06`.
+- CUDA runtime reported by driver: `12.8`.
+- AMD/ATI Raphael integrated GPU appears in `lspci`.
+- `/dev/dri` is absent in the shell environment.
+- `vainfo` is not installed.
+
+ffmpeg/ffprobe:
+
+- ffmpeg: `6.1.1-3ubuntu5`.
+- ffprobe: `6.1.1-3ubuntu5`.
+- Hardware acceleration methods advertised: `vdpau`, `cuda`, `vaapi`, `qsv`, `drm`, `opencl`, `vulkan`.
+- Encoders advertised:
+  - NVIDIA: `h264_nvenc`, `hevc_nvenc`, `av1_nvenc`.
+  - VAAPI: `h264_vaapi`, `hevc_vaapi`, `av1_vaapi`.
+  - QSV: `h264_qsv`, `hevc_qsv`, `av1_qsv`.
+  - CPU: `libx264`, `libx265`, `libsvtav1`, `libaom-av1`, `librav1e`.
+
+Important diagnosis:
+
+- Host NVIDIA/NVENC is promising for native ffmpeg tests.
+- Docker GPU is not ready yet: `docker info` reported only `runc`/`io.containerd.runc.v2`, not an NVIDIA runtime.
+- The app's hardware status currently reports `/dev/dri`/VAAPI/QSV availability too optimistically compared with the shell probe. The next run should separate "ffmpeg encoder compiled in" from "device actually available".
+
+Docker:
+
+- Docker CLI: `29.2.1`.
+- Docker Compose: `v5.0.2`.
+- No local CUDA/PyTorch/ROCm/Intel AI image was found.
+- No Docker container was started during this preflight.
+
+Python:
+
+- Python: `3.12.3`.
+- Present: `PIL`.
+- Missing: `torch`, `torchvision`, `fastapi`, `uvicorn`, `cv2`, `onnxruntime`.
+
+Frontend dependency licenses verified from local metadata:
+
+- `ol` `10.9.0`: `BSD-2-Clause`.
+- `bootstrap` `5.3.8`: `MIT`.
+- `bootstrap-icons` `1.13.1`: `MIT`.
+- `hls.js`: `Apache-2.0`.
+
+### Proposed Dependencies And Models
+
+No new dependency is required for track altitude/speed charts if implemented with plain SVG/canvas.
+
+AI dependencies proposed but not installed:
+
+- `fastapi`, for robust Python sidecar HTTP API.
+- `uvicorn`, for serving FastAPI.
+- `numpy`, for image/model pipelines.
+- `torch` and `torchvision`, for future classification/embedding models.
+- Optional `onnxruntime` or `opencv-python-headless` only if face detection model/provenance is approved.
+
+Model proposal, without downloads:
+
+- Stage 1: dummy/no-model worker only.
+- Stage 2: small torchvision classification model after weight license/provenance and size are approved.
+- Stage 3: face detection only after model license is clear.
+- Stage 4: captioning/description deferred because likely model size is much larger.
+- Stage 5: CLIP-like embeddings deferred until model license, size, and vector store approach are approved.
+
+Model cache location:
+
+- `.cartolensia/models`
+- Never `/mnt/Models/rclone`.
+
+### Approvals Needed Before The Next Long Run Uses External Resources
+
+Implementation without extra approval:
+
+- Go/Vue code changes.
+- Docs/tests.
+- Dummy AI worker packaging.
+- Command builder and API validation tests using sample strings.
+- Plain SVG/canvas charts.
+
+Approval needed:
+
+- Short native ffmpeg NVENC dry-run on the current indexed 7-second video, output only under `/tmp` or `.cartolensia/realpeek-cache/transcode-test`.
+- Python venv creation and package installation for AI sidecar dependencies.
+- Docker image pulls/builds for CUDA/PyTorch/ROCm/Intel images.
+- Model downloads into `.cartolensia/models`.
+- Docker GPU probe using `docker run --gpus all` if/when a suitable image exists or a small CUDA image pull is approved.
+
+Approval not requested:
+
+- No DB reset.
+- No new real-data scan.
+- No missing marking.
+- No long transcode job.
+- No model download.
+- No Docker image pull.
+
+### Plans Written
+
+- `docs/NEXT_INTERACTIVE_PREFLIGHT.md` records the live state and hardware/tooling audit.
+- `docs/NEXT_LONG_RUN_PLAN.md` now contains the exact next implementation plan.
+- `docs/AI_SERVICE_PLAN.md` defines the AI sidecar layout, native `server` entrypoint, Docker profiles, contracts, schema direction, dependency/model proposal, and approval gates.
+- `docs/TRANSCODING_HARDWARE_PLAN.md` defines the NVENC/custom-preset validation plan, Apply-before-Save flow, hardware-test API, command builder rules, and safety requirements.
+
+### Recommended Next Prompt
+
+```text
+Continue from the current Cartolensia repository and live real-peek service. Implement the next long-run plan in docs/NEXT_LONG_RUN_PLAN.md, using docs/AI_SERVICE_PLAN.md and docs/TRANSCODING_HARDWARE_PLAN.md as constraints. Do not reset PostgreSQL unless explicitly asked. Do not scan new real-data prefixes, do not mark missing, and keep /mnt/Models/rclone strict read-only. Do not pull Docker images, download models, install Python AI dependencies, or run ffmpeg hardware dry-runs unless approval has been granted. Do not commit and do not push.
+```
+
+## 2026-06-07 Long Implementation Run
+
+### Implemented
+
+- Track detail page/backend hardening:
+  - added `/api/v1/gps/tracks/{id}/profile?metric=altitude|speed`;
+  - track media lookup now defaults to `photo,video` and excludes track assets;
+  - GPS/KML Track Manager now opens a real detail view with an OpenLayers track map, altitude/speed SVG profiles, stats, source asset link, time-based media lookup, and nearby-geotag media lookup.
+- Map interaction polish:
+  - confirmed asset/cluster layer has priority over track layer;
+  - track clicks open a popup rather than navigating away;
+  - popup actions call time-based and nearby-media APIs.
+- Track previews:
+  - existing `/api/v1/media/{asset_id}/track-preview` and `/track-thumbnail` paths verified and covered by tests;
+  - track thumbnails are generated under the Cartolensia cache, never beside originals.
+- Transcoding:
+  - added preset validation and hardware-test APIs;
+  - advanced UI now has Apply, Test current hardware configuration, Save, and Remove actions;
+  - gallery keyboard handling is disabled while the transcode modal is open;
+  - command builder now uses NVENC-compatible `p5` preset, normalizes bare bitrates (`750` -> `750k`), reports stderr/command/session stats, and avoids the failing `min(1280,iw)` scale expression.
+- Storage management:
+  - registry now preserves storage mode and supports safe runtime add/update validation;
+  - added guarded `POST /api/v1/storages`, `PATCH /api/v1/storages/{name}`, and `GET /api/v1/storages/{name}/validate`;
+  - `/mnt/Models/rclone` roots are locked to `strict_read_only`; write-capable modes remain disabled.
+- Preview/cache policy:
+  - default `indexing.previews_after_index` is now `false`, making on-demand previews the conservative default.
+- AI sidecar foundation:
+  - added packaged `services/ai/cartolensia_ai` FastAPI dummy/no-model sidecar;
+  - native entrypoint: `python -m cartolensia_ai.server --host 127.0.0.1 --port 19090`;
+  - added CPU/NVIDIA/ROCm/Intel requirements stubs and updated Docker AI entrypoint to the packaged server;
+  - backend AI worker status now probes local dummy sidecar health.
+- Universal search:
+  - `album:` and `track:` structured tokens now use existing album/track store data;
+  - date ranges like `2026-05..2026-06` are parsed as real bounds;
+  - search still returns match explanations.
+
+### Live Real-Peek State
+
+- App is running at `http://127.0.0.1:18080` with `.cartolensia/runtime/realpeek.yaml`.
+- App runtime binary: `.cartolensia/runtime/cartolensia-realpeek`.
+- Dummy AI sidecar is running at `127.0.0.1:19090` and is reachable by the app.
+- Live counts after restart:
+  - `54` assets;
+  - `54` hashed;
+  - `48` geotagged assets;
+  - `2` videos;
+  - `4` GPS/KML tracks.
+- Storage remains `rclone_peek`, root `/mnt/Models/rclone`, mode `strict_read_only`.
+
+### NVENC Validation
+
+- Approved short native ffmpeg dry-run was run against the already indexed 7-second video `PXL_20260516_163309946.mp4`.
+- Sandboxed ffmpeg failed with `CUDA_ERROR_NO_DEVICE`, confirming sandbox GPU isolation.
+- Native/outside-sandbox dry-run succeeded with `h264_nvenc`, `p5`, `750k`, `scale=w=1280:h=-2`, null muxer output.
+- The live app hardware-test endpoint also succeeded:
+  - `dry_run_ok: true`;
+  - elapsed about `1.7s`;
+  - no output file written;
+  - command summary redacted the original absolute path.
+
+### Commands Run
+
+- `git diff --check` passed.
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
+- `go test ./...` passed.
+- `npm --prefix webui run build` passed, with only Vite chunk-size warning.
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh` passed.
+- Plain `bash scripts/smoke-test.sh` failed because port `18080` was occupied by the live real-peek app; the no-body discovery call correctly hit real-peek guards and returned `400`.
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config` passed.
+- `bash scripts/test-db.sh` passed.
+- `.cartolensia/ai-venv/bin/python -c "from cartolensia_ai.server import create_app; ..."` passed.
+
+### Dependencies
+
+- Installed into repo-local `.cartolensia/ai-venv`:
+  - `fastapi`;
+  - `uvicorn`;
+  - `numpy`;
+  - transitive packages from those dependencies.
+- No Torch, torchvision, CUDA packages, model files, or Docker images were installed or downloaded.
+
+### Known Limitations
+
+- AI sidecar is dummy/no-model only; real classification, faces, captions, and embeddings still need approved model/dependency downloads.
+- The app reports the local dummy worker as configured only while the sidecar process is running.
+- Track thumbnails still use the dark fallback renderer; OSM-background compositing remains future work.
+- Storage runtime additions are active in-process but are not yet persisted as durable DB/YAML runtime storage records; pending YAML remains the durable path.
+- The default smoke script should be run on a non-live port when real-peek occupies `18080`.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was read only for approved original/media reads and ffmpeg dry-run input.
+- No files were written, cached, exported, transcoded, dumped, or placed under `/mnt/Models/rclone`.
+- No new real-data prefixes were scanned.
+- No missing marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.

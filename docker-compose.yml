@@ -34,5 +34,65 @@ services:
       retries: 10
     restart: unless-stopped
 
+  ai-cpu:
+    build:
+      context: .
+      dockerfile: docker/ai/Dockerfile.cpu
+    profiles:
+      - ai-cpu
+    environment:
+      CARTOLENSIA_AI_PROFILE: cpu
+      CARTOLENSIA_MODEL_CACHE_DIR: /models
+    volumes:
+      - ./.cartolensia/models:/models
+    ports:
+      - "${CARTOLENSIA_AI_CPU_PORT:-18090}:8090"
+    restart: unless-stopped
+
+  ai-nvidia:
+    build:
+      context: .
+      dockerfile: docker/ai/Dockerfile.cpu
+    profiles:
+      - ai-nvidia
+    environment:
+      CARTOLENSIA_AI_PROFILE: nvidia
+      CARTOLENSIA_MODEL_CACHE_DIR: /models
+    volumes:
+      - ./.cartolensia/models:/models
+    ports:
+      - "${CARTOLENSIA_AI_NVIDIA_PORT:-18091}:8090"
+    restart: unless-stopped
+
+  ai-rocm:
+    build:
+      context: .
+      dockerfile: docker/ai/Dockerfile.cpu
+    profiles:
+      - ai-rocm
+    environment:
+      CARTOLENSIA_AI_PROFILE: rocm
+      CARTOLENSIA_MODEL_CACHE_DIR: /models
+    volumes:
+      - ./.cartolensia/models:/models
+    ports:
+      - "${CARTOLENSIA_AI_ROCM_PORT:-18092}:8090"
+    restart: unless-stopped
+
+  ai-intel:
+    build:
+      context: .
+      dockerfile: docker/ai/Dockerfile.cpu
+    profiles:
+      - ai-intel
+    environment:
+      CARTOLENSIA_AI_PROFILE: intel
+      CARTOLENSIA_MODEL_CACHE_DIR: /models
+    volumes:
+      - ./.cartolensia/models:/models
+    ports:
+      - "${CARTOLENSIA_AI_INTEL_PORT:-18093}:8090"
+    restart: unless-stopped
+
 volumes:
   cartolensia_pgdata:

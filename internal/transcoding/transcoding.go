@@ -57,8 +57,8 @@ func Detect(ctx context.Context) Capabilities {
 		Hardware: HardwareHints{
 			NvidiaSMI: lookPath("nvidia-smi"),
 			DevDRI:    exists("/dev/dri"),
-			VAAPI:     hasEncoder(encoders, "vaapi") || exists("/dev/dri"),
-			QSV:       hasEncoder(encoders, "qsv"),
+			VAAPI:     hasEncoder(encoders, "vaapi") && exists("/dev/dri"),
+			QSV:       hasEncoder(encoders, "qsv") && exists("/dev/dri"),
 		},
 		Safety: "user-triggered HLS transcode sessions write only to the configured Cartolensia cache; originals remain immutable",
 	}

@@ -703,6 +703,7 @@ func (db *DB) QueryTrackPoints(ctx context.Context, query catalog.TrackPointQuer
 }
 
 func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuery) (catalog.AssetPage, error) {
+	limit, offset := normalizeDBPage(query.Limit, query.Offset)
 	tracks, err := db.ListGPSTracks(ctx, catalog.GPSTrackQuery{Limit: 500})
 	if err != nil {
 		return catalog.AssetPage{}, err
@@ -724,17 +725,24 @@ func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuer
 		track = detail.Summary
 	}
 	if track.StartTime == nil || track.EndTime == nil {
-		limit, offset := normalizeDBPage(query.Limit, query.Offset)
-		return catalog.AssetPage{Page: catalog.Page{Limit: limit, Offset: offset}}, nil
+		return catalog.AssetPage{Assets: []catalog.Asset{}, Page: catalog.Page{Limit: limit, Offset: offset}}, nil
 	}
 	start := track.StartTime.Add(time.Duration(query.OffsetSeconds) * time.Second)
 	end := track.EndTime.Add(time.Duration(query.OffsetSeconds) * time.Second)
-	page, err := db.QueryAssets(ctx, catalog.AssetQuery{MediaKind: query.MediaKind, TakenFrom: &start, TakenTo: &end, Limit: query.Limit, Offset: query.Offset, Sort: "taken_at"})
+	mediaKinds := catalog.TrackAssetAllowedMediaKinds(query.MediaKind, query.ExcludeTrackAssets)
+	assetQueryMediaKind := ""
+	if len(mediaKinds) == 1 {
+		assetQueryMediaKind = mediaKinds[0]
+	}
+	page, err := db.QueryAssets(ctx, catalog.AssetQuery{MediaKind: assetQueryMediaKind, TakenFrom: &start, TakenTo: &end, Limit: 10000, Offset: 0, Sort: "taken_at"})
 	if err != nil {
 		return catalog.AssetPage{}, err
 	}
 	filtered := page.Assets[:0]
 	for _, asset := range page.Assets {
+		if !catalog.TrackAssetMediaKindAllowed(asset.MediaKind, mediaKinds, query.ExcludeTrackAssets) {
+			continue
+		}
 		_, err := db.GetAssetGeo(ctx, asset.ID)
 		geotagged := err == nil
 		if geotagged && !query.IncludeGeotagged {
@@ -745,8 +753,18 @@ func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuer
 		}
 		filtered = append(filtered, asset)
 	}
+	total := len(filtered)
+	if offset >= len(filtered) {
+		filtered = []catalog.Asset{}
+	} else {
+		endIndex := offset + limit
+		if endIndex > len(filtered) {
+			endIndex = len(filtered)
+		}
+		filtered = filtered[offset:endIndex]
+	}
 	page.Assets = filtered
-	page.Page.Total = len(filtered)
+	page.Page = catalog.Page{Limit: limit, Offset: offset, Total: total}
 	return page, nil
 }
 
@@ -1038,6 +1056,138 @@ func (db *DB) CleanupPreviewCacheEntries(ctx context.Context, olderThan time.Tim
 		}
 	}
 	return deleted, nil
+}
+
+func (db *DB) ListTranscodingPresets(ctx context.Context) ([]catalog.TranscodingPreset, error) {
+	rows, err := db.pool.Query(ctx, `
+		select id, name, config_json, created_at, updated_at
+		from transcoding_presets
+		order by name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var presets []catalog.TranscodingPreset
+	for rows.Next() {
+		var preset catalog.TranscodingPreset
+		var configBytes []byte
+		if err := rows.Scan(&preset.ID, &preset.Name, &configBytes, &preset.CreatedAt, &preset.UpdatedAt); err != nil {
+			return nil, err
+		}
+		applyTranscodingPresetConfig(&preset, configBytes)
+		presets = append(presets, preset)
+	}
+	return presets, rows.Err()
+}
+
+func (db *DB) UpsertTranscodingPreset(ctx context.Context, preset catalog.TranscodingPreset) (catalog.TranscodingPreset, error) {
+	if preset.ID == "" {
+		preset.ID = slugifyDB(preset.Name)
+	}
+	if preset.Name == "" {
+		preset.Name = preset.ID
+	}
+	preset.BuiltIn = false
+	preset.Available = true
+	configBytes, err := json.Marshal(transcodingPresetConfig(preset))
+	if err != nil {
+		return catalog.TranscodingPreset{}, err
+	}
+	_, err = db.pool.Exec(ctx, `
+		insert into transcoding_presets(id, name, config_json)
+		values($1, $2, $3)
+		on conflict(id) do update set
+			name=excluded.name,
+			config_json=excluded.config_json,
+			updated_at=now()
+	`, preset.ID, preset.Name, configBytes)
+	if err != nil {
+		return catalog.TranscodingPreset{}, err
+	}
+	return db.getTranscodingPreset(ctx, preset.ID)
+}
+
+func (db *DB) DeleteTranscodingPreset(ctx context.Context, presetID string) error {
+	cmd, err := db.pool.Exec(ctx, `delete from transcoding_presets where id=$1`, presetID)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return catalog.ErrNotFound
+	}
+	return nil
+}
+
+func (db *DB) getTranscodingPreset(ctx context.Context, presetID string) (catalog.TranscodingPreset, error) {
+	rows, err := db.pool.Query(ctx, `
+		select id, name, config_json, created_at, updated_at
+		from transcoding_presets
+		where id=$1
+	`, presetID)
+	if err != nil {
+		return catalog.TranscodingPreset{}, err
+	}
+	defer rows.Close()
+	presets := []catalog.TranscodingPreset{}
+	for rows.Next() {
+		var preset catalog.TranscodingPreset
+		var configBytes []byte
+		if err := rows.Scan(&preset.ID, &preset.Name, &configBytes, &preset.CreatedAt, &preset.UpdatedAt); err != nil {
+			return catalog.TranscodingPreset{}, err
+		}
+		applyTranscodingPresetConfig(&preset, configBytes)
+		presets = append(presets, preset)
+	}
+	if err := rows.Err(); err != nil {
+		return catalog.TranscodingPreset{}, err
+	}
+	if len(presets) == 0 {
+		return catalog.TranscodingPreset{}, catalog.ErrNotFound
+	}
+	return presets[0], nil
+}
+
+func applyTranscodingPresetConfig(preset *catalog.TranscodingPreset, configBytes []byte) {
+	var config map[string]any
+	_ = json.Unmarshal(configBytes, &config)
+	preset.BuiltIn = boolFromConfig(config, "built_in")
+	preset.Available = true
+	if v, _ := config["available"].(bool); !v && config["available"] != nil {
+		preset.Available = false
+	}
+	preset.DisabledReason, _ = config["disabled_reason"].(string)
+	preset.Hardware, _ = config["hardware"].(string)
+	preset.Codec, _ = config["codec"].(string)
+	preset.FFmpegEncoder, _ = config["ffmpeg_encoder"].(string)
+	preset.Mode, _ = config["mode"].(string)
+	preset.ParameterValue, _ = config["parameter_value"].(string)
+	preset.Container, _ = config["container"].(string)
+	if extra, ok := config["extra_args"].(map[string]any); ok {
+		preset.ExtraArgs = extra
+	}
+}
+
+func transcodingPresetConfig(preset catalog.TranscodingPreset) map[string]any {
+	return map[string]any{
+		"built_in":        preset.BuiltIn,
+		"available":       preset.Available,
+		"disabled_reason": preset.DisabledReason,
+		"hardware":        preset.Hardware,
+		"codec":           preset.Codec,
+		"ffmpeg_encoder":  preset.FFmpegEncoder,
+		"mode":            preset.Mode,
+		"parameter_value": preset.ParameterValue,
+		"container":       preset.Container,
+		"extra_args":      metadataOrEmpty(preset.ExtraArgs),
+	}
+}
+
+func boolFromConfig(config map[string]any, key string) bool {
+	if value, ok := config[key].(bool); ok {
+		return value
+	}
+	return false
 }
 
 func scanPreviewCacheEntries(rows pgx.Rows) ([]catalog.PreviewCacheEntry, error) {

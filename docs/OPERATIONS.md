@@ -196,7 +196,7 @@ The reset script stops the app, removes the temporary PostgreSQL volume for proj
 
 ## Map Tiles
 
-The WebUI uses OpenLayers. Vector asset/track layers work without network tiles. If the browser requests OSM base tiles, Cartolensia proxies them through:
+The WebUI uses locally bundled OpenLayers, Bootstrap, Bootstrap Icons, and app assets. Vector asset/track layers work without network tiles. If the browser requests OSM base tiles, Cartolensia proxies them through:
 
 ```text
 GET /api/v1/tiles/osm/{z}/{x}/{y}.png
@@ -204,23 +204,67 @@ GET /api/v1/tiles/osm/{z}/{x}/{y}.png
 
 The proxy validates tile coordinates, fetches on demand only, stores cache files under the configured Cartolensia cache directory, and provides no region prefetch endpoint against public OSM. Future offline tile packs should use user-provided PMTiles/MBTiles or a self-hosted tile service.
 
-## Settings And Exports
+Track previews use the same cache boundary. GPX/KML/KMZ/GPZ assets can expose:
 
-The Settings page exposes runtime preferences, effective YAML-bound settings, restart-required fields, plugin status, and guarded DB metadata exports.
+- `GET /api/v1/media/{asset_id}/track-preview`
+- `GET /api/v1/media/{asset_id}/track-thumbnail`
+
+Generated thumbnails are cache files under the Cartolensia cache root. They are never written beside originals.
+
+## Settings, Search, And Exports
+
+The Settings page exposes categorized runtime preferences, effective YAML-bound settings, restart-required pending changes, schema-based plugin settings tabs, plugin YAML editors, and guarded DB metadata exports.
 
 Useful endpoints:
 
 - `GET /api/v1/settings`
+- `GET /api/v1/settings/schema`
 - `PATCH /api/v1/settings/runtime`
+- `GET /api/v1/plugins/{id}/settings/schema`
+- `PATCH /api/v1/plugins/{id}/settings`
 - `POST /api/v1/admin/db/export`
 - `GET /api/v1/admin/db/exports`
 - `POST /api/v1/admin/db/import-plan`
 
 Exports are metadata/config JSON files written under the configured Cartolensia cache export directory. They are not destructive restore scripts.
 
+Explorer search is available through:
+
+```text
+GET /api/v1/search?q=jpg
+```
+
+It supports practical MVP tokens for filenames, paths, extensions, media kinds, date fragments/ranges, hash prefixes, metadata text, tags, album names, and track names. Results include match explanations so the UI can show why an asset matched.
+
 ## Video Streaming
 
 Original video streaming uses `/api/v1/media/{asset_id}/original` with HTTP Range support. When `ffmpeg` is available, `/api/v1/media/{asset_id}/stream-options` exposes cache-scoped HLS transcode session profiles. Session output is written only under the configured Cartolensia cache directory and can be stopped through `DELETE /api/v1/media/transcode-sessions/{session_id}/stop`.
+
+Transcoding presets are metadata records:
+
+- built-ins are non-removable;
+- custom presets can be saved and removed;
+- selected hardware/codec/mode/parameter are validated before session start;
+- unsupported hardware or encoders stay disabled in the UI.
+
+Useful endpoints:
+
+- `GET /api/v1/transcoding/presets`
+- `POST /api/v1/transcoding/presets`
+- `DELETE /api/v1/transcoding/presets/{id}`
+- `GET /api/v1/media/transcode-sessions/{session_id}/status`
+
+## AI Sidecar Foundation
+
+AI inference is optional and disabled by default. The repo includes a small HTTP JSON dummy worker at `services/ai/worker.py` and Compose profiles for future CPU/NVIDIA/ROCm/Intel workers. These services do not download models or run real inference unless a future operator configures them.
+
+Status endpoints:
+
+- `GET /api/v1/ai/status`
+- `GET /api/v1/ai/accelerators`
+- `GET /api/v1/ai/workers`
+
+Model and worker cache paths must stay outside original media roots. The default intended location is `.cartolensia/models`.
 
 ## Verification Commands
 
@@ -242,3 +286,27 @@ If Docker is unavailable, skip `scripts/test-db.sh` and document that block.
 ## Safety
 
 Use `testdata/media_fixture/` and synthetic temporary fixtures for tests. Do not use `/mnt/Models/rclone` unless a future supervised dry run explicitly permits it. Original storage roots are read-only; previews and generated data belong in Cartolensia cache/work directories or ignored synthetic roots.
+
+## Current Real-Peek Runtime Notes
+
+- The supervised real-peek app runs with `.cartolensia/runtime/realpeek.yaml` on `127.0.0.1:18080`.
+- Stop only the app without resetting PostgreSQL:
+
+```bash
+if [ -f .cartolensia/runtime/realpeek.pid ]; then
+  kill "$(cat .cartolensia/runtime/realpeek.pid)" || true
+fi
+fuser -k 18080/tcp || true
+```
+
+- The optional dummy AI sidecar runs on `127.0.0.1:19090`:
+
+```bash
+.cartolensia/ai-venv/bin/python -m cartolensia_ai.server --host 127.0.0.1 --port 19090
+```
+
+- When the live app occupies `18080`, run smoke tests on a different port:
+
+```bash
+CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh
+```

@@ -274,6 +274,7 @@ type TrackAssetQuery struct {
 	TrackAssetID       string
 	OffsetSeconds      int64
 	MediaKind          string
+	ExcludeTrackAssets bool
 	IncludeGeotagged   bool
 	IncludeUngeotagged bool
 	Limit              int
@@ -336,6 +337,23 @@ type PreviewCacheStats struct {
 	OldestUnix int64 `json:"oldest_unix,omitempty"`
 }
 
+type TranscodingPreset struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	BuiltIn        bool           `json:"built_in"`
+	Available      bool           `json:"available"`
+	DisabledReason string         `json:"disabled_reason,omitempty"`
+	Hardware       string         `json:"hardware"`
+	Codec          string         `json:"codec"`
+	FFmpegEncoder  string         `json:"ffmpeg_encoder"`
+	Mode           string         `json:"mode"`
+	ParameterValue string         `json:"parameter_value"`
+	Container      string         `json:"container"`
+	ExtraArgs      map[string]any `json:"extra_args,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
 type Store interface {
 	UpsertDiscoveredFile(context.Context, storage.FileInfo) (UpsertResult, error)
 	ListAssets(context.Context) ([]Asset, error)
@@ -378,6 +396,9 @@ type Store interface {
 	MarkPreviewAccessed(context.Context, string) error
 	PreviewCacheStats(context.Context) (PreviewCacheStats, error)
 	CleanupPreviewCacheEntries(context.Context, time.Time, int64) ([]PreviewCacheEntry, error)
+	ListTranscodingPresets(context.Context) ([]TranscodingPreset, error)
+	UpsertTranscodingPreset(context.Context, TranscodingPreset) (TranscodingPreset, error)
+	DeleteTranscodingPreset(context.Context, string) error
 	EnqueueJob(context.Context, jobs.Job) (jobs.Job, error)
 	UpdateJob(context.Context, jobs.Job) error
 	ListJobs(context.Context) ([]jobs.Job, error)
@@ -393,35 +414,37 @@ type Store interface {
 }
 
 type MemoryStore struct {
-	mu              sync.RWMutex
-	assets          map[string]Asset
-	byURL           map[string]string
-	locationByAsset map[string]string
-	trackPoints     map[string][]TrackPoint
-	trackLinks      map[string]TrackLink
-	albums          map[string]Album
-	albumItems      map[string]map[string]AlbumItem
-	assetGeo        map[string]AssetGeo
-	gpsTracks       map[string]TrackSummary
-	scanRuns        map[string]ScanRun
-	previewEntries  map[string]PreviewCacheEntry
-	jobs            map[string]jobs.Job
+	mu               sync.RWMutex
+	assets           map[string]Asset
+	byURL            map[string]string
+	locationByAsset  map[string]string
+	trackPoints      map[string][]TrackPoint
+	trackLinks       map[string]TrackLink
+	albums           map[string]Album
+	albumItems       map[string]map[string]AlbumItem
+	assetGeo         map[string]AssetGeo
+	gpsTracks        map[string]TrackSummary
+	scanRuns         map[string]ScanRun
+	previewEntries   map[string]PreviewCacheEntry
+	transcodePresets map[string]TranscodingPreset
+	jobs             map[string]jobs.Job
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		assets:          make(map[string]Asset),
-		byURL:           make(map[string]string),
-		locationByAsset: make(map[string]string),
-		trackPoints:     make(map[string][]TrackPoint),
-		trackLinks:      make(map[string]TrackLink),
-		albums:          make(map[string]Album),
-		albumItems:      make(map[string]map[string]AlbumItem),
-		assetGeo:        make(map[string]AssetGeo),
-		gpsTracks:       make(map[string]TrackSummary),
-		scanRuns:        make(map[string]ScanRun),
-		previewEntries:  make(map[string]PreviewCacheEntry),
-		jobs:            make(map[string]jobs.Job),
+		assets:           make(map[string]Asset),
+		byURL:            make(map[string]string),
+		locationByAsset:  make(map[string]string),
+		trackPoints:      make(map[string][]TrackPoint),
+		trackLinks:       make(map[string]TrackLink),
+		albums:           make(map[string]Album),
+		albumItems:       make(map[string]map[string]AlbumItem),
+		assetGeo:         make(map[string]AssetGeo),
+		gpsTracks:        make(map[string]TrackSummary),
+		scanRuns:         make(map[string]ScanRun),
+		previewEntries:   make(map[string]PreviewCacheEntry),
+		transcodePresets: make(map[string]TranscodingPreset),
+		jobs:             make(map[string]jobs.Job),
 	}
 }
 
