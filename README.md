@@ -150,7 +150,7 @@ The test and smoke workflows use `testdata/media_fixture/` or synthetic fixtures
 
 ## Current MVP Status
 
-The current vertical slice includes bounded discovery, hashing, EXIF/geotag metadata, GPX/KML/KMZ/GPZ track parsing, map clustering, albums, gallery/overlay viewing, cache-scoped HLS transcoding sessions, runtime-safe storage validation, and an optional dummy AI sidecar contract. Real AI models are not downloaded or run by default.
+The current vertical slice includes bounded discovery, hashing, EXIF/geotag metadata, GPX/KML/KMZ/GPZ track parsing, map clustering, albums, gallery/overlay viewing, cache-scoped HLS transcoding sessions, runtime-safe storage validation, and an optional local AI sidecar. The AI sidecar can run in dummy/no-model mode or, after explicit operator approval, local CUDA/CPU inference with torchvision classification, OpenCV YuNet face detection, Falconsai safety classification, OpenCLIP embeddings, and BLIP captioning. Model/cache paths stay under `.cartolensia/models`, never under original storage roots.
 
 For the live real-peek session, use:
 

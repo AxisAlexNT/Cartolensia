@@ -134,6 +134,10 @@ export type AssetDetail = {
   content: Record<string, unknown>;
   timestamps: Record<string, string>;
   metadata: Record<string, unknown>;
+  ai_tags?: Record<string, unknown>[];
+  ai_predictions?: Record<string, unknown>[];
+  face_detections?: Record<string, unknown>[];
+  embeddings?: Record<string, unknown>[];
 };
 
 export type TrackSummary = {
@@ -848,7 +852,7 @@ export const api = {
   transcodingStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
-  aiJob: (kind: "classify" | "faces" | "describe", payload: Record<string, unknown>) =>
+  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
   vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status"),
   search: (q: string, limit = 100, offset = 0) =>

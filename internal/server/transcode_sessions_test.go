@@ -30,20 +30,27 @@ func TestHLSArgsProfiles(t *testing.T) {
 
 func TestHLSReadyRequiresPlaylistAndSegment(t *testing.T) {
 	dir := t.TempDir()
-	if hlsReady(dir) {
+	if ready, _ := hlsReady(dir, 10); ready {
 		t.Fatal("empty directory should not be ready")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "master.m3u8"), []byte("#EXTM3U\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if hlsReady(dir) {
+	if ready, _ := hlsReady(dir, 10); ready {
 		t.Fatal("playlist without segment should not be ready")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "segment_00000.ts"), []byte("segment"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !hlsReady(dir) {
-		t.Fatal("playlist and segment should be ready")
+	if ready, _ := hlsReady(dir, 10); ready {
+		t.Fatal("playlist and short unfinished segment should wait for ready threshold")
+	}
+	playlist := "#EXTM3U\n#EXTINF:2.000,\nsegment_00000.ts\n#EXT-X-ENDLIST\n"
+	if err := os.WriteFile(filepath.Join(dir, "master.m3u8"), []byte(playlist), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ready, seconds := hlsReady(dir, 10); !ready || seconds != 2 {
+		t.Fatalf("finished short playlist should be ready, ready=%v seconds=%v", ready, seconds)
 	}
 }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -160,8 +161,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/workers/", s.handleAIWorkerByID)
 	s.mux.HandleFunc("/api/v1/ai/jobs/classify", s.handleAIJobRequest("classify_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/faces", s.handleAIJobRequest("detect_faces"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/safety", s.handleAIJobRequest("safety_nsfw"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/embed", s.handleAIJobRequest("embed_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/describe", s.handleAIJobRequest("describe_image"))
+	s.mux.HandleFunc("/api/v1/ai/predictions", s.handleAIPredictions)
+	s.mux.HandleFunc("/api/v1/ai/safety/", s.handleAISafetyByAsset)
 	s.mux.HandleFunc("/api/v1/vector/status", s.handleVectorStatus)
+	s.mux.HandleFunc("/api/v1/search/vector", s.handleVectorSearch)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/backend/status", s.handleBackendStatus)
 	s.mux.HandleFunc("/api/v1/tiles/", s.handleTiles)
@@ -1150,13 +1156,20 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 type assetSearchContext struct {
 	albumAssetMatches map[string]map[string]struct{}
 	trackNameMatches  map[string]map[string]struct{}
+	tagMatches        map[string]map[string]struct{}
+	predictionMatches map[string]map[string]struct{}
+	faceMatches       map[string]map[string]struct{}
 }
 
 func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetSearchContext {
 	out := assetSearchContext{
 		albumAssetMatches: map[string]map[string]struct{}{},
 		trackNameMatches:  map[string]map[string]struct{}{},
+		tagMatches:        map[string]map[string]struct{}{},
+		predictionMatches: map[string]map[string]struct{}{},
+		faceMatches:       map[string]map[string]struct{}{},
 	}
+	var indexedAssets []catalog.Asset
 	for _, token := range tokens {
 		prefix, plain, ok := strings.Cut(token, ":")
 		if !ok {
@@ -1196,6 +1209,43 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 				}
 			}
 			out.trackNameMatches[token] = matches
+		case "tag", "category", "safety", "caption", "face":
+			if indexedAssets == nil {
+				page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: 1000})
+				if err == nil {
+					indexedAssets = page.Assets
+				}
+			}
+			matches := map[string]struct{}{}
+			for _, asset := range indexedAssets {
+				if prefix == "face" {
+					faces, err := s.deps.Store.ListFaceDetections(ctx, asset.ID)
+					if err == nil && len(faces) > 0 && (plain == "" || plain == "detected" || plain == "yes") {
+						matches[asset.ID] = struct{}{}
+					}
+					continue
+				}
+				tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
+				for _, tag := range tags {
+					text := strings.ToLower(tag.Tag + " " + tag.Source)
+					if strings.Contains(text, plain) {
+						matches[asset.ID] = struct{}{}
+					}
+				}
+				predictions, _ := s.deps.Store.ListAIPredictions(ctx, asset.ID)
+				for _, prediction := range predictions {
+					text := strings.ToLower(prediction.Label + " " + prediction.Task + " " + prediction.ModelName)
+					if strings.Contains(text, plain) {
+						matches[asset.ID] = struct{}{}
+					}
+				}
+			}
+			if prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" {
+				out.tagMatches[token] = matches
+				out.predictionMatches[token] = matches
+			} else {
+				out.faceMatches[token] = matches
+			}
 		}
 	}
 	return out
@@ -1250,7 +1300,7 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.assetDetail(asset))
+	writeJSON(w, http.StatusOK, s.assetDetail(r.Context(), asset))
 }
 
 func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
@@ -1840,16 +1890,18 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workers := aiWorkerProfiles(r.Context())
+	stats, _ := s.deps.Store.Stats(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":            aiWorkersConfigured(workers),
 		"inference_running":  false,
-		"vector_store":       "not_configured",
-		"embedding_jobs":     "not_implemented",
+		"vector_store":       "local_json",
+		"embedding_jobs":     []string{"ai_embed"},
 		"accelerator_hints":  transcoding.AcceleratorHints(),
 		"workers":            workers,
 		"model_cache_dir":    ".cartolensia/models",
 		"model_policy":       "model downloads are explicit and never use original storage",
 		"planned_modalities": []string{"image", "video_frame", "audio_segment", "text_query"},
+		"stored_assets":      stats.Assets,
 	})
 }
 
@@ -1898,34 +1950,523 @@ func (s *Server) handleAIJobRequest(kind string) http.HandlerFunc {
 		if !s.requireWrite(w, r, "ai.jobs.write") {
 			return
 		}
-		var req map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		writeJSON(w, http.StatusAccepted, map[string]any{
-			"kind":      kind,
-			"queued":    false,
-			"status":    "not_configured",
-			"reason":    "no AI sidecar worker is configured; use the optional ai-* Docker Compose profiles or services/ai dummy worker",
-			"scope":     req,
-			"safe_note": "no inference ran and no model files were downloaded",
+		var req aiJobRequest
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		result, err := s.runAIJob(r.Context(), r, kind, req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+	}
+}
+
+type aiJobRequest struct {
+	AssetID         string   `json:"asset_id"`
+	AssetIDs        []string `json:"asset_ids"`
+	Scope           string   `json:"scope"`
+	Limit           int      `json:"limit"`
+	SafetyThreshold *float64 `json:"safety_threshold"`
+}
+
+type aiJobResult struct {
+	Kind         string           `json:"kind"`
+	Status       string           `json:"status"`
+	WorkerID     string           `json:"worker_id,omitempty"`
+	Endpoint     string           `json:"endpoint,omitempty"`
+	Targets      int              `json:"targets"`
+	Processed    int              `json:"processed"`
+	Skipped      int              `json:"skipped"`
+	Stored       int              `json:"stored"`
+	Unsafe       int              `json:"unsafe,omitempty"`
+	Errors       []string         `json:"errors,omitempty"`
+	Results      []map[string]any `json:"results,omitempty"`
+	Scope        aiJobRequest     `json:"scope"`
+	SafetyNote   string           `json:"safe_note"`
+	SkippedKinds map[string]int   `json:"skipped_kinds,omitempty"`
+}
+
+type aiPredictionPayload struct {
+	Label      string         `json:"label"`
+	Confidence *float64       `json:"confidence"`
+	Metadata   map[string]any `json:"metadata"`
+}
+
+type aiInferencePayload struct {
+	Status      string                `json:"status"`
+	Endpoint    string                `json:"endpoint"`
+	Predictions []aiPredictionPayload `json:"predictions"`
+	Reason      string                `json:"reason"`
+	Metadata    map[string]any        `json:"metadata"`
+}
+
+func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req aiJobRequest) (aiJobResult, error) {
+	endpoint, workerID, ok := aiConfiguredWorkerEndpoint(ctx)
+	result := aiJobResult{
+		Kind:         kind,
+		Status:       "not_configured",
+		WorkerID:     workerID,
+		Endpoint:     endpoint,
+		Scope:        req,
+		SafetyNote:   "AI reads scoped assets through Cartolensia read-only media URLs; outputs are stored in DB metadata only",
+		SkippedKinds: map[string]int{},
+	}
+	if !ok {
+		result.Errors = append(result.Errors, "no local AI sidecar is reachable at 127.0.0.1:19090")
+		return result, nil
+	}
+	assets, err := s.resolveAIAssets(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	result.Targets = len(assets)
+	apiPath := aiSidecarPath(kind)
+	if apiPath == "" {
+		return result, fmt.Errorf("unsupported AI job kind %q", kind)
+	}
+	for _, asset := range assets {
+		if !aiSupportsAsset(kind, asset) {
+			result.Skipped++
+			result.SkippedKinds[asset.MediaKind]++
+			continue
+		}
+		payload := map[string]any{
+			"asset_id":  asset.ID,
+			"media_url": s.aiMediaURL(r, asset.ID),
+			"options": map[string]any{
+				"safety_threshold": req.SafetyThreshold,
+			},
+		}
+		response, err := callAISidecar(ctx, endpoint+apiPath, payload)
+		if err != nil {
+			result.Errors = append(result.Errors, asset.ID+": "+err.Error())
+			continue
+		}
+		stored, unsafe := s.persistAIResponse(ctx, workerID, kind, asset.ID, response, req)
+		result.Processed++
+		result.Stored += stored
+		if unsafe {
+			result.Unsafe++
+		}
+		result.Results = append(result.Results, map[string]any{
+			"asset_id":     asset.ID,
+			"status":       response.Status,
+			"reason":       response.Reason,
+			"predictions":  response.Predictions,
+			"metadata":     summarizeAIMetadata(response.Metadata),
+			"stored_count": stored,
 		})
 	}
+	result.Status = "completed"
+	if len(result.Errors) > 0 && result.Processed == 0 {
+		result.Status = "failed"
+	}
+	return result, nil
+}
+
+func (s *Server) resolveAIAssets(ctx context.Context, req aiJobRequest) ([]catalog.Asset, error) {
+	ids := compactStrings(req.AssetIDs)
+	if req.AssetID != "" {
+		ids = append(ids, req.AssetID)
+	}
+	if len(ids) > 0 {
+		out := make([]catalog.Asset, 0, len(ids))
+		for _, assetID := range uniqueStrings(ids) {
+			asset, err := s.deps.Store.GetAsset(ctx, assetID)
+			if err != nil {
+				return out, err
+			}
+			out = append(out, asset)
+		}
+		return out, nil
+	}
+	scope := strings.TrimSpace(strings.ToLower(req.Scope))
+	if scope == "" || scope == "selected" {
+		return []catalog.Asset{}, nil
+	}
+	if scope != "current" && scope != "current_indexed" && scope != "indexed" {
+		return nil, fmt.Errorf("unsupported AI scope %q", req.Scope)
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > 250 {
+		limit = 250
+	}
+	page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: limit, Sort: "taken_at"})
+	if err != nil {
+		return nil, err
+	}
+	return page.Assets, nil
+}
+
+func aiConfiguredWorkerEndpoint(ctx context.Context) (endpoint, workerID string, ok bool) {
+	for _, worker := range aiWorkerProfiles(ctx) {
+		configured, _ := worker["configured"].(bool)
+		rawEndpoint, _ := worker["endpoint"].(string)
+		rawID, _ := worker["id"].(string)
+		if configured && rawEndpoint != "" {
+			return strings.TrimRight(rawEndpoint, "/"), rawID, true
+		}
+	}
+	return "", "", false
+}
+
+func aiSidecarPath(kind string) string {
+	switch kind {
+	case "classify_image":
+		return "/classify-image"
+	case "detect_faces":
+		return "/detect-faces"
+	case "safety_nsfw":
+		return "/safety-nsfw"
+	case "embed_image":
+		return "/embed-image"
+	case "describe_image":
+		return "/describe-image"
+	default:
+		return ""
+	}
+}
+
+func aiSupportsAsset(kind string, asset catalog.Asset) bool {
+	switch kind {
+	case "classify_image", "detect_faces", "safety_nsfw", "embed_image", "describe_image":
+		return asset.MediaKind == "photo"
+	default:
+		return false
+	}
+}
+
+func (s *Server) aiMediaURL(r *http.Request, assetID string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = strings.TrimPrefix(s.deps.Config.HTTP.Addr, "http://")
+	}
+	return scheme + "://" + host + "/api/v1/media/" + assetID + "/original"
+}
+
+func callAISidecar(ctx context.Context, endpoint string, payload map[string]any) (aiInferencePayload, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(payload); err != nil {
+		return aiInferencePayload{}, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, &body)
+	if err != nil {
+		return aiInferencePayload{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return aiInferencePayload{}, err
+	}
+	defer resp.Body.Close()
+	var out aiInferencePayload
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 128<<20)).Decode(&out); err != nil {
+		return out, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return out, fmt.Errorf("AI sidecar returned HTTP %d: %s", resp.StatusCode, out.Reason)
+	}
+	if out.Status != "ok" {
+		return out, nil
+	}
+	return out, nil
+}
+
+func (s *Server) persistAIResponse(ctx context.Context, workerID, kind, assetID string, response aiInferencePayload, req aiJobRequest) (stored int, unsafe bool) {
+	if response.Status != "ok" {
+		return 0, false
+	}
+	modelName := aiModelName(response.Metadata, kind)
+	for _, prediction := range response.Predictions {
+		_, err := s.deps.Store.CreateAIPrediction(ctx, catalog.AIPrediction{
+			AssetID:    assetID,
+			WorkerID:   workerID,
+			Task:       kind,
+			Label:      prediction.Label,
+			Confidence: prediction.Confidence,
+			ModelName:  modelName,
+			Metadata:   prediction.Metadata,
+		})
+		if err == nil {
+			stored++
+		}
+	}
+	switch kind {
+	case "classify_image":
+		if len(response.Predictions) > 0 {
+			top := response.Predictions[0]
+			if top.Confidence == nil || *top.Confidence >= 0.10 {
+				if _, err := s.deps.Store.UpsertAssetTag(ctx, catalog.AssetTag{
+					AssetID:    assetID,
+					Tag:        top.Label,
+					Source:     "ai_classify",
+					Confidence: top.Confidence,
+					Metadata:   map[string]any{"model": modelName, "category": top.Label},
+				}); err == nil {
+					stored++
+				}
+			}
+		}
+	case "safety_nsfw":
+		unsafe = aiNeedsReview(response.Metadata, req)
+		if len(response.Predictions) > 0 {
+			top := response.Predictions[0]
+			tag := "safety:" + strings.ToLower(strings.ReplaceAll(top.Label, " ", "_"))
+			if unsafe {
+				tag = "safety:needs_review"
+			}
+			if _, err := s.deps.Store.UpsertAssetTag(ctx, catalog.AssetTag{
+				AssetID:    assetID,
+				Tag:        tag,
+				Source:     "ai_safety",
+				Confidence: top.Confidence,
+				Metadata:   map[string]any{"model": modelName, "needs_review": unsafe},
+			}); err == nil {
+				stored++
+			}
+		}
+		if unsafe {
+			if err := s.addAssetToPotentiallyUnsafeAlbum(ctx, assetID); err == nil {
+				stored++
+			}
+		}
+	case "detect_faces":
+		if faces, ok := response.Metadata["faces"].([]any); ok {
+			for _, item := range faces {
+				face, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				conf := floatPtrFromAny(face["confidence"])
+				_, err := s.deps.Store.CreateFaceDetection(ctx, catalog.FaceDetection{
+					AssetID:    assetID,
+					X:          floatFromAny(face["x"]),
+					Y:          floatFromAny(face["y"]),
+					Width:      floatFromAny(face["width"]),
+					Height:     floatFromAny(face["height"]),
+					Confidence: conf,
+					Metadata:   map[string]any{"model": modelName, "local_cluster_only": true},
+				})
+				if err == nil {
+					stored++
+				}
+			}
+		}
+	case "embed_image":
+		embedding := floatSliceFromAny(response.Metadata["embedding"])
+		if len(embedding) > 0 {
+			modelID := "openclip-vit-b-32-laion2b-s34b-b79k"
+			_, _ = s.deps.Store.UpsertEmbeddingModel(ctx, catalog.EmbeddingModel{
+				ID:        modelID,
+				Modality:  "image",
+				ModelName: modelName,
+				Version:   "local",
+				Dimension: len(embedding),
+				Metadata:  map[string]any{"backend": "local_json", "plugin_owner": "base-ai"},
+			})
+			if _, err := s.deps.Store.UpsertAssetEmbedding(ctx, catalog.AssetEmbedding{
+				AssetID:   assetID,
+				ModelID:   modelID,
+				Modality:  "image",
+				SourceRef: "asset",
+				Vector:    embedding,
+				Metadata:  map[string]any{"model": modelName},
+			}); err == nil {
+				stored++
+			}
+		}
+	case "describe_image":
+		if len(response.Predictions) > 0 {
+			caption := response.Predictions[0].Label
+			if caption != "" {
+				if _, err := s.deps.Store.UpsertAssetTag(ctx, catalog.AssetTag{
+					AssetID:  assetID,
+					Tag:      "caption:" + caption,
+					Source:   "ai_caption",
+					Metadata: map[string]any{"model": modelName, "caption": caption},
+				}); err == nil {
+					stored++
+				}
+			}
+		}
+	}
+	return stored, unsafe
+}
+
+func aiModelName(metadata map[string]any, fallback string) string {
+	if text, ok := metadata["model"].(string); ok && text != "" {
+		return text
+	}
+	return fallback
+}
+
+func aiNeedsReview(metadata map[string]any, req aiJobRequest) bool {
+	if value, ok := metadata["needs_review"].(bool); ok {
+		return value
+	}
+	score := floatFromAny(metadata["unsafe_score"])
+	threshold := 0.75
+	if req.SafetyThreshold != nil {
+		threshold = *req.SafetyThreshold
+	} else if raw := floatFromAny(metadata["threshold"]); raw > 0 {
+		threshold = raw
+	}
+	return score >= threshold
+}
+
+func summarizeAIMetadata(metadata map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range metadata {
+		if key == "embedding" {
+			out["embedding_dimension"] = len(floatSliceFromAny(value))
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func summarizeAssetEmbeddings(embeddings []catalog.AssetEmbedding) []map[string]any {
+	out := make([]map[string]any, 0, len(embeddings))
+	for _, embedding := range embeddings {
+		metadata := embedding.Metadata
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		out = append(out, map[string]any{
+			"id":         embedding.ID,
+			"asset_id":   embedding.AssetID,
+			"model_id":   embedding.ModelID,
+			"modality":   embedding.Modality,
+			"source_ref": embedding.SourceRef,
+			"dimension":  len(embedding.Vector),
+			"metadata":   metadata,
+			"created_at": embedding.CreatedAt,
+		})
+	}
+	return out
+}
+
+func (s *Server) addAssetToPotentiallyUnsafeAlbum(ctx context.Context, assetID string) error {
+	album, err := s.ensurePotentiallyUnsafeAlbum(ctx)
+	if err != nil {
+		return err
+	}
+	return s.deps.Store.AddAlbumItems(ctx, album.ID, []string{assetID})
+}
+
+func (s *Server) ensurePotentiallyUnsafeAlbum(ctx context.Context) (catalog.Album, error) {
+	albums, err := s.deps.Store.ListAlbums(ctx, catalog.AlbumQuery{Tree: true, Limit: 1000})
+	if err == nil {
+		for _, album := range albums {
+			if album.Slug == "potentially-unsafe" || strings.EqualFold(album.Title, "Potentially Unsafe") {
+				return album, nil
+			}
+		}
+	}
+	return s.deps.Store.CreateAlbum(ctx, catalog.Album{
+		Slug:        "potentially-unsafe",
+		Title:       "Potentially Unsafe",
+		Description: "Virtual local review album populated by the safety classifier. Original files are never moved or modified.",
+		SortOrder:   9000,
+	})
+}
+
+func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	assetID := strings.TrimSpace(r.URL.Query().Get("asset_id"))
+	if assetID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("asset_id is required"))
+		return
+	}
+	tags, err := s.deps.Store.ListAssetTags(r.Context(), assetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	predictions, err := s.deps.Store.ListAIPredictions(r.Context(), assetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	faces, err := s.deps.Store.ListFaceDetections(r.Context(), assetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	embeddings, err := s.deps.Store.ListAssetEmbeddings(r.Context(), assetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":    assetID,
+		"tags":        tags,
+		"predictions": predictions,
+		"faces":       faces,
+		"embeddings":  summarizeAssetEmbeddings(embeddings),
+	})
+}
+
+func (s *Server) handleAISafetyByAsset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "ai.jobs.write") {
+		return
+	}
+	parts := pathParts(strings.TrimPrefix(r.URL.Path, "/api/v1/ai/safety/"))
+	if len(parts) != 2 || parts[1] != "allow" {
+		http.NotFound(w, r)
+		return
+	}
+	assetID := parts[0]
+	album, err := s.ensurePotentiallyUnsafeAlbum(r.Context())
+	if err == nil {
+		_ = s.deps.Store.RemoveAlbumItem(r.Context(), album.ID, assetID)
+	}
+	_, _ = s.deps.Store.UpsertAssetTag(r.Context(), catalog.AssetTag{
+		AssetID:  assetID,
+		Tag:      "safety:reviewed_allowed",
+		Source:   "ai_safety_review",
+		Metadata: map[string]any{"reviewed_at": time.Now().UTC()},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "reviewed_allowed", "asset_id": assetID})
 }
 
 func aiWorkerProfiles(ctx context.Context) []map[string]any {
 	hints := transcoding.AcceleratorHints()
 	localStatus, localHealth := aiWorkerHealth(ctx, "http://127.0.0.1:19090/health")
+	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text"}
+	if caps, ok := localHealth["capabilities"].(map[string]any); ok {
+		if raw, ok := caps["capabilities"].([]any); ok && len(raw) > 0 {
+			localCapabilities = anySliceToStrings(raw)
+		}
+	}
 	return []map[string]any{
 		{
-			"id":                "ai-dummy-local",
-			"profile":           "dummy",
+			"id":                "ai-local",
+			"profile":           "local",
 			"configured":        localStatus == "ok",
 			"status":            localStatus,
 			"available":         true,
-			"capabilities":      []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"capabilities":      localCapabilities,
 			"endpoint":          "http://127.0.0.1:19090",
 			"native_entrypoint": "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
 			"health":            localHealth,
-			"note":              "dummy/no-model worker; no inference runs unless explicitly requested",
+			"note":              "local optional worker; inference only runs when a user starts a scoped AI job",
 		},
 		{
 			"id":           "ai-cpu",
@@ -1999,12 +2540,55 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	stats, _ := s.deps.Store.Stats(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"available": false,
-		"backend":   "none",
+		"available": true,
+		"backend":   "local_json_bruteforce",
 		"pgvector":  capabilityInstalled(s.deps.Capabilities, "vector"),
-		"contract":  "VectorStore interface planned; no embeddings are generated in this build",
+		"contract":  "OpenCLIP embeddings are stored as JSON/float arrays and searched with bounded brute-force cosine similarity.",
+		"limits":    map[string]any{"intended_collection_size": "small/local collections", "indexed_assets": stats.Assets},
 	})
+}
+
+func (s *Server) handleVectorSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("q is required"))
+		return
+	}
+	endpoint, _, ok := aiConfiguredWorkerEndpoint(r.Context())
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no AI sidecar worker is reachable for text embeddings"))
+		return
+	}
+	response, err := callAISidecar(r.Context(), endpoint+"/embed-text", map[string]any{"text": query})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if response.Status != "ok" {
+		writeJSON(w, http.StatusOK, map[string]any{"query": query, "status": response.Status, "reason": response.Reason, "results": []any{}})
+		return
+	}
+	embedding := floatSliceFromAny(response.Metadata["embedding"])
+	if len(embedding) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"query": query, "status": "empty_embedding", "results": []any{}})
+		return
+	}
+	limit := queryInt(r, "limit", 20)
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	results, err := s.deps.Store.VectorSearch(r.Context(), "openclip-vit-b-32-laion2b-s34b-b79k", embedding, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"query": query, "status": "ok", "results": results})
 }
 
 func (s *Server) handleBackendStatus(w http.ResponseWriter, r *http.Request) {
@@ -2218,7 +2802,7 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID s
 	http.ServeContent(w, r, "preview.jpg", stat.ModTime(), previewFile)
 }
 
-func (s *Server) assetDetail(asset catalog.Asset) map[string]any {
+func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[string]any {
 	detail := map[string]any{
 		"asset":        asset,
 		"locations":    asset.Locations,
@@ -2237,6 +2821,18 @@ func (s *Server) assetDetail(asset catalog.Asset) map[string]any {
 			"content_id":  loc.ContentID,
 			"size_bytes":  loc.SizeBytes,
 		}
+	}
+	if tags, err := s.deps.Store.ListAssetTags(ctx, asset.ID); err == nil {
+		detail["ai_tags"] = tags
+	}
+	if predictions, err := s.deps.Store.ListAIPredictions(ctx, asset.ID); err == nil {
+		detail["ai_predictions"] = predictions
+	}
+	if faces, err := s.deps.Store.ListFaceDetections(ctx, asset.ID); err == nil {
+		detail["face_detections"] = faces
+	}
+	if embeddings, err := s.deps.Store.ListAssetEmbeddings(ctx, asset.ID); err == nil {
+		detail["embeddings"] = summarizeAssetEmbeddings(embeddings)
 	}
 	return detail
 }
@@ -2925,7 +3521,22 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 			metadataText = strings.ToLower(string(data))
 		}
 	}
-	if prefix == "camera" || prefix == "exif" || prefix == "tag" {
+	if prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" {
+		if _, ok := searchCtx.tagMatches[token][asset.ID]; ok {
+			return []string{"AI tag/prediction"}
+		}
+		if _, ok := searchCtx.predictionMatches[token][asset.ID]; ok {
+			return []string{"AI prediction"}
+		}
+		return nil
+	}
+	if prefix == "face" {
+		if _, ok := searchCtx.faceMatches[token][asset.ID]; ok {
+			return []string{"face detection"}
+		}
+		return nil
+	}
+	if prefix == "camera" || prefix == "exif" {
 		if strings.Contains(metadataText, plain) {
 			return []string{"metadata/EXIF"}
 		}
@@ -3054,6 +3665,69 @@ func searchWarnings(tokens []string) []string {
 		}
 	}
 	return uniqueStrings(warnings)
+}
+
+func anySliceToStrings(values []any) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok && text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func floatFromAny(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		out, _ := typed.Float64()
+		return out
+	case string:
+		out, _ := strconv.ParseFloat(typed, 64)
+		return out
+	default:
+		return 0
+	}
+}
+
+func floatPtrFromAny(value any) *float64 {
+	if value == nil {
+		return nil
+	}
+	out := floatFromAny(value)
+	return &out
+}
+
+func floatSliceFromAny(value any) []float64 {
+	switch typed := value.(type) {
+	case []float64:
+		return typed
+	case []any:
+		out := make([]float64, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, floatFromAny(item))
+		}
+		return out
+	case []json.RawMessage:
+		out := make([]float64, 0, len(typed))
+		for _, item := range typed {
+			var number float64
+			if err := json.Unmarshal(item, &number); err == nil {
+				out = append(out, number)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func uniqueStrings(values []string) []string {

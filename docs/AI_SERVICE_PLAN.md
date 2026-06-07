@@ -10,6 +10,24 @@ This plan prepares the next implementation pass for real AI sidecars while prese
 - Implement useful dummy/no-model behavior first, then enable real models only after dependency/model approval.
 - Store AI outputs in Cartolensia metadata tables through backend jobs, not in original media folders.
 
+## Current Implementation Status
+
+The sidecar now supports both dummy/no-model mode and approved local inference mode:
+
+- Native entrypoint: `python -m cartolensia_ai.server --host 127.0.0.1 --port 19090`.
+- Docker entrypoint: `python -m cartolensia_ai.server --host 0.0.0.0 --port 8090`.
+- Implemented endpoints: `/health`, `/capabilities`, `/classify-image`, `/detect-faces`, `/safety-nsfw`, `/describe-image`, `/embed-image`, `/embed-text`.
+- Implemented local model backends:
+  - torchvision EfficientNet-B0 classifier with MobileNetV3 fallback;
+  - OpenCV YuNet face detector;
+  - Falconsai safety classifier through Transformers/Safetensors;
+  - OpenCLIP image/text embeddings;
+  - BLIP base captioning.
+- Backend jobs persist `asset_tags`, `ai_predictions`, `face_detections`, and `asset_embeddings`.
+- Vector search uses a local JSON/PostgreSQL vector fallback with brute-force cosine search for small local collections.
+
+All model files and caches are repo-local under `.cartolensia/models`; the sidecar accepts only localhost media URLs or safe local temporary/cache paths. No remote inference API is used.
+
 ## Service Layout
 
 Target package:

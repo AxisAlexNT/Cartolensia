@@ -646,6 +646,35 @@ td {
   white-space: pre-wrap;
 }
 
+.transcode-modal {
+  z-index: 1080;
+}
+
+.modal-backdrop {
+  z-index: 1070;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  align-items: center;
+  background: #ddf4ff;
+  border: 1px solid #54aeef;
+  border-radius: 999px;
+  color: #0969da;
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px 10px;
+}
+
+.chip small {
+  color: #57606a;
+}
+
 .job-row {
   align-items: center;
   display: flex;

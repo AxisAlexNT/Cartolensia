@@ -76,9 +76,10 @@ Remaining Phase 1 hardening:
 - Transcoding preset/output schema contracts. Implemented.
 - ffmpeg/ffprobe encoder and hardware capability detection. Implemented.
 - Cache-scoped HLS transcode session MVP. Implemented with built-in/custom preset metadata, browser HLS/hls.js playback path, and cache cleanup safety; durable transcode job management remains future work.
-- AI/vector status APIs, accelerator hints, optional HTTP sidecar worker contract, Docker Compose worker profiles, and dummy not-configured service scaffold. Implemented without required AI dependencies or model downloads.
-- Embedding schema contract without required pgvector. Implemented.
-- Durable transcoding jobs, managed transcoding outputs, real model execution, embeddings, face grouping, and production classification workflows. Future work.
+- AI/vector status APIs, accelerator hints, optional HTTP sidecar worker contract, Docker Compose worker profiles, and packaged local sidecar. Implemented.
+- Local AI inference with approved models: torchvision classification, OpenCV YuNet face detection, Falconsai safety classification, OpenCLIP image/text embeddings, BLIP captioning smoke, prediction/tag/face/embedding persistence, and local brute-force vector search. Implemented as explicit bounded jobs.
+- Embedding schema contract without required pgvector. Implemented with JSON/PostgreSQL fallback.
+- Durable transcoding jobs, managed transcoding outputs, face identity/grouping workflows, and production-grade AI review queues. Future work.
 
 ## Phase 6: Large Archive Hardening
 
@@ -98,13 +99,13 @@ Completed in the latest implementation run:
 - Runtime-safe storage add/validate API and UI.
 - Conservative preview policy default: persistent preview generation is off unless explicitly enabled.
 - Transcoding preset validation and hardware-test flow, including native NVENC dry-run success for H.264 on the current real-peek video.
-- Packaged dummy AI sidecar and backend worker health probing.
-- Universal search improvements for date ranges, album tokens, and track tokens.
+- Packaged AI sidecar with dummy and local inference modes; backend worker health probing and scoped AI jobs.
+- Universal search improvements for date ranges, album tokens, track tokens, AI tags/categories/safety/captions, and vector text-to-image search.
 
 Next priorities:
 
 - Persist runtime storage changes durably.
-- Add real AI model execution only after explicit model/dependency approvals.
+- Harden AI review workflows, performance controls, and browser visualizations around the now-functional local AI pipeline.
 - Add OSM-background track thumbnail rendering.
 - Split large WebUI pages into smaller components.
 - Add browser automation for gallery/transcoding/map interaction checks.

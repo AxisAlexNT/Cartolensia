@@ -1504,3 +1504,301 @@ Continue from the current Cartolensia repository and live real-peek service. Imp
 - No missing marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-07 Supervised AI/Transcoding Approval Preflight
+
+### Scope
+
+- Short supervised probe/planning run only.
+- No feature implementation started.
+- No PyTorch install, model download, Docker image pull, real-data scan, DB reset, commit, or push.
+- Added `docs/AI_MODEL_APPROVALS.md`.
+- Updated `docs/NEXT_LONG_RUN_PLAN.md` with the current preflight findings and approval gates.
+
+### Runtime State Queried
+
+Commands/endpoints:
+
+- `GET /api/v1/stats`
+- `GET /api/v1/gps/tracks`
+- `GET /api/v1/transcoding/capabilities`
+- `GET /api/v1/transcoding/presets`
+- `GET /api/v1/media/ce8b4866-33bd-474e-84ab-a0fd9388a313/stream-options`
+- `GET /api/v1/ai/workers`
+- `GET /api/v1/ai/status`
+- `GET /api/v1/vector/status`
+- `GET /api/v1/settings`
+- `GET /api/v1/storages`
+- `GET /api/v1/jobs?limit=20`
+
+Current state:
+
+- Stats: `54` assets, `54` hashed, `0` unhashed, `48` photos, `2` videos, `4` tracks, `619580406` indexed bytes.
+- Storages: only `rclone_peek`, root `/mnt/Models/rclone`, mode `strict_read_only`.
+- Tracks: `4` parsed summaries.
+  - GPX tracks have real multi-hour durations.
+  - KML tracks currently show synthetic short durations around `16-17` seconds after salvage parsing; next UI pass should label this timestamp policy clearly.
+- Recent jobs are terminal/completed; no running job was observed.
+- Transcoding:
+  - ffmpeg and ffprobe are available at `/usr/bin`.
+  - `h264_nvenc`, `hevc_nvenc`, `av1_nvenc`, CPU H.264/HEVC/AV1, VAAPI, and QSV encoders are advertised by ffmpeg.
+  - App capability report currently marks `nvidia_smi`, `dev_dri`, `vaapi`, and `qsv` as true, but shell preflight history still notes `/dev/dri` access as environment-sensitive and VAAPI/QSV should stay unverified until a real device test passes.
+  - Presets: `original`, `h264_720p_lan`, `h264_low_bitrate`, disabled `av1_low_bitrate`, and custom `nv-750k`.
+  - `nv-750k` uses `h264_nvenc`, hardware `nvidia`, mode `bitrate`, parameter value `"750"`.
+- AI:
+  - Dummy worker is configured and healthy at `http://127.0.0.1:19090`.
+  - Worker health reports `model_missing`; no real inference is configured.
+  - CPU/NVIDIA/ROCm/Intel worker profiles are present but not configured.
+- Vector:
+  - `backend: none`.
+  - `pgvector: false`.
+  - No embeddings are generated in this build.
+- Settings:
+  - `auth.mode: dev_no_auth`.
+  - cache root is repo-local `.cartolensia/realpeek-cache`.
+  - runtime defaults include `indexing.hash_after_index=true`, `indexing.metadata_after_index=true`, `indexing.previews_after_index=false`, `map.tiles_enabled=true`, `transcode.session_ttl=2h`.
+
+### NVENC Probe
+
+Approved short probe command run:
+
+```bash
+ffmpeg -hide_banner -nostdin -y -t 2 \
+  -i /mnt/Models/rclone/Cartolensia-photos/DCIM/Camera/PXL_20260516_163309946.mp4 \
+  -map 0:v:0 -map 0:a? \
+  -vf scale=w=1280:h=-2 \
+  -c:v h264_nvenc -preset p5 \
+  -b:v 750k -maxrate 750k -bufsize 1500k \
+  -c:a aac -b:a 96k -pix_fmt yuv420p \
+  -f hls -hls_time 1 -hls_playlist_type vod \
+  -hls_segment_filename .cartolensia/realpeek-cache/transcode-test/nvenc-preflight-supervised/segment_%05d.ts \
+  .cartolensia/realpeek-cache/transcode-test/nvenc-preflight-supervised/master.m3u8
+```
+
+Result:
+
+- Exit code: `0`.
+- Output path: `.cartolensia/realpeek-cache/transcode-test/nvenc-preflight-supervised`.
+- Generated files before cleanup:
+  - `master.m3u8`, `148` bytes.
+  - `segment_00000.ts`, `222968` bytes.
+- Playlist advertised one `2.033333` second VOD segment.
+- `ffprobe` successfully read the playlist as HLS:
+  - video: H.264 Main, `1280x720`, `30 fps`;
+  - audio: AAC LC, `48000 Hz`, stereo.
+- Test output directory was deleted after recording the result.
+
+Interpretation:
+
+- Native H.264 NVENC works for the current real-peek video when bitrate is normalized to `750k` and NVENC preset `p5` is used.
+- The next implementation should focus on UI Apply/Test flow, session buffering/readiness, stderr display, and fallback behavior, not on basic NVENC availability.
+
+### AI Approval Research
+
+Web/package/model research was recorded in `docs/AI_MODEL_APPROVALS.md`.
+
+Recommended staged approach:
+
+1. Approve CUDA PyTorch/torchvision installation into `.cartolensia/ai-venv`.
+2. Start real classification with torchvision MobileNetV3 Large or EfficientNet-B0.
+3. Use OpenCV YuNet as the first face detector because model provenance is clearer and the model is small.
+4. Treat facenet-pytorch MTCNN/recognition as optional/deferred because pretrained face weight provenance is less cleanly separated.
+5. Add Falconsai NSFW detection only after explicit approval of its Hugging Face model license/provenance.
+6. Add OpenCLIP LAION embeddings only after explicit approval of LAION-trained weight provenance and larger download size.
+7. Defer BLIP captioning unless the user accepts the larger model and research-model caveats.
+
+### Approvals Needed Before Next Long Run
+
+Exact approvals requested:
+
+- Python packages:
+  - `torch`
+  - `torchvision`
+  - `opencv-python-headless`
+  - optionally `transformers`
+  - optionally `safetensors`
+  - optionally `open-clip-torch`
+- Model weights/files:
+  - MobileNetV3 Large or EfficientNet-B0 classification weights.
+  - OpenCV YuNet `face_detection_yunet_2023mar.onnx`.
+  - Falconsai `nsfw_image_detection`, only if approved.
+  - OpenCLIP `CLIP-ViT-B-32-laion2B-s34B-b79K`, only if approved.
+  - Salesforce `blip-image-captioning-base`, only if approved/deferred decision changes.
+- CUDA PyTorch:
+  - approve or reject `.cartolensia/ai-venv/bin/python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`.
+- Docker:
+  - image pulls remain deferred unless the user explicitly approves CUDA/PyTorch/ROCm/Intel AI images.
+- Real-peek AI execution:
+  - approve or reject running real AI inference on the current `54` real-peek assets after implementation. Safer default is synthetic fixtures only until UI review.
+- NSFW/safety:
+  - approve or reject the Falconsai model license/provenance and opt-in workflow.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was read only for the approved exact video input during the NVENC probe.
+- No files were written, cached, exported, transcoded, dumped, or placed under `/mnt/Models/rclone`.
+- The temporary HLS probe output was repo-local and was deleted.
+- No new real-data prefixes were scanned.
+- No missing marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
+## 2026-06-07 Autonomous Local AI Implementation Run
+
+### Start State
+
+- Live real-peek app: `http://127.0.0.1:18080`.
+- AI sidecar target: `http://127.0.0.1:19090`.
+- Storage: `rclone_peek`, root `/mnt/Models/rclone`, mode `strict_read_only`.
+- Indexed real-peek state: `54` assets, `54` hashed, `48` photos, `2` videos, `4` parsed tracks.
+- No new real-data prefix scan was run.
+
+### Dependencies And Models
+
+Installed into `.cartolensia/ai-venv`:
+
+- `torch` / `torchvision` from the approved CUDA 12.8 PyTorch wheel index.
+- `opencv-python-headless`.
+- `transformers`.
+- `safetensors`.
+- `open-clip-torch`.
+- `facenet-pytorch` and required transitive dependencies.
+
+Cached under `.cartolensia/models`:
+
+- Torchvision EfficientNet-B0 weights.
+- Torchvision MobileNetV3 Large weights.
+- OpenCV YuNet ONNX at `.cartolensia/models/opencv/face_detection_yunet_2023mar.onnx`.
+- Falconsai `nsfw_image_detection`.
+- OpenCLIP `laion/CLIP-ViT-B-32-laion2B-s34B-b79K`.
+- Salesforce `blip-image-captioning-base`.
+
+Approximate local sizes:
+
+- `.cartolensia/ai-venv`: `8.2G`.
+- `.cartolensia/models`: `2.8G`.
+
+### Implemented
+
+- Real local AI sidecar backend in `services/ai/cartolensia_ai/models/real.py`.
+- Sidecar endpoints:
+  - `/classify-image`;
+  - `/detect-faces`;
+  - `/safety-nsfw`;
+  - `/describe-image`;
+  - `/embed-image`;
+  - `/embed-text`.
+- Device selection uses approved PyTorch/OpenCLIP/Transformers ecosystems and reports `cuda:0` on this host.
+- Backend AI jobs:
+  - `/api/v1/ai/jobs/classify`;
+  - `/api/v1/ai/jobs/faces`;
+  - `/api/v1/ai/jobs/safety`;
+  - `/api/v1/ai/jobs/embed`;
+  - `/api/v1/ai/jobs/describe`.
+- Persistence:
+  - `asset_tags`;
+  - `ai_predictions`;
+  - `face_detections`;
+  - `asset_embeddings`.
+- Safety workflow:
+  - Safety predictions are stored as predictions, not truth.
+  - Assets over threshold are added to virtual album `Potentially Unsafe`; the current run found none over threshold.
+  - Original files are never moved, hidden, deleted, or modified.
+- Vector search:
+  - JSON/PostgreSQL local fallback.
+  - Bounded brute-force cosine search for current small collections.
+  - `/api/v1/search/vector?q=...`.
+- Search integration:
+  - `tag:`;
+  - `category:`;
+  - `safety:`;
+  - `face:`;
+  - `caption:`.
+- Frontend:
+  - Base AI page now has real scoped action buttons for classification, faces, safety, embeddings, and captions.
+  - Asset detail shows AI tags, predictions, face detections, safety status, captions, and embedding summaries.
+  - Advanced transcode settings use a modal-style focus isolation path.
+- API quality fixes:
+  - AI prediction reads now compare UUID asset IDs safely in PostgreSQL.
+  - Embedding summaries are returned instead of full vectors.
+  - Repeated classifier runs read back latest unique labels instead of noisy duplicates.
+
+### Live AI Validation
+
+Ran only against the current indexed real-peek scope approved by the user:
+
+- Classification:
+  - targets `54`;
+  - processed `48` photos;
+  - skipped `4` tracks and `2` videos.
+- Safety:
+  - processed `48` photos;
+  - skipped `4` tracks and `2` videos;
+  - stored `96` safety predictions plus safety tags;
+  - `0` assets above review threshold.
+- Face detection:
+  - processed `48` photos;
+  - stored `41` local-only face detections/predictions.
+- Embeddings:
+  - processed `48` photos;
+  - stored `48` 512-dimensional OpenCLIP image embeddings.
+- Captioning:
+  - smoke-tested one selected photo;
+  - stored caption `a brick path` as a generated suggestion.
+
+Database AI counts after validation:
+
+- `89` asset tags.
+- `383` AI prediction rows.
+- `41` face detections.
+- `48` asset embeddings.
+
+Endpoint checks:
+
+- `/api/v1/ai/workers` reports `ai-local` configured and healthy with loaded models.
+- The sidecar was restarted after validation; current worker health may show models as lazy/unloaded until the next inference request, but the validated outputs remain in PostgreSQL.
+- `/api/v1/vector/status` reports `local_json_bruteforce`.
+- `/api/v1/search/vector?q=brick%20path` returns OpenCLIP matches.
+- `/api/v1/search?q=tag:safety:normal` returns the `48` safety-normal photos.
+- `/api/v1/search?q=caption:brick` returns the single BLIP-captioned smoke-test asset.
+
+### Safety Confirmation
+
+- No writes to `/mnt/Models/rclone`.
+- No model files, previews, transcodes, exports, dumps, temporary files, database files, or AI outputs were placed under `/mnt/Models/rclone`.
+- AI read current assets through Cartolensia read-only localhost media URLs.
+- No new real-data prefixes were scanned.
+- No missing marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
+### Verification
+
+Passed:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+- `.cartolensia/ai-venv/bin/python -m compileall services/ai/cartolensia_ai`
+- Synthetic sidecar HTTP smoke against `/tmp/cartolensia_ai_smoke.jpg`:
+  - `classify-image`: `ok`;
+  - `safety-nsfw`: `ok`;
+  - `embed-image`: `ok`, 512 dimensions;
+  - `describe-image`: `ok`;
+  - `detect-faces`: `ok`, zero faces on synthetic drawing.
+
+Frontend build warning:
+
+- Vite still warns that the main JS chunk is larger than 500 kB. This is an existing bundling/code-splitting issue, not a test failure.
+
+Known limitations:
+
+- Face grouping/identity is not implemented; detections are local-only boxes and confidence values.
+- The safety classifier is a prediction pipeline and can be wrong; review workflow remains intentionally conservative.
+- BLIP captions are generated suggestions; only one current real-peek asset was captioned in this run.
+- Vector search uses the local brute-force JSON/PostgreSQL fallback; pgvector is still optional/future for large collections.
+- AI job execution is currently synchronous/bounded through API handlers rather than durable worker jobs; this is acceptable for the 54-asset real-peek validation but should move to background jobs before large-library inference.

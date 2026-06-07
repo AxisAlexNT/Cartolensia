@@ -14,6 +14,11 @@ class ImageRequest(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class TextRequest(BaseModel):
+    text: str
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
 class Prediction(BaseModel):
     label: str
     confidence: float | None = None
@@ -21,7 +26,7 @@ class Prediction(BaseModel):
 
 
 class InferenceResponse(BaseModel):
-    status: Literal["ok", "not_configured", "model_missing", "unsupported"]
+    status: Literal["ok", "not_configured", "model_missing", "unsupported", "error"]
     endpoint: str
     predictions: list[Prediction] = Field(default_factory=list)
     reason: str | None = None
@@ -30,10 +35,11 @@ class InferenceResponse(BaseModel):
 
 class CapabilityResponse(BaseModel):
     service: str
-    status: Literal["ok", "not_configured"]
+    status: Literal["ok", "not_configured", "partial", "error"]
     mode: str
     capabilities: list[str]
     model_state: str
     model_dir: str
     safe_note: str
-
+    device: str | None = None
+    models: dict[str, Any] = Field(default_factory=dict)

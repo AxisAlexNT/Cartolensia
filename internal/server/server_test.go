@@ -213,7 +213,7 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ai/jobs/classify", strings.NewReader(`{"scope":"selected"}`)))
-	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"not_configured"`) {
+	if rec.Code != http.StatusAccepted || !(strings.Contains(rec.Body.String(), `"not_configured"`) || strings.Contains(rec.Body.String(), `"completed"`)) {
 		t.Fatalf("ai classify status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()

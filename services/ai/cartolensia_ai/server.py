@@ -10,24 +10,30 @@ import uvicorn
 from cartolensia_ai import __version__
 from cartolensia_ai.config import ServiceConfig, load_config
 from cartolensia_ai.image_io import describe_optional_pillow
-from cartolensia_ai.models.dummy import CAPABILITIES, DummyBackend
-from cartolensia_ai.schemas import CapabilityResponse, ImageRequest, InferenceResponse
+from cartolensia_ai.models.dummy import DummyBackend
+from cartolensia_ai.models.real import CAPABILITIES, RealBackend
+from cartolensia_ai.schemas import CapabilityResponse, ImageRequest, InferenceResponse, TextRequest
 
 
 def create_app(config: ServiceConfig | None = None) -> FastAPI:
     cfg = config or load_config()
-    backend = DummyBackend()
+    backend = DummyBackend() if cfg.mode == "dummy" else RealBackend(cfg)
     app = FastAPI(title="Cartolensia AI Sidecar", version=__version__)
 
     def capabilities() -> CapabilityResponse:
+        model_state = getattr(backend, "model_state", "unknown")
+        metadata = backend.metadata() if hasattr(backend, "metadata") else {}
+        status = "not_configured" if cfg.mode == "dummy" else "ok"
         return CapabilityResponse(
             service="cartolensia-ai",
-            status="not_configured",
+            status=status,
             mode=cfg.mode,
             capabilities=CAPABILITIES,
-            model_state=backend.model_state,
+            model_state=model_state,
             model_dir=str(cfg.model_dir),
-            safe_note="dummy mode does not run inference or download models",
+            safe_note="models are loaded locally from the configured cache; no remote APIs are used",
+            device=metadata.get("device"),
+            models=metadata.get("models", {}),
         )
 
     @app.get("/health")
@@ -46,19 +52,44 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
 
     @app.post("/classify-image", response_model=InferenceResponse, status_code=202)
     def classify_image(request: ImageRequest) -> InferenceResponse:
-        return backend.infer("classify-image", request)
+        if isinstance(backend, DummyBackend):
+            return backend.infer("classify-image", request)
+        return backend.classify_image(request)
 
     @app.post("/detect-faces", response_model=InferenceResponse, status_code=202)
     def detect_faces(request: ImageRequest) -> InferenceResponse:
-        return backend.infer("detect-faces", request)
+        if isinstance(backend, DummyBackend):
+            return backend.infer("detect-faces", request)
+        return backend.detect_faces(request)
+
+    @app.post("/safety-nsfw", response_model=InferenceResponse, status_code=202)
+    def safety_nsfw(request: ImageRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return backend.infer("safety-nsfw", request)
+        return backend.safety_nsfw(request)
 
     @app.post("/describe-image", response_model=InferenceResponse, status_code=202)
     def describe_image(request: ImageRequest) -> InferenceResponse:
-        return backend.infer("describe-image", request)
+        if isinstance(backend, DummyBackend):
+            return backend.infer("describe-image", request)
+        return backend.describe_image(request)
 
     @app.post("/embed-image", response_model=InferenceResponse, status_code=202)
     def embed_image(request: ImageRequest) -> InferenceResponse:
-        return backend.infer("embed-image", request)
+        if isinstance(backend, DummyBackend):
+            return backend.infer("embed-image", request)
+        return backend.embed_image(request)
+
+    @app.post("/embed-text", response_model=InferenceResponse, status_code=202)
+    def embed_text(request: TextRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return InferenceResponse(
+                status="not_configured",
+                endpoint="embed-text",
+                reason="dummy worker has no model configured",
+                metadata={"text": request.text},
+            )
+        return backend.embed_text(request)
 
     return app
 
@@ -77,4 +108,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

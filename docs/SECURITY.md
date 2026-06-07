@@ -103,7 +103,7 @@ Plain HTTP is the default and should be bound to localhost for development. HTTP
 
 ## AI And Dependency Provenance
 
-AI/vector APIs are status and contract stubs. The backend does not download models, run inference, or require PyTorch. The optional dummy sidecar worker is explicit and returns `not_configured` unless real model services are configured. Future AI plugins should declare model namespace/version, modality, provenance, and permissions in manifests.
+AI/vector APIs are explicit, local, and bounded. The backend does not download models by itself and does not use remote inference APIs. When an operator installs the approved Python dependencies and model weights, the optional sidecar can run local torchvision classification, OpenCV YuNet face detection, Falconsai safety classification, OpenCLIP embeddings, and BLIP captioning through user-triggered jobs. AI outputs are predictions, not truth, and are stored as Cartolensia metadata only.
 
 Model caches, worker scratch space, generated predictions, and exports must stay under `.cartolensia/models`, `.cartolensia/exports`, or another configured non-archive path. They must never be placed under `/mnt/Models/rclone`.
 
@@ -133,6 +133,6 @@ Current added dependency notes:
 
 - Runtime storage changes are limited to non-destructive filesystem adapters. `journaled_deferred` and `read_write` remain disabled.
 - Storage roots at or under `/mnt/Models/rclone` are rejected unless their mode is `strict_read_only`.
-- The AI sidecar dummy service does not download models, does not run inference, and stores model/cache paths outside original media roots.
+- The AI sidecar stores model/cache paths outside original media roots. Inference is explicit and scoped; it reads media through Cartolensia read-only media URLs and writes predictions/tags/embeddings only to the database.
 - The approved NVENC validation used null-output ffmpeg dry-runs only. No transcoded file was written to the archive or cache during the validation command.
 - On-demand previews remain the preferred default to avoid write amplification; persistent preview generation is opt-in.

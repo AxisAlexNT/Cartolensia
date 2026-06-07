@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -1208,6 +1209,325 @@ func metadataOrEmpty(metadata map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return metadata
+}
+
+func (db *DB) UpsertAssetTag(ctx context.Context, tag catalog.AssetTag) (catalog.AssetTag, error) {
+	if tag.Source == "" {
+		tag.Source = "manual"
+	}
+	if tag.Metadata == nil {
+		tag.Metadata = map[string]any{}
+	}
+	metadata, err := json.Marshal(tag.Metadata)
+	if err != nil {
+		return catalog.AssetTag{}, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		insert into asset_tags(asset_id, tag, source, confidence, plugin_id, metadata_json)
+		values($1,$2,$3,$4,nullif($5,''),$6::jsonb)
+		on conflict(asset_id, tag, source) do update set
+			confidence=excluded.confidence,
+			plugin_id=excluded.plugin_id,
+			metadata_json=excluded.metadata_json
+		returning asset_id, tag, source, confidence, coalesce(plugin_id,''), metadata_json, created_at`,
+		tag.AssetID, tag.Tag, tag.Source, tag.Confidence, tag.PluginID, metadata,
+	).Scan(&tag.AssetID, &tag.Tag, &tag.Source, &tag.Confidence, &tag.PluginID, &metadata, &tag.CreatedAt)
+	if err != nil {
+		return catalog.AssetTag{}, err
+	}
+	_ = json.Unmarshal(metadata, &tag.Metadata)
+	return tag, nil
+}
+
+func (db *DB) ListAssetTags(ctx context.Context, assetID string) ([]catalog.AssetTag, error) {
+	rows, err := db.pool.Query(ctx, `
+		select asset_id, tag, source, confidence, coalesce(plugin_id,''), metadata_json, created_at
+		from asset_tags
+		where ($1='' or asset_id::text=$1)
+		order by tag, source`, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.AssetTag{}
+	for rows.Next() {
+		var tag catalog.AssetTag
+		var metadata []byte
+		if err := rows.Scan(&tag.AssetID, &tag.Tag, &tag.Source, &tag.Confidence, &tag.PluginID, &metadata, &tag.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(metadata, &tag.Metadata); err != nil || tag.Metadata == nil {
+			tag.Metadata = map[string]any{}
+		}
+		out = append(out, tag)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) CreateAIPrediction(ctx context.Context, pred catalog.AIPrediction) (catalog.AIPrediction, error) {
+	if pred.ID == "" {
+		pred.ID = id.NewUUID()
+	}
+	if pred.WorkerID == "" {
+		pred.WorkerID = "local"
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(pred.Metadata))
+	if err != nil {
+		return catalog.AIPrediction{}, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		insert into ai_predictions(id, asset_id, plugin_id, worker_id, task, label, confidence, model_name, model_version, metadata_json)
+		values($1,$2,nullif($3,''),$4,$5,$6,$7,$8,$9,$10::jsonb)
+		returning id, asset_id, coalesce(plugin_id,''), worker_id, task, label, confidence, model_name, model_version, metadata_json, created_at`,
+		pred.ID, pred.AssetID, pred.PluginID, pred.WorkerID, pred.Task, pred.Label, pred.Confidence, pred.ModelName, pred.ModelVersion, metadata,
+	).Scan(&pred.ID, &pred.AssetID, &pred.PluginID, &pred.WorkerID, &pred.Task, &pred.Label, &pred.Confidence, &pred.ModelName, &pred.ModelVersion, &metadata, &pred.CreatedAt)
+	if err != nil {
+		return catalog.AIPrediction{}, err
+	}
+	_ = json.Unmarshal(metadata, &pred.Metadata)
+	return pred, nil
+}
+
+func (db *DB) ListAIPredictions(ctx context.Context, assetID string) ([]catalog.AIPrediction, error) {
+	rows, err := db.pool.Query(ctx, `
+		select id, asset_id, coalesce(plugin_id,''), worker_id, task, label, confidence, model_name, model_version, metadata_json, created_at
+		from (
+			select distinct on (asset_id, task, label, model_name, model_version)
+				id, asset_id, plugin_id, worker_id, task, label, confidence, model_name, model_version, metadata_json, created_at
+			from ai_predictions
+			where ($1='' or asset_id::text=$1)
+			order by asset_id, task, label, model_name, model_version, created_at desc
+		) latest
+		where ($1='' or asset_id::text=$1)
+		order by created_at desc
+		limit 500`, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.AIPrediction{}
+	for rows.Next() {
+		var pred catalog.AIPrediction
+		var metadata []byte
+		if err := rows.Scan(&pred.ID, &pred.AssetID, &pred.PluginID, &pred.WorkerID, &pred.Task, &pred.Label, &pred.Confidence, &pred.ModelName, &pred.ModelVersion, &metadata, &pred.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(metadata, &pred.Metadata); err != nil || pred.Metadata == nil {
+			pred.Metadata = map[string]any{}
+		}
+		out = append(out, pred)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) CreateFaceDetection(ctx context.Context, face catalog.FaceDetection) (catalog.FaceDetection, error) {
+	if face.ID == "" {
+		face.ID = id.NewUUID()
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(face.Metadata))
+	if err != nil {
+		return catalog.FaceDetection{}, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		insert into face_detections(id, asset_id, plugin_id, x, y, width, height, confidence, cluster_id, metadata_json)
+		values($1,$2,nullif($3,''),$4,$5,$6,$7,$8,nullif($9,'')::uuid,$10::jsonb)
+		returning id, asset_id, coalesce(plugin_id,''), x, y, width, height, confidence, coalesce(cluster_id::text,''), metadata_json, created_at`,
+		face.ID, face.AssetID, face.PluginID, face.X, face.Y, face.Width, face.Height, face.Confidence, face.ClusterID, metadata,
+	).Scan(&face.ID, &face.AssetID, &face.PluginID, &face.X, &face.Y, &face.Width, &face.Height, &face.Confidence, &face.ClusterID, &metadata, &face.CreatedAt)
+	if err != nil {
+		return catalog.FaceDetection{}, err
+	}
+	_ = json.Unmarshal(metadata, &face.Metadata)
+	return face, nil
+}
+
+func (db *DB) ListFaceDetections(ctx context.Context, assetID string) ([]catalog.FaceDetection, error) {
+	rows, err := db.pool.Query(ctx, `
+		select id, asset_id, coalesce(plugin_id,''), x, y, width, height, confidence, coalesce(cluster_id::text,''), metadata_json, created_at
+		from face_detections
+		where ($1='' or asset_id::text=$1)
+		order by created_at desc
+		limit 500`, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.FaceDetection{}
+	for rows.Next() {
+		var face catalog.FaceDetection
+		var metadata []byte
+		if err := rows.Scan(&face.ID, &face.AssetID, &face.PluginID, &face.X, &face.Y, &face.Width, &face.Height, &face.Confidence, &face.ClusterID, &metadata, &face.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(metadata, &face.Metadata); err != nil || face.Metadata == nil {
+			face.Metadata = map[string]any{}
+		}
+		out = append(out, face)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) UpsertEmbeddingModel(ctx context.Context, model catalog.EmbeddingModel) (catalog.EmbeddingModel, error) {
+	if model.ID == "" {
+		model.ID = model.ModelName + ":" + model.Version + ":" + model.Modality
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(model.Metadata))
+	if err != nil {
+		return catalog.EmbeddingModel{}, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		insert into embedding_models(id, modality, model_name, version, dimension, plugin_id, metadata_json)
+		values($1,$2,$3,$4,$5,nullif($6,''),$7::jsonb)
+		on conflict(id) do update set
+			modality=excluded.modality,
+			model_name=excluded.model_name,
+			version=excluded.version,
+			dimension=excluded.dimension,
+			plugin_id=excluded.plugin_id,
+			metadata_json=excluded.metadata_json
+		returning id, modality, model_name, version, coalesce(dimension,0), coalesce(plugin_id,''), metadata_json, created_at`,
+		model.ID, model.Modality, model.ModelName, model.Version, model.Dimension, model.PluginID, metadata,
+	).Scan(&model.ID, &model.Modality, &model.ModelName, &model.Version, &model.Dimension, &model.PluginID, &metadata, &model.CreatedAt)
+	if err != nil {
+		return catalog.EmbeddingModel{}, err
+	}
+	_ = json.Unmarshal(metadata, &model.Metadata)
+	return model, nil
+}
+
+func (db *DB) UpsertAssetEmbedding(ctx context.Context, embedding catalog.AssetEmbedding) (catalog.AssetEmbedding, error) {
+	if embedding.ID == "" {
+		embedding.ID = id.NewUUID()
+	}
+	if embedding.SourceRef == "" {
+		embedding.SourceRef = "asset"
+	}
+	payload, err := json.Marshal(map[string]any{"vector": embedding.Vector})
+	if err != nil {
+		return catalog.AssetEmbedding{}, err
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(embedding.Metadata))
+	if err != nil {
+		return catalog.AssetEmbedding{}, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		insert into asset_embeddings(id, asset_id, model_id, modality, source_ref, embedding_json, metadata_json)
+		values($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)
+		on conflict(asset_id, model_id, modality, source_ref) do update set
+			embedding_json=excluded.embedding_json,
+			metadata_json=excluded.metadata_json,
+			created_at=now()
+		returning id, asset_id, model_id, modality, source_ref, embedding_json, metadata_json, created_at`,
+		embedding.ID, embedding.AssetID, embedding.ModelID, embedding.Modality, embedding.SourceRef, payload, metadata,
+	).Scan(&embedding.ID, &embedding.AssetID, &embedding.ModelID, &embedding.Modality, &embedding.SourceRef, &payload, &metadata, &embedding.CreatedAt)
+	if err != nil {
+		return catalog.AssetEmbedding{}, err
+	}
+	embedding.Vector = vectorFromJSON(payload)
+	_ = json.Unmarshal(metadata, &embedding.Metadata)
+	return embedding, nil
+}
+
+func (db *DB) ListAssetEmbeddings(ctx context.Context, assetID string) ([]catalog.AssetEmbedding, error) {
+	rows, err := db.pool.Query(ctx, `
+		select id, asset_id, model_id, modality, source_ref, embedding_json, metadata_json, created_at
+		from asset_embeddings
+		where ($1='' or asset_id::text=$1)
+		order by created_at desc
+		limit 500`, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.AssetEmbedding{}
+	for rows.Next() {
+		var embedding catalog.AssetEmbedding
+		var payload, metadata []byte
+		if err := rows.Scan(&embedding.ID, &embedding.AssetID, &embedding.ModelID, &embedding.Modality, &embedding.SourceRef, &payload, &metadata, &embedding.CreatedAt); err != nil {
+			return nil, err
+		}
+		embedding.Vector = vectorFromJSON(payload)
+		if err := json.Unmarshal(metadata, &embedding.Metadata); err != nil || embedding.Metadata == nil {
+			embedding.Metadata = map[string]any{}
+		}
+		out = append(out, embedding)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) VectorSearch(ctx context.Context, modelID string, vector []float64, limit int) ([]catalog.VectorSearchResult, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := db.pool.Query(ctx, `
+		select asset_id, model_id, embedding_json
+		from asset_embeddings
+		where ($1='' or model_id=$1)
+		limit 5000`, modelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type candidate struct {
+		assetID string
+		modelID string
+		score   float64
+	}
+	candidates := []candidate{}
+	for rows.Next() {
+		var assetID, matchedModelID string
+		var payload []byte
+		if err := rows.Scan(&assetID, &matchedModelID, &payload); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate{assetID: assetID, modelID: matchedModelID, score: dbCosineSimilarity(vector, vectorFromJSON(payload))})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	out := []catalog.VectorSearchResult{}
+	for _, candidate := range candidates {
+		if len(out) >= limit {
+			break
+		}
+		asset, err := db.GetAsset(ctx, candidate.assetID)
+		if err != nil {
+			continue
+		}
+		out = append(out, catalog.VectorSearchResult{Asset: asset, Score: candidate.score, Match: candidate.modelID})
+	}
+	return out, nil
+}
+
+func vectorFromJSON(payload []byte) []float64 {
+	var doc struct {
+		Vector []float64 `json:"vector"`
+	}
+	if err := json.Unmarshal(payload, &doc); err == nil && len(doc.Vector) > 0 {
+		return doc.Vector
+	}
+	var raw []float64
+	if err := json.Unmarshal(payload, &raw); err == nil {
+		return raw
+	}
+	return nil
+}
+
+func dbCosineSimilarity(a, b []float64) float64 {
+	if len(a) == 0 || len(a) != len(b) {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 func slugifyDB(input string) string {

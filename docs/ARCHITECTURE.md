@@ -212,11 +212,11 @@ PostGIS, pgvector, and pg_trgm are detected at startup. PostGIS may be installed
 
 ## AI Sidecar Foundation
 
-The optional AI sidecar contract is HTTP JSON. The repository includes a minimal `services/ai/worker.py` dummy worker and Compose profiles for CPU, NVIDIA, ROCm, and Intel variants. These services are not built or run by default and do not download models. Model/cache paths are expected under repo-local `.cartolensia/models` or another configured non-archive directory. The backend can report worker profiles and accepts classification/face/description job requests as explicit not-configured stubs until a real worker endpoint is configured.
+The optional AI sidecar contract is HTTP JSON. The packaged FastAPI worker under `services/ai/cartolensia_ai` supports dummy/no-model mode and approved local inference mode. In local inference mode it uses established libraries instead of custom model code: torchvision for EfficientNet-B0/MobileNetV3 image classification, OpenCV YuNet for face detection, Transformers/Safetensors for Falconsai safety classification and BLIP captioning, and OpenCLIP for image/text embeddings. The backend probes `127.0.0.1:19090`, dispatches only explicit bounded AI jobs, reads media through Cartolensia read-only media URLs, and stores tags, predictions, face detections, and JSON embeddings in PostgreSQL. Model/cache paths are expected under repo-local `.cartolensia/models` or another configured non-archive directory.
 
 ## Future Interfaces
 
-- Vector search should be implemented through a `VectorStore` abstraction. The schema stores JSON embedding placeholders without requiring pgvector.
+- Vector search is implemented through a local JSON/PostgreSQL fallback using stored float arrays and bounded brute-force cosine search for small local collections. pgvector remains optional for later scaling.
 - Sidecar HTTP plugins are represented in manifests but are user-managed services; Cartolensia does not auto-start arbitrary plugin binaries.
 - Live video-track sync is represented in schema by `track_points` and `asset_track_links`, including `time_offset_ms`, with a marker interpolation API for linked videos.
 - Transcoding contracts and capability detection exist. Cache-scoped HLS sessions and preset management are implemented as a safe MVP; durable transcoding jobs and managed output libraries are still future work.
@@ -225,6 +225,6 @@ The optional AI sidecar contract is HTTP JSON. The repository includes a minimal
 
 - GPS/KML track detail now has a dedicated API/UI flow with OpenLayers geometry preview, altitude and speed profiles, point-info lookup, media-by-time lookup, and nearby-geotag media lookup.
 - Runtime storage management can add or validate non-destructive filesystem storages in the active registry. Real archive roots remain locked to `strict_read_only`; write-capable modes are disabled.
-- The AI sidecar is now a packaged FastAPI dummy/no-model service under `services/ai/cartolensia_ai`; backend AI worker status probes a local sidecar on `127.0.0.1:19090`.
+- The AI sidecar is now a packaged FastAPI service under `services/ai/cartolensia_ai`; backend AI worker status probes a local sidecar on `127.0.0.1:19090`, and approved local models can run classification, safety, face detection, captions, and embeddings without remote APIs.
 - Transcoding hardware validation has an explicit API and UI flow. NVIDIA H.264 NVENC command generation is validated with a short null-output dry run when approved.
 - Universal search now includes filename/path/extension/hash/date/metadata plus implemented `album:` and `track:` token handling through existing store data.

@@ -256,15 +256,21 @@ Useful endpoints:
 
 ## AI Sidecar Foundation
 
-AI inference is optional and disabled by default. The repo includes a small HTTP JSON dummy worker at `services/ai/worker.py` and Compose profiles for future CPU/NVIDIA/ROCm/Intel workers. These services do not download models or run real inference unless a future operator configures them.
+AI inference is optional and explicitly operator-controlled. The packaged sidecar is under `services/ai/cartolensia_ai` and can run in dummy/no-model mode or local inference mode after dependencies and model files are installed under `.cartolensia/ai-venv` and `.cartolensia/models`. It uses local libraries and model caches only; no remote inference APIs are used.
 
 Status endpoints:
 
 - `GET /api/v1/ai/status`
 - `GET /api/v1/ai/accelerators`
 - `GET /api/v1/ai/workers`
+- `POST /api/v1/ai/jobs/classify`
+- `POST /api/v1/ai/jobs/faces`
+- `POST /api/v1/ai/jobs/safety`
+- `POST /api/v1/ai/jobs/embed`
+- `POST /api/v1/ai/jobs/describe`
+- `GET /api/v1/search/vector?q=...`
 
-Model and worker cache paths must stay outside original media roots. The default intended location is `.cartolensia/models`.
+Model and worker cache paths must stay outside original media roots. The default intended location is `.cartolensia/models`. Run AI jobs only on selected assets or bounded/current indexed scopes.
 
 ## Verification Commands
 
@@ -299,7 +305,7 @@ fi
 fuser -k 18080/tcp || true
 ```
 
-- The optional dummy AI sidecar runs on `127.0.0.1:19090`:
+- The optional AI sidecar runs on `127.0.0.1:19090`:
 
 ```bash
 .cartolensia/ai-venv/bin/python -m cartolensia_ai.server --host 127.0.0.1 --port 19090

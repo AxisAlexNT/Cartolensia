@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -832,6 +833,202 @@ func (s *MemoryStore) DeleteTranscodingPreset(_ context.Context, presetID string
 	}
 	delete(s.transcodePresets, presetID)
 	return nil
+}
+
+func (s *MemoryStore) UpsertAssetTag(_ context.Context, tag AssetTag) (AssetTag, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[tag.AssetID]; !ok {
+		return AssetTag{}, ErrNotFound
+	}
+	if tag.Tag == "" {
+		return AssetTag{}, ErrInvalid
+	}
+	if tag.Source == "" {
+		tag.Source = "manual"
+	}
+	if tag.Metadata == nil {
+		tag.Metadata = map[string]any{}
+	}
+	if tag.CreatedAt.IsZero() {
+		tag.CreatedAt = time.Now().UTC()
+	}
+	if s.assetTags[tag.AssetID] == nil {
+		s.assetTags[tag.AssetID] = map[string]AssetTag{}
+	}
+	key := tag.Source + "\x00" + tag.Tag
+	s.assetTags[tag.AssetID][key] = tag
+	return tag, nil
+}
+
+func (s *MemoryStore) ListAssetTags(_ context.Context, assetID string) ([]AssetTag, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []AssetTag{}
+	for _, tag := range s.assetTags[assetID] {
+		out = append(out, tag)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Tag == out[j].Tag {
+			return out[i].Source < out[j].Source
+		}
+		return out[i].Tag < out[j].Tag
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) CreateAIPrediction(_ context.Context, pred AIPrediction) (AIPrediction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[pred.AssetID]; !ok {
+		return AIPrediction{}, ErrNotFound
+	}
+	if pred.ID == "" {
+		pred.ID = id.NewUUID()
+	}
+	if pred.WorkerID == "" {
+		pred.WorkerID = "local"
+	}
+	if pred.Metadata == nil {
+		pred.Metadata = map[string]any{}
+	}
+	if pred.CreatedAt.IsZero() {
+		pred.CreatedAt = time.Now().UTC()
+	}
+	s.aiPredictions[pred.AssetID] = append(s.aiPredictions[pred.AssetID], pred)
+	return pred, nil
+}
+
+func (s *MemoryStore) ListAIPredictions(_ context.Context, assetID string) ([]AIPrediction, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]AIPrediction(nil), s.aiPredictions[assetID]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) CreateFaceDetection(_ context.Context, face FaceDetection) (FaceDetection, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[face.AssetID]; !ok {
+		return FaceDetection{}, ErrNotFound
+	}
+	if face.ID == "" {
+		face.ID = id.NewUUID()
+	}
+	if face.Metadata == nil {
+		face.Metadata = map[string]any{}
+	}
+	if face.CreatedAt.IsZero() {
+		face.CreatedAt = time.Now().UTC()
+	}
+	s.faceDetections[face.AssetID] = append(s.faceDetections[face.AssetID], face)
+	return face, nil
+}
+
+func (s *MemoryStore) ListFaceDetections(_ context.Context, assetID string) ([]FaceDetection, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]FaceDetection(nil), s.faceDetections[assetID]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertEmbeddingModel(_ context.Context, model EmbeddingModel) (EmbeddingModel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if model.ID == "" {
+		model.ID = model.ModelName + ":" + model.Version + ":" + model.Modality
+	}
+	if model.Metadata == nil {
+		model.Metadata = map[string]any{}
+	}
+	if model.CreatedAt.IsZero() {
+		model.CreatedAt = time.Now().UTC()
+	}
+	s.embeddingModels[model.ID] = model
+	return model, nil
+}
+
+func (s *MemoryStore) UpsertAssetEmbedding(_ context.Context, embedding AssetEmbedding) (AssetEmbedding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[embedding.AssetID]; !ok {
+		return AssetEmbedding{}, ErrNotFound
+	}
+	if _, ok := s.embeddingModels[embedding.ModelID]; !ok {
+		return AssetEmbedding{}, ErrNotFound
+	}
+	if embedding.ID == "" {
+		embedding.ID = id.NewUUID()
+	}
+	if embedding.SourceRef == "" {
+		embedding.SourceRef = "asset"
+	}
+	if embedding.Metadata == nil {
+		embedding.Metadata = map[string]any{}
+	}
+	if embedding.CreatedAt.IsZero() {
+		embedding.CreatedAt = time.Now().UTC()
+	}
+	key := embedding.AssetID + "\x00" + embedding.ModelID + "\x00" + embedding.Modality + "\x00" + embedding.SourceRef
+	s.assetEmbeddings[key] = embedding
+	return embedding, nil
+}
+
+func (s *MemoryStore) ListAssetEmbeddings(_ context.Context, assetID string) ([]AssetEmbedding, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []AssetEmbedding{}
+	prefix := assetID + "\x00"
+	for key, embedding := range s.assetEmbeddings {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, embedding)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) VectorSearch(_ context.Context, modelID string, vector []float64, limit int) ([]VectorSearchResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	results := []VectorSearchResult{}
+	for _, embedding := range s.assetEmbeddings {
+		if modelID != "" && embedding.ModelID != modelID {
+			continue
+		}
+		score := cosineSimilarity(vector, embedding.Vector)
+		asset, ok := s.assets[embedding.AssetID]
+		if !ok {
+			continue
+		}
+		results = append(results, VectorSearchResult{Asset: cloneAsset(asset), Score: score, Match: embedding.ModelID})
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+func cosineSimilarity(a, b []float64) float64 {
+	if len(a) == 0 || len(a) != len(b) {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 func cloneTranscodingPreset(preset TranscodingPreset) TranscodingPreset {

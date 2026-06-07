@@ -7,6 +7,14 @@ dependencies = [
   "fastapi",
   "uvicorn",
   "numpy",
+  "pillow",
+  "torch",
+  "torchvision",
+  "opencv-python-headless",
+  "transformers",
+  "safetensors",
+  "open-clip-torch",
+  "facenet-pytorch",
 ]
 
 [project.scripts]
@@ -15,4 +23,3 @@ cartolensia-ai-server = "cartolensia_ai.server:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
-

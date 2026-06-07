@@ -354,6 +354,72 @@ type TranscodingPreset struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
+type AssetTag struct {
+	AssetID    string         `json:"asset_id"`
+	Tag        string         `json:"tag"`
+	Source     string         `json:"source"`
+	Confidence *float64       `json:"confidence,omitempty"`
+	PluginID   string         `json:"plugin_id,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+type AIPrediction struct {
+	ID           string         `json:"id"`
+	AssetID      string         `json:"asset_id"`
+	PluginID     string         `json:"plugin_id,omitempty"`
+	WorkerID     string         `json:"worker_id"`
+	Task         string         `json:"task"`
+	Label        string         `json:"label"`
+	Confidence   *float64       `json:"confidence,omitempty"`
+	ModelName    string         `json:"model_name"`
+	ModelVersion string         `json:"model_version"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+}
+
+type FaceDetection struct {
+	ID         string         `json:"id"`
+	AssetID    string         `json:"asset_id"`
+	PluginID   string         `json:"plugin_id,omitempty"`
+	X          float64        `json:"x"`
+	Y          float64        `json:"y"`
+	Width      float64        `json:"width"`
+	Height     float64        `json:"height"`
+	Confidence *float64       `json:"confidence,omitempty"`
+	ClusterID  string         `json:"cluster_id,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+type EmbeddingModel struct {
+	ID        string         `json:"id"`
+	Modality  string         `json:"modality"`
+	ModelName string         `json:"model_name"`
+	Version   string         `json:"version"`
+	Dimension int            `json:"dimension,omitempty"`
+	PluginID  string         `json:"plugin_id,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type AssetEmbedding struct {
+	ID        string         `json:"id"`
+	AssetID   string         `json:"asset_id"`
+	ModelID   string         `json:"model_id"`
+	Modality  string         `json:"modality"`
+	SourceRef string         `json:"source_ref"`
+	Vector    []float64      `json:"vector"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type VectorSearchResult struct {
+	Asset Asset   `json:"asset"`
+	Score float64 `json:"score"`
+	Match string  `json:"match"`
+}
+
 type Store interface {
 	UpsertDiscoveredFile(context.Context, storage.FileInfo) (UpsertResult, error)
 	ListAssets(context.Context) ([]Asset, error)
@@ -399,6 +465,16 @@ type Store interface {
 	ListTranscodingPresets(context.Context) ([]TranscodingPreset, error)
 	UpsertTranscodingPreset(context.Context, TranscodingPreset) (TranscodingPreset, error)
 	DeleteTranscodingPreset(context.Context, string) error
+	UpsertAssetTag(context.Context, AssetTag) (AssetTag, error)
+	ListAssetTags(context.Context, string) ([]AssetTag, error)
+	CreateAIPrediction(context.Context, AIPrediction) (AIPrediction, error)
+	ListAIPredictions(context.Context, string) ([]AIPrediction, error)
+	CreateFaceDetection(context.Context, FaceDetection) (FaceDetection, error)
+	ListFaceDetections(context.Context, string) ([]FaceDetection, error)
+	UpsertEmbeddingModel(context.Context, EmbeddingModel) (EmbeddingModel, error)
+	UpsertAssetEmbedding(context.Context, AssetEmbedding) (AssetEmbedding, error)
+	ListAssetEmbeddings(context.Context, string) ([]AssetEmbedding, error)
+	VectorSearch(context.Context, string, []float64, int) ([]VectorSearchResult, error)
 	EnqueueJob(context.Context, jobs.Job) (jobs.Job, error)
 	UpdateJob(context.Context, jobs.Job) error
 	ListJobs(context.Context) ([]jobs.Job, error)
@@ -427,6 +503,11 @@ type MemoryStore struct {
 	scanRuns         map[string]ScanRun
 	previewEntries   map[string]PreviewCacheEntry
 	transcodePresets map[string]TranscodingPreset
+	assetTags        map[string]map[string]AssetTag
+	aiPredictions    map[string][]AIPrediction
+	faceDetections   map[string][]FaceDetection
+	embeddingModels  map[string]EmbeddingModel
+	assetEmbeddings  map[string]AssetEmbedding
 	jobs             map[string]jobs.Job
 }
 
@@ -444,6 +525,11 @@ func NewMemoryStore() *MemoryStore {
 		scanRuns:         make(map[string]ScanRun),
 		previewEntries:   make(map[string]PreviewCacheEntry),
 		transcodePresets: make(map[string]TranscodingPreset),
+		assetTags:        make(map[string]map[string]AssetTag),
+		aiPredictions:    make(map[string][]AIPrediction),
+		faceDetections:   make(map[string][]FaceDetection),
+		embeddingModels:  make(map[string]EmbeddingModel),
+		assetEmbeddings:  make(map[string]AssetEmbedding),
 		jobs:             make(map[string]jobs.Job),
 	}
 }
@@ -1018,6 +1104,8 @@ func (s *MemoryStore) failLeasedLocked(job jobs.Job, cause error) error {
 }
 
 var ErrNotFound = &notFoundError{}
+
+var ErrInvalid = errors.New("invalid catalog input")
 
 var ErrJobLeaseLost = errors.New("job lease is not owned by worker")
 

@@ -21,19 +21,21 @@ import (
 )
 
 type transcodeSession struct {
-	ID        string    `json:"id"`
-	AssetID   string    `json:"asset_id"`
-	Profile   string    `json:"profile"`
-	Hardware  string    `json:"hardware,omitempty"`
-	Encoder   string    `json:"encoder,omitempty"`
-	Dir       string    `json:"dir"`
-	Playlist  string    `json:"playlist_url"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	Error     string    `json:"error,omitempty"`
-	Args      []string  `json:"-"`
-	cmd       *exec.Cmd
-	stderr    *lockedBuffer
+	ID              string    `json:"id"`
+	AssetID         string    `json:"asset_id"`
+	Profile         string    `json:"profile"`
+	Hardware        string    `json:"hardware,omitempty"`
+	Encoder         string    `json:"encoder,omitempty"`
+	Dir             string    `json:"dir"`
+	Playlist        string    `json:"playlist_url"`
+	Status          string    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	Error           string    `json:"error,omitempty"`
+	ReadySeconds    float64   `json:"ready_seconds,omitempty"`
+	MinReadySeconds float64   `json:"min_ready_seconds,omitempty"`
+	Args            []string  `json:"-"`
+	cmd             *exec.Cmd
+	stderr          *lockedBuffer
 }
 
 var transcodeSessions = struct {
@@ -137,18 +139,19 @@ func (s *Server) handleTranscodeSessionStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	session := &transcodeSession{
-		ID:        sessionID,
-		AssetID:   assetID,
-		Profile:   profile,
-		Hardware:  resolvedPreset.Hardware,
-		Encoder:   resolvedPreset.FFmpegEncoder,
-		Dir:       sessionDir,
-		Playlist:  "/api/v1/media/transcode-sessions/" + sessionID + "/master.m3u8",
-		Status:    "pending",
-		CreatedAt: time.Now().UTC(),
-		Args:      args,
-		cmd:       cmd,
-		stderr:    stderr,
+		ID:              sessionID,
+		AssetID:         assetID,
+		Profile:         profile,
+		Hardware:        resolvedPreset.Hardware,
+		Encoder:         resolvedPreset.FFmpegEncoder,
+		Dir:             sessionDir,
+		Playlist:        "/api/v1/media/transcode-sessions/" + sessionID + "/master.m3u8",
+		Status:          "pending",
+		CreatedAt:       time.Now().UTC(),
+		MinReadySeconds: 10,
+		Args:            args,
+		cmd:             cmd,
+		stderr:          stderr,
 	}
 	transcodeSessions.Lock()
 	transcodeSessions.items[sessionID] = session
@@ -167,7 +170,7 @@ func (s *Server) handleTranscodeSessionStart(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}()
-	waitForHLSReady(session, 4*time.Second)
+	waitForHLSReady(session, 15*time.Second)
 	writeJSON(w, http.StatusAccepted, publicTranscodeSession(session))
 }
 
@@ -436,19 +439,21 @@ func ffmpegDryRunArgs(preset catalog.TranscodingPreset, inputPath string, durati
 
 func publicTranscodeSession(session *transcodeSession) map[string]any {
 	return map[string]any{
-		"id":            session.ID,
-		"asset_id":      session.AssetID,
-		"profile":       session.Profile,
-		"hardware":      session.Hardware,
-		"encoder":       session.Encoder,
-		"playlist_url":  session.Playlist,
-		"status":        session.Status,
-		"created_at":    session.CreatedAt,
-		"error":         session.Error,
-		"stderr_tail":   session.stderrTail(),
-		"command":       ffmpegCommandSummary(session.Args),
-		"segment_count": transcodeSegmentCount(session.Dir),
-		"output_bytes":  transcodeOutputBytes(session.Dir),
+		"id":                session.ID,
+		"asset_id":          session.AssetID,
+		"profile":           session.Profile,
+		"hardware":          session.Hardware,
+		"encoder":           session.Encoder,
+		"playlist_url":      session.Playlist,
+		"status":            session.Status,
+		"created_at":        session.CreatedAt,
+		"error":             session.Error,
+		"stderr_tail":       session.stderrTail(),
+		"command":           ffmpegCommandSummary(session.Args),
+		"segment_count":     transcodeSegmentCount(session.Dir),
+		"output_bytes":      transcodeOutputBytes(session.Dir),
+		"ready_seconds":     session.ReadySeconds,
+		"min_ready_seconds": session.MinReadySeconds,
 	}
 }
 
@@ -476,17 +481,47 @@ func updateTranscodeReadiness(session *transcodeSession) {
 	if session.Status != "pending" {
 		return
 	}
-	if hlsReady(session.Dir) {
+	if ready, seconds := hlsReady(session.Dir, session.MinReadySeconds); ready {
+		session.ReadySeconds = seconds
 		session.Status = "ready"
+	} else {
+		session.ReadySeconds = seconds
 	}
 }
 
-func hlsReady(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, "master.m3u8")); err != nil {
-		return false
+func hlsReady(dir string, minReadySeconds float64) (bool, float64) {
+	playlistPath := filepath.Join(dir, "master.m3u8")
+	data, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return false, 0
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, "segment_*.ts"))
-	return err == nil && len(matches) > 0
+	if err != nil || len(matches) == 0 {
+		return false, 0
+	}
+	seconds, ended := hlsPlaylistDuration(string(data))
+	if ended {
+		return true, seconds
+	}
+	if minReadySeconds <= 0 {
+		minReadySeconds = 10
+	}
+	return seconds >= minReadySeconds, seconds
+}
+
+func hlsPlaylistDuration(playlist string) (seconds float64, ended bool) {
+	for _, line := range strings.Split(playlist, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#EXTINF:") {
+			raw := strings.TrimSuffix(strings.TrimPrefix(line, "#EXTINF:"), ",")
+			value, _ := strconv.ParseFloat(raw, 64)
+			seconds += value
+		}
+		if line == "#EXT-X-ENDLIST" {
+			ended = true
+		}
+	}
+	return seconds, ended
 }
 
 func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePreset *catalog.TranscodingPreset, inputPath, sessionDir string) ([]string, catalog.TranscodingPreset, error) {

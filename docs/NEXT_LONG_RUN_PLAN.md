@@ -20,6 +20,38 @@ Current audited state:
 - ffmpeg advertises NVENC, VAAPI, QSV, and CPU encoders, but `/dev/dri` is absent in the shell environment.
 - AI workers are configured as contracts only and are not running real models.
 
+## 2026-06-07 Supervised Preflight Update
+
+Live runtime audit:
+
+- `GET /api/v1/stats`: `54` assets, `54` hashed, `0` unhashed, `48` photos, `2` videos, `4` tracks, `619580406` indexed bytes.
+- `GET /api/v1/gps/tracks`: `4` track summaries. The two GPX summaries have real multi-hour durations; the two salvaged KML summaries currently show synthetic short durations around `16-17` seconds and must be labeled as synthetic/not authoritative in the next UI pass.
+- `GET /api/v1/transcoding/presets`: built-ins plus custom `nv-750k`; `nv-750k` uses `h264_nvenc`, hardware `nvidia`, bitrate parameter `"750"`.
+- `GET /api/v1/ai/workers`: dummy local worker is configured and healthy at `127.0.0.1:19090`, but reports `model_missing`; CPU/NVIDIA/ROCm/Intel real workers are not configured.
+- `GET /api/v1/vector/status`: backend is `none`; pgvector is not active; a local fallback vector store is still needed.
+- `GET /api/v1/storages`: only `rclone_peek`, root `/mnt/Models/rclone`, mode `strict_read_only`.
+
+NVENC preflight:
+
+- A supervised 2-second HLS dry-run was run against only the current 7-second video `PXL_20260516_163309946.mp4`.
+- Command used H.264 NVENC, `-preset p5`, and normalized UI bitrate `750` to `750k`.
+- Output was written only to `.cartolensia/realpeek-cache/transcode-test/nvenc-preflight-supervised`.
+- Result: exit code `0`; generated `master.m3u8` and one `.ts` segment; `ffprobe` read the playlist as HLS with H.264 Main 1280x720 video and AAC audio.
+- Test output directory was deleted immediately after inspection.
+- This confirms the next long run should prioritize the UI Apply/Test workflow and HLS buffering/session status rather than treating NVENC itself as unavailable.
+
+AI/model approvals:
+
+- Detailed model/dependency approvals are now tracked in [AI_MODEL_APPROVALS.md](AI_MODEL_APPROVALS.md).
+- No PyTorch install, model download, Docker pull, or AI inference was run during this preflight.
+- Recommended real-AI sequence:
+  1. approve CUDA PyTorch/torchvision install;
+  2. approve MobileNetV3 or EfficientNet-B0 classification weights;
+  3. approve OpenCV YuNet face detector;
+  4. explicitly decide on Falconsai NSFW model;
+  5. explicitly decide on OpenCLIP LAION embeddings;
+  6. defer BLIP captioning unless the user accepts the larger download and research-model caveats.
+
 ## 1. GPS/KML Track Detail Page And Charts
 
 Files/packages likely to change:
@@ -458,7 +490,10 @@ Acceptance:
 
 ## 11. AI Sidecar Services And Model-Ready Foundation
 
-Detailed plan: [AI_SERVICE_PLAN.md](AI_SERVICE_PLAN.md)
+Detailed plans:
+
+- [AI_SERVICE_PLAN.md](AI_SERVICE_PLAN.md)
+- [AI_MODEL_APPROVALS.md](AI_MODEL_APPROVALS.md)
 
 Files/packages likely to change:
 
@@ -487,11 +522,23 @@ Implementation order:
 6. Add model-cache settings and docs.
 7. Add Docker Compose profiles for CPU/NVIDIA/ROCm/Intel, but do not pull/build heavy images by default.
 
+Next real-AI implementation strategy after approval:
+
+1. Install approved PyTorch/torchvision wheels in `.cartolensia/ai-venv`; verify `torch.cuda.is_available()` and RTX 3090 Ti device name.
+2. Add a classification backend in `services/ai/cartolensia_ai/models/classification.py` using either MobileNetV3 or EfficientNet-B0. Cache weights under `.cartolensia/models/torchvision`.
+3. Add a face detection backend with OpenCV YuNet first. Cache `face_detection_yunet_2023mar.onnx` under `.cartolensia/models/opencv`. Store detections as bounding boxes and confidence; do not implement identity recognition by default.
+4. Add NSFW/safety classification only if the selected model license/provenance is explicitly approved. Store results as private predictions with model namespace/version and confidence, not as hard truth.
+5. Add `VectorStore` local fallback before pgvector: store vectors as JSON float arrays in PostgreSQL and use bounded brute-force cosine for small sets. Keep pgvector optional.
+6. Add OpenCLIP embeddings only if LAION-trained weights are approved. Store model namespace/version and embedding dimensionality.
+7. Defer BLIP captioning until the classifier/face/vector flows are stable unless explicitly approved.
+
 Approvals required before real inference:
 
-- Python dependency install into a venv or AI image build.
-- Model downloads into `.cartolensia/models`.
-- Docker GPU image pulls/builds.
+- Python dependency install into `.cartolensia/ai-venv`.
+- CUDA PyTorch/torchvision install from the official PyTorch CUDA 12.8 wheel index.
+- Individual model downloads into `.cartolensia/models`, listed in [AI_MODEL_APPROVALS.md](AI_MODEL_APPROVALS.md).
+- Docker GPU image pulls/builds, if Docker AI containers are prioritized over native service mode.
+- Whether AI may run on the current `54` real-peek assets after implementation or must be limited to synthetic fixtures.
 
 Acceptance:
 
@@ -569,10 +616,21 @@ Recommended no-new-dependency path:
 
 Approvals required:
 
-- Short native ffmpeg NVENC validation on current 7-second real-peek video, output only to `/tmp` or `.cartolensia/realpeek-cache/transcode-test`.
-- Python venv/dependency install for AI service if moving beyond stdlib dummy worker.
-- Docker image pulls/builds for CUDA/PyTorch/ROCm/Intel images.
-- Model downloads into `.cartolensia/models`.
+- AI package/model approvals are enumerated in [AI_MODEL_APPROVALS.md](AI_MODEL_APPROVALS.md).
+- Python packages likely needed for the next run:
+  - `torch`
+  - `torchvision`
+  - `opencv-python-headless`
+  - `transformers` and `safetensors` only if NSFW/captioning are approved
+  - `open-clip-torch` only if embeddings are approved
+- Model downloads likely needed:
+  - torchvision MobileNetV3 or EfficientNet-B0 weights;
+  - OpenCV YuNet ONNX face detector;
+  - Falconsai NSFW only if explicitly approved;
+  - OpenCLIP LAION ViT-B/32 only if explicitly approved;
+  - BLIP captioning only if explicitly approved.
+- Docker image pulls/builds for CUDA/PyTorch/ROCm/Intel images remain deferred unless explicitly approved.
+- A short native ffmpeg NVENC HLS validation has now passed. Further long transcode tests still require explicit scope/duration.
 
 Model proposals are documented in [AI_SERVICE_PLAN.md](AI_SERVICE_PLAN.md). Do not download models in the implementation pass unless the user explicitly approves them.
 

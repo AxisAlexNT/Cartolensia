@@ -270,6 +270,7 @@ const transcodeSession = ref<TranscodeSession | null>(null);
 const transcodeMessage = ref("");
 const transcodeValidation = ref<Record<string, unknown> | null>(null);
 const showAdvancedTranscode = ref(false);
+const advancedTranscodeAssetId = ref("");
 const customPresetName = ref("Custom LAN preset");
 const customPresetHardware = ref("cpu");
 const customPresetCodec = ref("h264");
@@ -459,6 +460,7 @@ function openGallery(items: GalleryItem[], index: number) {
 }
 
 function closeGallery() {
+  closeAdvancedTranscode();
   if (transcodeSession.value) void stopActiveTranscode();
   galleryTrackMap?.setTarget(undefined);
   galleryItems.value = [];
@@ -676,6 +678,21 @@ function trackProfileRange(profile: TrackProfile | null): string {
     return "No values";
   }
   return `${profile.min.toFixed(profile.metric === "speed" ? 2 : 1)}-${profile.max.toFixed(profile.metric === "speed" ? 2 : 1)} ${profile.unit}`;
+}
+
+function trackDurationLabel(track: TrackSummary): string {
+  const duration = track.duration_seconds;
+  const source = (track.source_format ?? "").toLowerCase();
+  if (!duration || duration <= 0) return "No timestamps";
+  if ((source === "kml" || source === "kmz") && duration < 60 && track.point_count > 1000) {
+    return "Synthetic timestamps for display only";
+  }
+  if (duration < 120) return `${Math.round(duration)} s`;
+  return `${Math.round(duration / 60)} min`;
+}
+
+function trackHasRealTime(track: TrackSummary): boolean {
+  return !trackDurationLabel(track).toLowerCase().includes("synthetic") && !trackDurationLabel(track).toLowerCase().includes("no timestamps");
 }
 
 function markPreviewFailed(id: string) {
@@ -929,6 +946,44 @@ async function removeTranscodePreset(id: string) {
 		lastVideoPreset.value = "original";
 		localStorage.setItem("cartolensia.videoPreset", "original");
 	}
+}
+
+function openAdvancedTranscode(assetId: string) {
+  advancedTranscodeAssetId.value = assetId;
+  showAdvancedTranscode.value = true;
+  void nextTick(() => {
+    const first = document.querySelector<HTMLElement>(".transcode-modal [data-autofocus], .transcode-modal input, .transcode-modal select, .transcode-modal button");
+    first?.focus();
+  });
+}
+
+function closeAdvancedTranscode() {
+  showAdvancedTranscode.value = false;
+  advancedTranscodeAssetId.value = "";
+}
+
+function handleAdvancedTranscodeKeydown(event: KeyboardEvent) {
+  event.stopPropagation();
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeAdvancedTranscode();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const container = event.currentTarget as HTMLElement;
+  const focusable = Array.from(
+    container.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])")
+  ).filter((element) => !element.hasAttribute("disabled") && element.tabIndex !== -1);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 async function waitForTranscodeReady(sessionId: string): Promise<TranscodeSession> {
@@ -1340,14 +1395,15 @@ async function cleanupPreviews(dryRun = true) {
 	await refresh();
 }
 
-async function requestAIJob(kind: "classify" | "faces" | "describe") {
+async function requestAIJob(kind: "classify" | "faces" | "describe" | "safety" | "embed") {
 	try {
 		const result = await api.aiJob(kind, {
-			scope: selectedAssets.value.size > 0 ? "selected" : "current_indexed_subset",
+			scope: selectedAssets.value.size > 0 ? "selected" : "current_indexed",
 			asset_ids: Array.from(selectedAssets.value),
-			max_files: 50
+			limit: 54
 		});
-		aiMessage.value = String(result.reason ?? result.status ?? "AI request accepted.");
+		aiMessage.value = `${String(result.status ?? "completed")} · processed ${String(result.processed ?? 0)} / ${String(result.targets ?? 0)} · stored ${String(result.stored ?? 0)}${result.unsafe ? ` · ${String(result.unsafe)} need review` : ""}`;
+    await refresh();
 	} catch (err) {
 		aiMessage.value = err instanceof Error ? err.message : String(err);
 	}
@@ -1978,7 +2034,7 @@ function handleKeydown(event: KeyboardEvent) {
   if (showAdvancedTranscode.value) {
     if (event.key === "Escape") {
       event.preventDefault();
-      showAdvancedTranscode.value = false;
+      closeAdvancedTranscode();
     }
     return;
   }
@@ -2657,68 +2713,10 @@ onBeforeUnmount(() => {
 	              <button v-if="transcodeSession?.asset_id === assetDetail.asset.id" type="button" @click="stopActiveTranscode">
 	                Stop transcode session
 	              </button>
-	              <button type="button" class="icon-button" @click="showAdvancedTranscode = !showAdvancedTranscode">
+	              <button type="button" class="icon-button" @click="openAdvancedTranscode(assetDetail.asset.id)">
 	                <i class="bi bi-gear" aria-hidden="true"></i>
-	                {{ showAdvancedTranscode ? "Hide advanced" : "Advanced" }}
+	                Advanced
 	              </button>
-	              <div v-if="showAdvancedTranscode" class="transcode-advanced" role="dialog" aria-label="Advanced transcode settings" tabindex="-1" @keydown.stop>
-	                <h3>Custom Transcode Preset</h3>
-	                <label>Preset name <input v-model="customPresetName" type="text" /></label>
-	                <label>
-	                  Hardware
-	                  <select v-model="customPresetHardware">
-	                    <option
-	                      v-for="hardware in groupedTranscodeHardware"
-	                      :key="hardware.id"
-	                      :disabled="!hardware.available"
-	                      :value="hardware.id"
-	                    >
-	                      {{ hardware.label }}{{ hardware.available ? "" : ` — ${hardware.reason}` }}
-	                    </option>
-	                  </select>
-	                </label>
-	                <label>
-	                  Codec
-	                  <select v-model="customPresetCodec">
-	                    <option value="h264">H.264</option>
-	                    <option value="h265">H.265 / HEVC</option>
-	                    <option value="av1">AV1</option>
-	                    <option value="custom">Custom encoder</option>
-	                  </select>
-	                </label>
-	                <label>
-	                  Encoder
-	                  <select v-model="customPresetEncoder">
-	                    <option value="">Auto</option>
-	                    <option v-for="encoder in availableEncodersForCustom" :key="encoder.name" :value="encoder.name">
-	                      {{ encoder.name }}{{ encoder.description ? ` · ${encoder.description}` : "" }}
-	                    </option>
-	                  </select>
-	                </label>
-	                <label>
-	                  Mode
-	                  <select v-model="customPresetMode">
-	                    <option value="quality">Quality / CRF</option>
-	                    <option value="quantizer">Quantizer / CQ</option>
-	                    <option value="bitrate">Bitrate</option>
-	                  </select>
-	                </label>
-	                <label>Value <input v-model="customPresetParameter" type="text" placeholder="28 or 1500k" /></label>
-	                <div class="actions">
-	                  <button type="button" @click="applyCustomTranscodePreset(assetDetail.asset.id)">Apply</button>
-	                  <button type="button" @click="testCustomTranscodePreset(assetDetail.asset.id)">Test current hardware configuration</button>
-	                  <button type="button" @click="saveCustomTranscodePreset">Save preset</button>
-	                  <button
-	                    v-if="lastVideoPreset !== 'original' && transcodePresets.some((preset) => preset.id === lastVideoPreset && !preset.built_in)"
-	                    type="button"
-	                    @click="removeTranscodePreset(lastVideoPreset)"
-	                  >
-	                    Remove selected custom preset
-	                  </button>
-	                </div>
-	                <pre v-if="transcodeValidation" class="logbox">{{ JSON.stringify(transcodeValidation, null, 2) }}</pre>
-	                <p class="muted">HLS output is written only into the Cartolensia transcode cache and cleaned through session controls.</p>
-	              </div>
 	            </div>
             <div v-else-if="assetDetail.asset.media_kind === 'track'" class="track-detail-preview">
               <img :src="`/api/v1/media/${assetDetail.asset.id}/track-thumbnail?width=720&height=360`" alt="" />
@@ -2749,6 +2747,27 @@ onBeforeUnmount(() => {
               <a v-if="assetDetail.original_url" :href="assetDetail.original_url" target="_blank" rel="noreferrer">Open</a>
             </article>
           </div>
+          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0)" class="settings-form settings-wide">
+            <h3>AI Results</h3>
+            <div v-if="assetDetail.ai_tags?.length" class="chip-row">
+              <span v-for="tag in assetDetail.ai_tags" :key="`${tag.tag}-${tag.source}`" class="chip">
+                {{ tag.tag }} <small>{{ tag.source }}</small>
+              </span>
+            </div>
+            <table v-if="assetDetail.ai_predictions?.length">
+              <thead><tr><th>Task</th><th>Label</th><th>Confidence</th><th>Model</th></tr></thead>
+              <tbody>
+                <tr v-for="prediction in assetDetail.ai_predictions" :key="String(prediction.id)">
+                  <td>{{ prediction.task }}</td>
+                  <td>{{ prediction.label }}</td>
+                  <td>{{ prediction.confidence ? Number(prediction.confidence).toFixed(3) : "" }}</td>
+                  <td>{{ prediction.model_name }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="assetDetail.face_detections?.length">Faces detected: {{ assetDetail.face_detections.length }} local detections. No real-world identity is inferred.</p>
+            <p v-if="assetDetail.embeddings?.length">Embeddings stored: {{ assetDetail.embeddings.length }} vector record(s).</p>
+          </section>
           <table v-if="assetDetail">
             <thead><tr><th>Storage</th><th>Path</th><th>Size</th><th>MIME</th></tr></thead>
             <tbody>
@@ -2986,7 +3005,7 @@ onBeforeUnmount(() => {
             <div class="metrics">
               <article><strong>{{ selectedTrack.summary.point_count }}</strong><span>Points</span></article>
               <article><strong>{{ selectedTrack.summary.distance_m ? `${(selectedTrack.summary.distance_m / 1000).toFixed(2)} km` : "n/a" }}</strong><span>Distance</span></article>
-              <article><strong>{{ selectedTrack.summary.duration_seconds ? `${Math.round(selectedTrack.summary.duration_seconds / 60)} min` : "No timestamps" }}</strong><span>Duration</span></article>
+              <article><strong>{{ trackDurationLabel(selectedTrack.summary) }}</strong><span>Duration</span></article>
               <article><strong>{{ selectedTrack.summary.elevation_min_m !== undefined ? `${selectedTrack.summary.elevation_min_m.toFixed(1)}-${selectedTrack.summary.elevation_max_m?.toFixed(1) ?? "?"} m` : "n/a" }}</strong><span>Elevation</span></article>
               <article><strong>{{ selectedTrack.summary.min_lat?.toFixed(5) ?? "n/a" }}</strong><span>Min lat</span></article>
               <article><strong>{{ selectedTrack.summary.max_lon?.toFixed(5) ?? "n/a" }}</strong><span>Max lon</span></article>
@@ -2996,10 +3015,13 @@ onBeforeUnmount(() => {
                 Offset seconds
                 <input v-model.number="trackOffsetSeconds" type="number" />
               </label>
-              <button type="button" @click="findTrackAssets(selectedTrack.summary.track_asset_id)">Show media during track</button>
+              <button type="button" :disabled="!trackHasRealTime(selectedTrack.summary)" @click="findTrackAssets(selectedTrack.summary.track_asset_id)">Show media during track</button>
               <button type="button" @click="findNearbyTrackAssets(selectedTrack.summary.track_asset_id)">Show geotagged media within 100 m</button>
               <button type="button" @click="snapTrackMedia(selectedTrack.summary.track_asset_id)">Snap media</button>
             </div>
+            <p v-if="!trackHasRealTime(selectedTrack.summary)" class="muted">
+              This track is geometry-only or uses synthetic timestamps. Use nearby geotagged media for reliable matching.
+            </p>
             <p v-if="trackAssets.length === 0" class="empty-state">
               {{ trackAssetsReason || "No media results loaded for this track yet." }}
             </p>
@@ -3239,16 +3261,18 @@ onBeforeUnmount(() => {
 	              <div class="actions">
 	                <button type="button" @click="requestAIJob('classify')">Classify selected/current scope</button>
 	                <button type="button" @click="requestAIJob('faces')">Detect faces</button>
+	                <button type="button" @click="requestAIJob('safety')">Safety scan</button>
+	                <button type="button" @click="requestAIJob('embed')">Generate embeddings</button>
 	                <button type="button" @click="requestAIJob('describe')">Describe images</button>
 	              </div>
-	              <p class="muted">{{ aiMessage || "Requests return a clear not-configured response until a sidecar worker is configured." }}</p>
+	              <p class="muted">{{ aiMessage || "Requests run only on selected assets or the current indexed subset and store DB metadata only." }}</p>
 	            </article>
 	            <article class="settings-form">
 	              <h3>Vector Store</h3>
 	              <p>Backend: {{ vectorStatus?.backend ?? "none" }}</p>
 	              <p>pgvector: {{ vectorStatus?.pgvector ? "available" : "optional/not enabled" }}</p>
-	              <button disabled type="button">Configure vector store</button>
-	              <button disabled type="button">Run embedding job</button>
+	              <button type="button" @click="setActive('Settings')">Configure vector store</button>
+	              <button type="button" @click="requestAIJob('embed')">Run embedding job</button>
 	            </article>
 	          </div>
 	          <details>
@@ -3654,61 +3678,10 @@ onBeforeUnmount(() => {
 	            <button v-if="transcodeSession?.asset_id === galleryCurrent.id" type="button" @click="stopActiveTranscode">
 	              Stop session
 	            </button>
-	            <button type="button" class="icon-button" @click="showAdvancedTranscode = !showAdvancedTranscode">
+	            <button type="button" class="icon-button" @click="openAdvancedTranscode(galleryCurrent.id)">
 	              <i class="bi bi-gear" aria-hidden="true"></i>
 	              Advanced
 	            </button>
-	          </div>
-	          <div v-if="galleryCurrent.media_kind === 'video' && showAdvancedTranscode" class="transcode-advanced" role="dialog" aria-label="Advanced transcode settings" tabindex="-1" @keydown.stop>
-	            <label>Preset name <input v-model="customPresetName" type="text" /></label>
-	            <label>
-	              Hardware
-	              <select v-model="customPresetHardware">
-	                <option v-for="hardware in groupedTranscodeHardware" :key="hardware.id" :disabled="!hardware.available" :value="hardware.id">
-	                  {{ hardware.label }}{{ hardware.available ? "" : ` — ${hardware.reason}` }}
-	                </option>
-	              </select>
-	            </label>
-	            <label>
-	              Codec
-	              <select v-model="customPresetCodec">
-	                <option value="h264">H.264</option>
-	                <option value="h265">H.265 / HEVC</option>
-	                <option value="av1">AV1</option>
-	                <option value="custom">Custom encoder</option>
-	              </select>
-	            </label>
-	            <label>
-	              Encoder
-	              <select v-model="customPresetEncoder">
-	                <option value="">Auto</option>
-	                <option v-for="encoder in availableEncodersForCustom" :key="encoder.name" :value="encoder.name">
-	                  {{ encoder.name }}
-	                </option>
-	              </select>
-	            </label>
-	            <label>
-	              Mode
-	              <select v-model="customPresetMode">
-	                <option value="quality">Quality / CRF</option>
-	                <option value="quantizer">Quantizer / CQ</option>
-	                <option value="bitrate">Bitrate</option>
-	              </select>
-	            </label>
-	            <label>Value <input v-model="customPresetParameter" type="text" placeholder="28 or 1500k" /></label>
-	            <div class="actions">
-	              <button type="button" @click="applyCustomTranscodePreset(galleryCurrent.id)">Apply</button>
-	              <button type="button" @click="testCustomTranscodePreset(galleryCurrent.id)">Test current hardware configuration</button>
-	              <button type="button" @click="saveCustomTranscodePreset">Save preset</button>
-	              <button
-	                v-if="lastVideoPreset !== 'original' && transcodePresets.some((preset) => preset.id === lastVideoPreset && !preset.built_in)"
-	                type="button"
-	                @click="removeTranscodePreset(lastVideoPreset)"
-	              >
-	                Remove selected custom preset
-	              </button>
-	            </div>
-	            <pre v-if="transcodeValidation" class="logbox">{{ JSON.stringify(transcodeValidation, null, 2) }}</pre>
 	          </div>
           <div class="actions">
             <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="toggleGalleryZoom">
@@ -3725,5 +3698,98 @@ onBeforeUnmount(() => {
       </figure>
       <button type="button" class="gallery-nav gallery-next" aria-label="Next asset" @click="nextGallery(1)">›</button>
     </div>
+
+    <div
+      v-if="showAdvancedTranscode"
+      class="modal fade show d-block transcode-modal"
+      tabindex="-1"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Advanced transcode settings"
+      @keydown="handleAdvancedTranscodeKeydown"
+    >
+      <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content bg-dark text-light">
+          <div class="modal-header">
+            <h2 class="modal-title h5">Advanced Transcode Settings</h2>
+            <button type="button" class="btn-close btn-close-white" aria-label="Close" @click="closeAdvancedTranscode"></button>
+          </div>
+          <div class="modal-body">
+            <div class="settings-grid">
+              <label class="form-label">
+                Preset name
+                <input v-model="customPresetName" data-autofocus class="form-control" type="text" />
+              </label>
+              <label class="form-label">
+                Hardware
+                <select v-model="customPresetHardware" class="form-select">
+                  <option
+                    v-for="hardware in groupedTranscodeHardware"
+                    :key="hardware.id"
+                    :disabled="!hardware.available"
+                    :value="hardware.id"
+                  >
+                    {{ hardware.label }}{{ hardware.available ? "" : ` — ${hardware.reason}` }}
+                  </option>
+                </select>
+              </label>
+              <label class="form-label">
+                Codec
+                <select v-model="customPresetCodec" class="form-select">
+                  <option value="h264">H.264</option>
+                  <option value="h265">H.265 / HEVC</option>
+                  <option value="av1">AV1</option>
+                  <option value="custom">Custom encoder</option>
+                </select>
+              </label>
+              <label class="form-label">
+                Encoder
+                <select v-model="customPresetEncoder" class="form-select">
+                  <option value="">Auto</option>
+                  <option v-for="encoder in availableEncodersForCustom" :key="encoder.name" :value="encoder.name">
+                    {{ encoder.name }}{{ encoder.description ? ` · ${encoder.description}` : "" }}
+                  </option>
+                </select>
+              </label>
+              <label class="form-label">
+                Mode
+                <select v-model="customPresetMode" class="form-select">
+                  <option value="quality">Quality / CRF</option>
+                  <option value="quantizer">Quantizer / CQ</option>
+                  <option value="bitrate">Bitrate</option>
+                </select>
+              </label>
+              <label class="form-label">
+                Value
+                <input v-model="customPresetParameter" class="form-control" type="text" placeholder="28 or 1500k" />
+              </label>
+            </div>
+            <p class="muted mt-3">
+              HLS output is written only into the Cartolensia transcode cache. Originals remain immutable.
+            </p>
+            <pre v-if="transcodeValidation" class="logbox">{{ JSON.stringify(transcodeValidation, null, 2) }}</pre>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-light" @click="closeAdvancedTranscode">Close</button>
+            <button type="button" class="btn btn-outline-info" :disabled="!advancedTranscodeAssetId" @click="testCustomTranscodePreset(advancedTranscodeAssetId)">
+              Test current hardware configuration
+            </button>
+            <button type="button" class="btn btn-primary" :disabled="!advancedTranscodeAssetId" @click="applyCustomTranscodePreset(advancedTranscodeAssetId)">
+              Apply
+            </button>
+            <button type="button" class="btn btn-success" @click="saveCustomTranscodePreset">Save preset</button>
+            <button
+              v-if="lastVideoPreset !== 'original' && transcodePresets.some((preset) => preset.id === lastVideoPreset && !preset.built_in)"
+              type="button"
+              class="btn btn-outline-danger"
+              @click="removeTranscodePreset(lastVideoPreset)"
+            >
+              Remove selected custom preset
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="showAdvancedTranscode" class="modal-backdrop fade show"></div>
   </main>
 </template>
