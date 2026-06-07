@@ -107,6 +107,8 @@ AI/vector APIs are explicit, local, and bounded. The backend does not download m
 
 Model caches, worker scratch space, generated predictions, and exports must stay under `.cartolensia/models`, `.cartolensia/exports`, or another configured non-archive path. They must never be placed under `/mnt/Models/rclone`.
 
+AI/GPU status distinguishes native workers from Docker profiles. A configured native CUDA sidecar can be active while an optional Docker `ai-nvidia` profile remains not configured. Docker GPU probes must be explicit and supervised because they may require image pulls and host GPU access.
+
 Do not copy third-party source into the repository. Add dependencies only through normal package managers and document why they are needed.
 
 Current added dependency notes:
@@ -136,3 +138,4 @@ Current added dependency notes:
 - The AI sidecar stores model/cache paths outside original media roots. Inference is explicit and scoped; it reads media through Cartolensia read-only media URLs and writes predictions/tags/embeddings only to the database.
 - The approved NVENC validation used null-output ffmpeg dry-runs only. No transcoded file was written to the archive or cache during the validation command.
 - On-demand previews remain the preferred default to avoid write amplification; persistent preview generation is opt-in.
+- The server-side file/folder picker is read-only and allowlist based. It may expose configured storage roots for operator selection, but it does not write, scan, index, or change storage mode. Real archive roots are labeled strict read-only and remain protected by backend storage guards.

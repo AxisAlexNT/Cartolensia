@@ -132,11 +132,17 @@ Implemented endpoints:
 - `GET /api/v1/ai/accelerators`
 - `GET /api/v1/ai/workers`
 - `GET /api/v1/ai/workers/{id}`
+- `GET /api/v1/ai/summary`
+- `GET /api/v1/ai/tags`
+- `GET /api/v1/ai/predictions`
+- `GET /api/v1/ai/faces`
+- `GET /api/v1/ai/safety`
 - `POST /api/v1/ai/jobs/classify`
 - `POST /api/v1/ai/jobs/faces`
 - `POST /api/v1/ai/jobs/describe`
 - `GET /api/v1/vector/status`
 - `GET /api/v1/search?q=...`
+- `GET /api/v1/files/browse`
 - `GET /api/v1/stats`
 - `GET /api/v1/backend/status`
 - `GET /api/v1/media/{asset_id}/original`
@@ -178,9 +184,9 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Plugins page and plugin detail health/status surface;
 - Stats page;
 - Settings page with categorized tabs for effective config, runtime preferences, restart-required YAML settings, schema-based per-plugin settings, cache-scoped DB metadata export, password rotation, and API token management;
-- Transcoding page with capability inventory, built-in presets, custom preset controls, and cache-scoped HLS session status;
-- Base AI dashboard with local hardware hints, optional sidecar worker profiles, and not-configured job controls;
-- AI Classification page foundation for tags/predictions.
+- Transcoding page with capability inventory, preset management, auto-selection rule drafts, command-template validation, cache-only job planning, metrics status, and cache-scoped HLS session status;
+- Base AI dashboard with native-vs-Docker worker status, GPU policy, model cards, vector fallback status, and visible scoped action/job results;
+- AI Classification page for AI tag/category browsing, predictions, safety candidates, face detections, and vector text search.
 
 Browser route state is saved in `localStorage`.
 
@@ -213,6 +219,14 @@ PostGIS, pgvector, and pg_trgm are detected at startup. PostGIS may be installed
 ## AI Sidecar Foundation
 
 The optional AI sidecar contract is HTTP JSON. The packaged FastAPI worker under `services/ai/cartolensia_ai` supports dummy/no-model mode and approved local inference mode. In local inference mode it uses established libraries instead of custom model code: torchvision for EfficientNet-B0/MobileNetV3 image classification, OpenCV YuNet for face detection, Transformers/Safetensors for Falconsai safety classification and BLIP captioning, and OpenCLIP for image/text embeddings. The backend probes `127.0.0.1:19090`, dispatches only explicit bounded AI jobs, reads media through Cartolensia read-only media URLs, and stores tags, predictions, face detections, and JSON embeddings in PostgreSQL. Model/cache paths are expected under repo-local `.cartolensia/models` or another configured non-archive directory.
+
+AI worker status distinguishes the active native sidecar from optional Docker Compose profiles. A native CUDA worker is represented as `ai-local` with its endpoint, selected device, and model state. Docker profile rows such as `ai-nvidia` describe optional containerized workers and report Docker NVIDIA runtime availability separately, so a not-configured Docker profile does not imply that native CUDA is unavailable.
+
+AI actions currently create visible job records and then execute bounded work through the API handler. This keeps the UI and Jobs page auditable while durable leased AI workers remain future hardening.
+
+## Server-Side Path Picker
+
+Settings path fields use `GET /api/v1/files/browse` for an allowlisted file/folder picker. The picker lists only configured roots such as `.cartolensia`, `/tmp`, `/mnt`, `/media`, `/srv`, home, and configured storage roots. It rejects traversal, returns readability/selectability metadata, and performs no writes. Real archive roots are marked read-only with warnings.
 
 ## Future Interfaces
 

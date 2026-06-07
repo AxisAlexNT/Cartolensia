@@ -530,6 +530,20 @@ td {
   top: 24px;
 }
 
+.danger-close {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.danger-close:hover,
+.danger-close:focus-visible {
+  background: #cf222e !important;
+  border-color: #cf222e !important;
+  color: #ffffff !important;
+}
+
 .gallery-nav {
   font-size: 36px;
   height: 56px;
@@ -625,6 +639,23 @@ td {
   z-index: 8;
 }
 
+.map-status-overlay {
+  align-items: center;
+  backdrop-filter: blur(8px);
+  background: rgba(13, 17, 23, 0.76);
+  border: 1px solid rgba(240, 246, 252, 0.2);
+  border-radius: 999px;
+  bottom: 12px;
+  color: #f8fafc;
+  display: inline-flex;
+  gap: 8px;
+  left: 12px;
+  max-width: calc(100% - 24px);
+  padding: 7px 11px;
+  position: absolute;
+  z-index: 7;
+}
+
 .map-layer-control > button {
   backdrop-filter: blur(8px);
   background: rgba(255, 255, 255, 0.92);
@@ -648,6 +679,66 @@ td {
 .layer-menu small {
   color: #57606a;
   line-height: 1.35;
+}
+
+.input-with-button {
+  align-items: stretch;
+  display: flex;
+  gap: 8px;
+}
+
+.input-with-button input {
+  flex: 1 1 auto;
+}
+
+.file-picker-list {
+  border: 1px solid rgba(240, 246, 252, 0.16);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 8px;
+}
+
+.file-picker-entry {
+  align-items: center;
+  background: rgba(240, 246, 252, 0.06);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 22px 1fr auto;
+  min-height: 36px;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.file-picker-entry:hover,
+.file-picker-entry:focus-visible {
+  background: rgba(88, 166, 255, 0.18);
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.file-picker-entry.folder i {
+  color: #f2cc60;
+}
+
+.breadcrumb-line {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.button-chip {
+  border: 1px solid #54aeef;
+  cursor: pointer;
+}
+
+.ai-classification-page table {
+  font-size: 13px;
 }
 
 .map-debug-toggle {

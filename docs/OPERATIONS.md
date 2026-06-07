@@ -316,3 +316,33 @@ fuser -k 18080/tcp || true
 ```bash
 CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh
 ```
+
+## GPU And AI Status Checks
+
+The Base AI page and `/api/v1/ai/status` separate native local inference from optional Docker worker profiles:
+
+- `ai-local` is the native sidecar, normally `http://127.0.0.1:19090`.
+- `ai-nvidia` is the optional Docker Compose NVIDIA profile. It can be not configured even when native CUDA is working.
+- The active device policy is reported as `auto`, `cpu`, `nvidia`, `rocm`, or `intel`, with CPU fallback always available.
+
+Useful probes:
+
+```bash
+curl -fsS http://127.0.0.1:18080/api/v1/ai/status
+curl -fsS http://127.0.0.1:18080/api/v1/ai/workers
+curl -fsS http://127.0.0.1:18080/api/v1/vector/status
+docker info --format '{{json .Runtimes}}' || true
+nvidia-smi || true
+```
+
+When NVIDIA Container Toolkit is installed, a supervised GPU probe can be run with:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
+```
+
+This probe may pull the CUDA base image if it is not local. Do not pull heavy PyTorch/ROCm/Intel images unless explicitly approved.
+
+## Settings File Picker
+
+Settings path fields can use the server-side file/folder picker. The picker is read-only and allowlist based. It can browse configured storage roots, `.cartolensia`, `/tmp`, `/mnt`, `/media`, `/srv`, and home where available, but it never writes files and it does not start discovery. Selecting a real archive path does not change storage mode or safety guards.

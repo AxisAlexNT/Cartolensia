@@ -101,6 +101,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/settings/pending/download", s.handleSettingsPendingDownload)
 	s.mux.HandleFunc("/api/v1/settings/pending", s.handleSettingsPending)
 	s.mux.HandleFunc("/api/v1/settings/restart-required", s.handleSettingsRestartRequired)
+	s.mux.HandleFunc("/api/v1/files/browse", s.handleFileBrowse)
 	s.mux.HandleFunc("/api/v1/admin/db/export", s.handleDBExport)
 	s.mux.HandleFunc("/api/v1/admin/db/exports", s.handleDBExports)
 	s.mux.HandleFunc("/api/v1/admin/db/exports/", s.handleDBExportByID)
@@ -159,6 +160,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/accelerators", s.handleAIAccelerators)
 	s.mux.HandleFunc("/api/v1/ai/workers", s.handleAIWorkers)
 	s.mux.HandleFunc("/api/v1/ai/workers/", s.handleAIWorkerByID)
+	s.mux.HandleFunc("/api/v1/ai/summary", s.handleAISummary)
+	s.mux.HandleFunc("/api/v1/ai/tags", s.handleAITags)
+	s.mux.HandleFunc("/api/v1/ai/faces", s.handleAIFaces)
+	s.mux.HandleFunc("/api/v1/ai/safety", s.handleAISafety)
 	s.mux.HandleFunc("/api/v1/ai/jobs/classify", s.handleAIJobRequest("classify_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/faces", s.handleAIJobRequest("detect_faces"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/safety", s.handleAIJobRequest("safety_nsfw"))
@@ -1890,6 +1895,8 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workers := aiWorkerProfiles(r.Context())
+	hints := transcoding.AcceleratorHints()
+	native := aiNativeRuntimeSummary(workers)
 	stats, _ := s.deps.Store.Stats(r.Context())
 	aiCounts := s.aiDataCounts(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1897,7 +1904,9 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 		"inference_running":  false,
 		"vector_store":       "local_json",
 		"embedding_jobs":     []string{"ai_embed"},
-		"accelerator_hints":  transcoding.AcceleratorHints(),
+		"accelerator_hints":  hints,
+		"native_worker":      native,
+		"device_policy":      aiDevicePolicy(hints, native),
 		"workers":            workers,
 		"model_cache_dir":    ".cartolensia/models",
 		"model_policy":       "model downloads are explicit and never use original storage",
@@ -1921,10 +1930,11 @@ func (s *Server) handleAIWorkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"workers":      aiWorkerProfiles(r.Context()),
-		"configured":   aiWorkersConfigured(aiWorkerProfiles(r.Context())),
-		"protocol":     "http_json",
-		"dummy_worker": "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
+		"workers":       aiWorkerProfiles(r.Context()),
+		"configured":    aiWorkersConfigured(aiWorkerProfiles(r.Context())),
+		"protocol":      "http_json",
+		"device_policy": aiDevicePolicy(transcoding.AcceleratorHints(), aiNativeRuntimeSummary(aiWorkerProfiles(r.Context()))),
+		"dummy_worker":  "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
 	})
 }
 
@@ -1956,11 +1966,64 @@ func (s *Server) handleAIJobRequest(kind string) http.HandlerFunc {
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
+		jobKind := aiCartolensiaJobKind(kind)
+		auditPayload := map[string]any{
+			"kind":          kind,
+			"scope":         req.Scope,
+			"asset_id":      req.AssetID,
+			"asset_ids":     req.AssetIDs,
+			"limit":         req.Limit,
+			"bounded_scope": true,
+			"note":          "synchronous bounded AI action recorded for Jobs visibility",
+		}
+		auditJob, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New(jobKind, auditPayload))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		_ = jobs.Start(&auditJob)
+		auditJob.WorkerID = "api-ai"
+		jobs.AddLog(&auditJob, "info", fmt.Sprintf("AI action %s started", kind))
+		_ = s.deps.Store.UpdateJob(r.Context(), auditJob)
+
 		result, err := s.runAIJob(r.Context(), r, kind, req)
 		if err != nil {
+			auditJob.ProgressTotal = int64Ptr(result.Targets)
+			auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
+			auditJob.Counters.Scanned = int64(result.Targets)
+			auditJob.Counters.Updated = int64(result.Stored)
+			auditJob.Counters.Errors = int64(len(result.Errors) + 1)
+			jobs.AddLog(&auditJob, "error", err.Error())
+			_ = jobs.Fail(&auditJob, err)
+			_ = s.deps.Store.UpdateJob(r.Context(), auditJob)
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		result.JobID = auditJob.ID
+		auditJob.Payload = map[string]any{
+			"kind":   kind,
+			"scope":  req,
+			"result": result,
+		}
+		auditJob.ProgressTotal = int64Ptr(result.Targets)
+		auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
+		auditJob.Counters.Scanned = int64(result.Targets)
+		auditJob.Counters.Updated = int64(result.Stored)
+		auditJob.Counters.Errors = int64(len(result.Errors))
+		if result.Unsafe > 0 {
+			auditJob.Counters.Created = int64(result.Unsafe)
+		}
+		jobs.AddLog(&auditJob, "info", fmt.Sprintf("AI action %s finished: processed %d/%d, stored %d", kind, result.Processed, result.Targets, result.Stored))
+		if result.Status == "failed" || result.Status == "not_configured" {
+			cause := fmt.Errorf("AI action %s ended with status %s", kind, result.Status)
+			if len(result.Errors) > 0 {
+				cause = fmt.Errorf("%s", result.Errors[0])
+			}
+			_ = jobs.Fail(&auditJob, cause)
+		} else {
+			_ = jobs.Complete(&auditJob)
+		}
+		_ = s.deps.Store.UpdateJob(r.Context(), auditJob)
 		writeJSON(w, http.StatusAccepted, result)
 	}
 }
@@ -1974,6 +2037,7 @@ type aiJobRequest struct {
 }
 
 type aiJobResult struct {
+	JobID        string           `json:"job_id,omitempty"`
 	Kind         string           `json:"kind"`
 	Status       string           `json:"status"`
 	WorkerID     string           `json:"worker_id,omitempty"`
@@ -2382,16 +2446,113 @@ func (s *Server) ensurePotentiallyUnsafeAlbum(ctx context.Context) (catalog.Albu
 	})
 }
 
+func (s *Server) handleAISummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"counts":       s.aiDataCounts(r.Context()),
+		"workers":      aiWorkerProfiles(r.Context()),
+		"vector_store": s.vectorStatusPayload(r.Context()),
+		"review_album": s.potentiallyUnsafeAlbumSummary(r.Context()),
+	})
+}
+
+func (s *Server) handleAITags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	tags, err := s.deps.Store.ListAssetTags(r.Context(), "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	type group struct {
+		Tag        string  `json:"tag"`
+		Source     string  `json:"source"`
+		Count      int     `json:"count"`
+		Confidence float64 `json:"avg_confidence,omitempty"`
+	}
+	groups := map[string]*group{}
+	confCounts := map[string]int{}
+	for _, tag := range tags {
+		key := tag.Source + "\x00" + tag.Tag
+		item := groups[key]
+		if item == nil {
+			item = &group{Tag: tag.Tag, Source: tag.Source}
+			groups[key] = item
+		}
+		item.Count++
+		if tag.Confidence != nil {
+			item.Confidence += *tag.Confidence
+			confCounts[key]++
+		}
+	}
+	out := make([]group, 0, len(groups))
+	for key, item := range groups {
+		if confCounts[key] > 0 {
+			item.Confidence = item.Confidence / float64(confCounts[key])
+		}
+		out = append(out, *item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count == out[j].Count {
+			return out[i].Tag < out[j].Tag
+		}
+		return out[i].Count > out[j].Count
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"tags": out, "total": len(tags)})
+}
+
+func (s *Server) handleAIFaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	faces, err := s.deps.Store.ListFaceDetections(r.Context(), "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	limit := intQuery(r.URL.Query(), "limit", 100, 1, 500)
+	if len(faces) > limit {
+		faces = faces[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"faces": faces, "total": s.aiDataCounts(r.Context())["face_detections"]})
+}
+
+func (s *Server) handleAISafety(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	tags, err := s.deps.Store.ListAssetTags(r.Context(), "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]catalog.AssetTag, 0)
+	for _, tag := range tags {
+		if strings.HasPrefix(strings.ToLower(tag.Tag), "safety:") {
+			out = append(out, tag)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	writeJSON(w, http.StatusOK, map[string]any{
+		"candidates":   out,
+		"total":        len(out),
+		"review_album": s.potentiallyUnsafeAlbumSummary(r.Context()),
+	})
+}
+
 func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
 	assetID := strings.TrimSpace(r.URL.Query().Get("asset_id"))
-	if assetID == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("asset_id is required"))
-		return
-	}
 	tags, err := s.deps.Store.ListAssetTags(r.Context(), assetID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -2412,6 +2573,21 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	limit := intQuery(r.URL.Query(), "limit", 100, 1, 500)
+	if assetID == "" {
+		if len(tags) > limit {
+			tags = tags[:limit]
+		}
+		if len(predictions) > limit {
+			predictions = predictions[:limit]
+		}
+		if len(faces) > limit {
+			faces = faces[:limit]
+		}
+		if len(embeddings) > limit {
+			embeddings = embeddings[:limit]
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id":    assetID,
 		"tags":        tags,
@@ -2419,6 +2595,19 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 		"faces":       faces,
 		"embeddings":  summarizeAssetEmbeddings(embeddings),
 	})
+}
+
+func (s *Server) potentiallyUnsafeAlbumSummary(ctx context.Context) map[string]any {
+	albums, err := s.deps.Store.ListAlbums(ctx, catalog.AlbumQuery{Tree: true, Limit: 1000})
+	if err != nil {
+		return map[string]any{"exists": false}
+	}
+	for _, album := range albums {
+		if album.Slug == "potentially-unsafe" || strings.EqualFold(album.Title, "Potentially Unsafe") {
+			return map[string]any{"exists": true, "id": album.ID, "title": album.Title, "item_count": album.ItemCount}
+		}
+	}
+	return map[string]any{"exists": false}
 }
 
 func (s *Server) handleAISafetyByAsset(w http.ResponseWriter, r *http.Request) {
@@ -2452,9 +2641,17 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 	hints := transcoding.AcceleratorHints()
 	localStatus, localHealth := aiWorkerHealth(ctx, "http://127.0.0.1:19090/health")
 	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text"}
+	localDevice := ""
+	localModels := map[string]any{}
 	if caps, ok := localHealth["capabilities"].(map[string]any); ok {
 		if raw, ok := caps["capabilities"].([]any); ok && len(raw) > 0 {
 			localCapabilities = anySliceToStrings(raw)
+		}
+		if text, ok := caps["device"].(string); ok {
+			localDevice = text
+		}
+		if models, ok := caps["models"].(map[string]any); ok {
+			localModels = models
 		}
 	}
 	return []map[string]any{
@@ -2466,6 +2663,9 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"available":         true,
 			"capabilities":      localCapabilities,
 			"endpoint":          "http://127.0.0.1:19090",
+			"device":            localDevice,
+			"cuda_available":    strings.HasPrefix(strings.ToLower(localDevice), "cuda"),
+			"models":            localModels,
 			"native_entrypoint": "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
 			"health":            localHealth,
 			"note":              "local optional worker; inference only runs when a user starts a scoped AI job",
@@ -2479,13 +2679,16 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"endpoint":     "",
 		},
 		{
-			"id":           "ai-nvidia",
-			"profile":      "nvidia",
-			"configured":   false,
-			"status":       "not_configured",
-			"available":    hints["nvidia_smi"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
-			"endpoint":     "",
+			"id":             "ai-nvidia",
+			"profile":        "nvidia",
+			"configured":     false,
+			"status":         "not_configured",
+			"available":      hints["docker_nvidia_runtime"],
+			"native_gpu":     hints["nvidia_smi"],
+			"docker_runtime": hints["docker_nvidia_runtime"],
+			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image"},
+			"endpoint":       "",
+			"note":           "optional Docker NVIDIA profile; native CUDA is represented by ai-local",
 		},
 		{
 			"id":           "ai-rocm",
@@ -2517,6 +2720,72 @@ func aiWorkersConfigured(workers []map[string]any) bool {
 	return false
 }
 
+func aiNativeRuntimeSummary(workers []map[string]any) map[string]any {
+	out := map[string]any{
+		"configured": false,
+		"status":     "not_configured",
+		"device":     "",
+		"cuda":       false,
+	}
+	for _, worker := range workers {
+		if worker["id"] != "ai-local" {
+			continue
+		}
+		device, _ := worker["device"].(string)
+		configured, _ := worker["configured"].(bool)
+		status, _ := worker["status"].(string)
+		out["configured"] = configured
+		out["status"] = status
+		out["device"] = device
+		out["cuda"] = strings.HasPrefix(strings.ToLower(device), "cuda")
+		out["endpoint"] = worker["endpoint"]
+		out["models"] = worker["models"]
+		return out
+	}
+	return out
+}
+
+func aiDevicePolicy(hints map[string]any, native map[string]any) map[string]any {
+	nativeCUDA, _ := native["cuda"].(bool)
+	nvidia, _ := hints["nvidia_smi"].(bool)
+	dockerNVIDIA, _ := hints["docker_nvidia_runtime"].(bool)
+	devDRI, _ := hints["dev_dri"].(bool)
+	device, _ := native["device"].(string)
+	active := "cpu"
+	if nativeCUDA && device != "" {
+		active = device
+	} else if nvidia {
+		active = "nvidia_available_unselected"
+	}
+	return map[string]any{
+		"preference":             "auto",
+		"active_device":          active,
+		"native_cuda_available":  nativeCUDA,
+		"native_nvidia_present":  nvidia,
+		"docker_nvidia_runtime":  dockerNVIDIA,
+		"amd_or_intel_dri":       devDRI,
+		"priority":               []string{"native NVIDIA CUDA", "Docker NVIDIA profile", "AMD/ROCm", "Intel/XPU", "CPU"},
+		"cpu_fallback_available": true,
+	}
+}
+
+func aiCartolensiaJobKind(kind string) string {
+	switch kind {
+	case "classify_image":
+		return "ai_classify"
+	case "detect_faces":
+		return "ai_detect_faces"
+	case "safety_nsfw":
+		return "ai_safety_nsfw"
+	case "embed_image":
+		return "ai_embed"
+	case "describe_image":
+		return "ai_describe"
+	default:
+		return "ai_action"
+	}
+}
+
 func aiWorkerHealth(ctx context.Context, endpoint string) (string, map[string]any) {
 	probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
@@ -2542,8 +2811,12 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	stats, _ := s.deps.Store.Stats(r.Context())
-	embeddings, _ := s.deps.Store.ListAssetEmbeddings(r.Context(), "")
+	writeJSON(w, http.StatusOK, s.vectorStatusPayload(r.Context()))
+}
+
+func (s *Server) vectorStatusPayload(ctx context.Context) map[string]any {
+	stats, _ := s.deps.Store.Stats(ctx)
+	embeddings, _ := s.deps.Store.ListAssetEmbeddings(ctx, "")
 	embeddedAssets := map[string]struct{}{}
 	dimensions := 0
 	for _, embedding := range embeddings {
@@ -2552,7 +2825,7 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 			dimensions = len(embedding.Vector)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"available":       true,
 		"backend":         "local_json_bruteforce",
 		"pgvector":        capabilityInstalled(s.deps.Capabilities, "vector"),
@@ -2566,7 +2839,7 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 			"indexed_assets":           stats.Assets,
 			"embedded_assets":          len(embeddedAssets),
 		},
-	})
+	}
 }
 
 func (s *Server) aiDataCounts(ctx context.Context) map[string]any {
@@ -2678,6 +2951,167 @@ func (s *Server) handleBackendStatus(w http.ResponseWriter, r *http.Request) {
 		"workers": s.deps.Config.Workers,
 		"tools":   map[string]any{"ffprobe": media.DetectFFProbe()},
 	})
+}
+
+func (s *Server) handleFileBrowse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	roots := s.fileBrowseRoots()
+	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
+	if rootID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"roots": roots, "entries": []any{}, "note": "choose an allowlisted root before browsing"})
+		return
+	}
+	root, ok := roots[rootID]
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("browse root %q is not allowlisted", rootID))
+		return
+	}
+	requested := strings.TrimSpace(r.URL.Query().Get("path"))
+	target, rel, err := safeBrowseTarget(root.Path, requested)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir() == entries[j].IsDir() {
+			return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+		}
+		return entries[i].IsDir()
+	})
+	type browseEntry struct {
+		Name       string    `json:"name"`
+		Path       string    `json:"path"`
+		Kind       string    `json:"kind"`
+		SizeBytes  int64     `json:"size_bytes,omitempty"`
+		ModifiedAt time.Time `json:"modified_at,omitempty"`
+		Selectable bool      `json:"selectable"`
+		Readable   bool      `json:"readable"`
+	}
+	out := make([]browseEntry, 0, len(entries))
+	for _, entry := range entries {
+		info, infoErr := entry.Info()
+		kind := "file"
+		if entry.IsDir() {
+			kind = "folder"
+		}
+		childRel := entry.Name()
+		if rel != "" {
+			childRel = filepath.ToSlash(filepath.Join(rel, entry.Name()))
+		}
+		item := browseEntry{Name: entry.Name(), Path: childRel, Kind: kind, Selectable: true, Readable: infoErr == nil}
+		if infoErr == nil {
+			item.SizeBytes = info.Size()
+			item.ModifiedAt = info.ModTime()
+		}
+		out = append(out, item)
+		if len(out) >= 500 {
+			break
+		}
+	}
+	parent := ""
+	if rel != "" {
+		parent = filepath.ToSlash(filepath.Dir(rel))
+		if parent == "." {
+			parent = ""
+		}
+	}
+	warnings := []string{}
+	if strings.HasPrefix(filepath.Clean(root.Path), filepath.Clean("/mnt/Models/rclone")) {
+		warnings = append(warnings, "real archive storage is browse-only and remains strict read-only")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"root":         root,
+		"current_path": rel,
+		"absolute":     target,
+		"parent":       parent,
+		"entries":      out,
+		"warnings":     warnings,
+		"limit":        500,
+	})
+}
+
+type browseRoot struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Path     string `json:"path"`
+	Kind     string `json:"kind"`
+	ReadOnly bool   `json:"read_only"`
+	Warning  string `json:"warning,omitempty"`
+}
+
+func (s *Server) fileBrowseRoots() map[string]browseRoot {
+	roots := map[string]browseRoot{}
+	add := func(idValue, label, pathValue, kind, warning string, readOnly bool) {
+		if strings.TrimSpace(pathValue) == "" {
+			return
+		}
+		abs, err := filepath.Abs(pathValue)
+		if err != nil {
+			return
+		}
+		roots[idValue] = browseRoot{ID: idValue, Label: label, Path: abs, Kind: kind, ReadOnly: readOnly, Warning: warning}
+	}
+	add("cartolensia", "Cartolensia runtime", ".cartolensia", "runtime", "repo-local generated data only", false)
+	add("tmp", "Temporary files", "/tmp", "system", "temporary cache/test location", false)
+	add("mnt", "/mnt", "/mnt", "system", "mounted volumes; choose carefully", true)
+	add("media", "/media", "/media", "system", "removable media roots", true)
+	add("srv", "/srv", "/srv", "system", "service data roots", true)
+	if home, err := os.UserHomeDir(); err == nil {
+		add("home", "Home", home, "home", "manual path selection only", true)
+	}
+	for _, storageConfig := range s.deps.Registry.ListStorages() {
+		warning := "configured storage; browsing is read-only"
+		if strings.HasPrefix(filepath.Clean(storageConfig.Root), filepath.Clean("/mnt/Models/rclone")) {
+			warning = "real archive storage: strict read-only, no writes or scans from the picker"
+		}
+		add("storage:"+storageConfig.Name, "Storage: "+storageConfig.Name, storageConfig.Root, "storage", warning, true)
+	}
+	return roots
+}
+
+func safeBrowseTarget(rootPath, requested string) (target, rel string, err error) {
+	base, err := filepath.Abs(rootPath)
+	if err != nil {
+		return "", "", err
+	}
+	base = filepath.Clean(base)
+	cleaned := filepath.Clean(strings.TrimSpace(requested))
+	if cleaned == "." || cleaned == "/" {
+		cleaned = ""
+	}
+	if filepath.IsAbs(cleaned) {
+		abs := filepath.Clean(cleaned)
+		relToBase, relErr := filepath.Rel(base, abs)
+		if relErr != nil || relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(filepath.Separator)) {
+			return "", "", fmt.Errorf("path escapes browse root")
+		}
+		cleaned = relToBase
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) || strings.Contains(cleaned, string(filepath.Separator)+".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("path traversal is not allowed")
+	}
+	if cleaned == "" {
+		target = base
+	} else {
+		target = filepath.Join(base, cleaned)
+	}
+	target = filepath.Clean(target)
+	relToBase, err := filepath.Rel(base, target)
+	if err != nil || relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("path escapes browse root")
+	}
+	if relToBase == "." {
+		relToBase = ""
+	}
+	return target, filepath.ToSlash(relToBase), nil
 }
 
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
@@ -2921,6 +3355,20 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func intQuery(query url.Values, key string, fallback, min, max int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(query.Get(key)))
+	if err != nil {
+		value = fallback
+	}
+	if value < min {
+		value = min
+	}
+	if value > max {
+		value = max
+	}
+	return value
 }
 
 func methodNotAllowed(w http.ResponseWriter) {
@@ -3766,6 +4214,11 @@ func floatPtrFromAny(value any) *float64 {
 		return nil
 	}
 	out := floatFromAny(value)
+	return &out
+}
+
+func int64Ptr(value int) *int64 {
+	out := int64(value)
 	return &out
 }
 

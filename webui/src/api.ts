@@ -495,6 +495,35 @@ export type DBExport = {
   created_at: string;
 };
 
+export type FileBrowseRoot = {
+  id: string;
+  label: string;
+  path: string;
+  kind: string;
+  read_only: boolean;
+  warning?: string;
+};
+
+export type FileBrowseEntry = {
+  name: string;
+  path: string;
+  kind: "file" | "folder" | string;
+  size_bytes?: number;
+  modified_at?: string;
+  selectable: boolean;
+  readable: boolean;
+};
+
+export type FileBrowseResponse = {
+  roots: Record<string, FileBrowseRoot>;
+  root?: FileBrowseRoot;
+  current_path?: string;
+  absolute?: string;
+  parent?: string;
+  entries: FileBrowseEntry[];
+  warnings?: string[];
+};
+
 let csrfHeader = "X-CSRF-Token";
 let csrfToken = "";
 
@@ -854,7 +883,16 @@ export const api = {
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
   aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
+  aiSummary: () => request<Record<string, unknown>>("/api/v1/ai/summary"),
+  aiTags: () => request<Record<string, unknown>>("/api/v1/ai/tags"),
+  aiPredictions: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/predictions?limit=${limit}`),
+  aiFaces: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/faces?limit=${limit}`),
+  aiSafety: () => request<Record<string, unknown>>("/api/v1/ai/safety"),
   vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status"),
+  vectorSearch: (q: string, limit = 20) =>
+    request<Record<string, unknown>>(
+      `/api/v1/search/vector?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}`
+    ),
   search: (q: string, limit = 100, offset = 0) =>
     request<SearchResponse>(
       `/api/v1/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
@@ -891,5 +929,17 @@ export const api = {
     request<Record<string, unknown>>("/api/v1/admin/db/import-plan", {
       method: "POST",
       body: JSON.stringify({ path, confirmation_phrase: "PLAN ONLY" })
-    })
+    }),
+  browseFiles: (root = "", path = "", kind = "folder") => {
+    const query = new URLSearchParams();
+    if (root) query.set("root", root);
+    if (path) query.set("path", path);
+    if (kind) query.set("kind", kind);
+    return request<FileBrowseResponse>(`/api/v1/files/browse?${query.toString()}`).then((response) => ({
+      ...response,
+      roots: response.roots ?? {},
+      entries: asArray(response.entries),
+      warnings: asArray(response.warnings)
+    }));
+  }
 };

@@ -105,7 +105,26 @@ Completed in the latest implementation run:
 Next priorities:
 
 - Persist runtime storage changes durably.
+- Move visible AI action records into durable leased background AI workers for longer inference jobs.
 - Harden AI review workflows, performance controls, and browser visualizations around the now-functional local AI pipeline.
 - Add OSM-background track thumbnail rendering.
 - Split large WebUI pages into smaller components.
 - Add browser automation for gallery/transcoding/map interaction checks.
+
+## 2026-06-07 Focused Productization Progress
+
+Completed:
+
+- Native CUDA and optional Docker NVIDIA profile status are now separated in API/UI.
+- Docker NVIDIA runtime probing was validated with the approved CUDA base image.
+- AI action buttons now create visible job records and return job IDs.
+- AI Classification page now exposes tags/categories, predictions, safety candidates, face detections, and vector search instead of a stub.
+- Track preview rendering now reports status and draws track vectors above OSM tiles in detail/gallery contexts.
+- Settings gained a read-only allowlisted file/folder picker for path settings.
+- Transcoding page gained configuration tabs for presets, auto-selection rule drafts, command templates, job planning, and metrics foundation.
+
+Still future:
+
+- Durable AI worker leases for long jobs.
+- Full transcode job execution/planning with persistent outputs outside originals.
+- Browser automation coverage for the new file picker, AI pages, track previews, and transcoding settings.

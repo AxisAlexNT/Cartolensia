@@ -2,6 +2,7 @@ package transcoding
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -163,11 +164,54 @@ func lookPath(name string) bool {
 }
 
 func AcceleratorHints() map[string]any {
+	dockerRuntime, dockerErr := dockerNvidiaRuntime()
+	gpuName, gpuMemory := nvidiaGPUInfo()
 	return map[string]any{
-		"goos":       runtime.GOOS,
-		"goarch":     runtime.GOARCH,
-		"cpu":        true,
-		"dev_dri":    exists("/dev/dri"),
-		"nvidia_smi": lookPath("nvidia-smi"),
+		"goos":                  runtime.GOOS,
+		"goarch":                runtime.GOARCH,
+		"cpu":                   true,
+		"dev_dri":               exists("/dev/dri"),
+		"nvidia_smi":            lookPath("nvidia-smi"),
+		"nvidia_name":           gpuName,
+		"nvidia_memory_mb":      gpuMemory,
+		"docker_available":      lookPath("docker"),
+		"docker_nvidia_runtime": dockerRuntime,
+		"docker_error":          dockerErr,
 	}
+}
+
+func nvidiaGPUInfo() (string, int) {
+	if !lookPath("nvidia-smi") {
+		return "", 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return "", 0
+	}
+	line := strings.TrimSpace(strings.Split(string(output), "\n")[0])
+	name, memText, ok := strings.Cut(line, ",")
+	if !ok {
+		return strings.TrimSpace(line), 0
+	}
+	mem := 0
+	_, _ = fmt.Sscanf(strings.TrimSpace(memText), "%d", &mem)
+	return strings.TrimSpace(name), mem
+}
+
+func dockerNvidiaRuntime() (bool, string) {
+	if !lookPath("docker") {
+		return false, "docker command not found"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{json .Runtimes}}").CombinedOutput()
+	if err != nil {
+		return false, strings.TrimSpace(string(output))
+	}
+	if strings.Contains(strings.ToLower(string(output)), "\"nvidia\"") {
+		return true, ""
+	}
+	return false, "nvidia runtime not listed"
 }

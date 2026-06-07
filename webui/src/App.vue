@@ -23,6 +23,7 @@ import {
   type DuplicatePage,
   type ExplorerRow,
   type ExplorerView,
+  type FileBrowseResponse,
   type Job,
   type JobStats,
   type IndexingStatus,
@@ -221,6 +222,8 @@ const mapAssetsVisible = ref(localStorage.getItem("cartolensia.map.assetsVisible
 const trackPreviewTilesEnabled = ref(localStorage.getItem("cartolensia.trackPreview.tilesVisible") !== "false");
 const selectedTrackLayerVisible = ref(true);
 const galleryTrackLayerVisible = ref(true);
+const selectedTrackPreviewStatus = ref("");
+const galleryTrackPreviewStatus = ref("");
 let olMap: OLMap | null = null;
 let galleryTrackMap: OLMap | null = null;
 const galleryTrackSource = new VectorSource();
@@ -240,6 +243,11 @@ let mapAssetLayer: VectorLayer<VectorSource> | null = null;
 let mapTrackLayer: VectorLayer<VectorSource> | null = null;
 const transcodingCapabilities = ref<TranscodingCapabilities | null>(null);
 const transcodePresets = ref<TranscodingPreset[]>([]);
+const transcodePageTab = ref("capabilities");
+const transcodeRuleSourceCodec = ref("");
+const transcodeRuleTargetPreset = ref("h264_low_bitrate");
+const transcodeTemplate = ref("ffmpeg -i ${input} -c:v ${preset} -f hls ${output}");
+const transcodePlannerMessage = ref("Plans write only to the configured Cartolensia transcode cache; originals are never replaced.");
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const aiWorkers = ref<Record<string, unknown> | null>(null);
 type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed";
@@ -248,8 +256,22 @@ const aiMessage = ref("");
 const aiBusyKind = ref<AIJobKind | "">("");
 const aiLastResult = ref<Record<string, unknown> | null>(null);
 const aiActionHistory = ref<Array<{ id: string; kind: AIJobKind; status: string; summary: string; created_at: string }>>([]);
+const aiSummary = ref<Record<string, unknown> | null>(null);
+const aiTagPayload = ref<Record<string, unknown> | null>(null);
+const aiPredictionPayload = ref<Record<string, unknown> | null>(null);
+const aiFacePayload = ref<Record<string, unknown> | null>(null);
+const aiSafetyPayload = ref<Record<string, unknown> | null>(null);
+const aiVectorQuery = ref("brick path");
+const aiVectorResults = ref<Record<string, unknown>[]>([]);
 const vectorConfigHighlight = ref(false);
 const vectorStatus = ref<Record<string, unknown> | null>(null);
+const filePickerOpen = ref(false);
+const filePicker = ref<FileBrowseResponse | null>(null);
+const filePickerRoot = ref("");
+const filePickerPath = ref("");
+const filePickerKind = ref<"file" | "folder">("folder");
+const filePickerTarget = ref("");
+const filePickerMessage = ref("");
 const albums = ref<Album[]>([]);
 const selectedAlbumId = ref("");
 const albumItems = ref<AlbumItemPage | null>(null);
@@ -394,8 +416,41 @@ const aiHealth = computed(() => (configuredAIWorker.value?.health ?? {}) as Reco
 const aiCapabilities = computed(() => ((aiHealth.value.capabilities ?? {}) as Record<string, unknown>));
 const aiModelStates = computed(() => ((aiCapabilities.value.models ?? {}) as Record<string, Record<string, unknown>>));
 const aiCounts = computed(() => ((aiStatus.value?.ai_counts ?? {}) as Record<string, number>));
+const aiDevicePolicy = computed(() => ((aiStatus.value?.device_policy ?? {}) as Record<string, unknown>));
+const aiNativeWorker = computed(() => ((aiStatus.value?.native_worker ?? {}) as Record<string, unknown>));
+const nativeCudaAvailable = computed(() => Boolean(aiDevicePolicy.value.native_cuda_available ?? aiNativeWorker.value.cuda));
+const dockerNvidiaRuntime = computed(() => Boolean(aiDevicePolicy.value.docker_nvidia_runtime ?? ((aiStatus.value?.accelerator_hints as Record<string, unknown> | undefined)?.docker_nvidia_runtime)));
 const vectorLimits = computed(() => ((vectorStatus.value?.limits ?? {}) as Record<string, unknown>));
 const recentAIJobs = computed(() => jobs.value.filter((job) => job.kind.startsWith("ai_")).slice(0, 6));
+const transcodeHardwareStatus = computed(() => {
+  const hardware = transcodingCapabilities.value?.hardware ?? {};
+  return [
+    { label: "CPU", value: true, note: "always available fallback" },
+    { label: "NVIDIA NVENC", value: Boolean(hardware.nvidia_smi), note: "requires driver and nvenc encoder" },
+    { label: "VAAPI", value: Boolean(hardware.vaapi), note: "requires /dev/dri render device" },
+    { label: "Intel QSV", value: Boolean(hardware.qsv), note: "requires /dev/dri render device" }
+  ];
+});
+const transcodeMetricsStatus = computed(() => {
+  const encoderNames = asArray(transcodingCapabilities.value?.encoders).map((encoder) => encoder.name).join(" ");
+  return [
+    { metric: "SSIM", available: Boolean(transcodingCapabilities.value?.ffmpeg.available), note: "ffmpeg built-in filter in most builds" },
+    { metric: "PSNR", available: Boolean(transcodingCapabilities.value?.ffmpeg.available), note: "ffmpeg built-in filter in most builds" },
+    { metric: "VMAF", available: encoderNames.includes("libvmaf"), note: "requires ffmpeg built with libvmaf; not inferred from encoders" }
+  ];
+});
+const transcodeTemplateSafe = computed(() => {
+  const stripped = transcodeTemplate.value
+    .replaceAll("${input}", "")
+    .replaceAll("${output}", "")
+    .replaceAll("${workdir}", "")
+    .replaceAll("${preset}", "")
+    .replaceAll("${width}", "")
+    .replaceAll("${height}", "")
+    .replaceAll("${fps}", "")
+    .replaceAll("${source_codec}", "");
+  return !/[;&|`]/.test(stripped);
+});
 const aiModelCards = computed(() => [
   { key: "classifier", label: "Classifier", action: "classify", model: aiModelStates.value.classifier },
   { key: "face_detector", label: "Face Detector", action: "faces", model: aiModelStates.value.face_detector },
@@ -403,6 +458,11 @@ const aiModelCards = computed(() => [
   { key: "openclip", label: "Embeddings", action: "embed", model: aiModelStates.value.openclip },
   { key: "caption", label: "Captioning", action: "describe", model: aiModelStates.value.caption }
 ]);
+const aiTags = computed(() => asArray((aiTagPayload.value?.tags as unknown[]) ?? []));
+const aiPredictions = computed(() => asArray((aiPredictionPayload.value?.predictions as unknown[]) ?? []));
+const aiFaces = computed(() => asArray((aiFacePayload.value?.faces as unknown[]) ?? []));
+const aiSafetyCandidates = computed(() => asArray((aiSafetyPayload.value?.candidates as unknown[]) ?? []));
+const filePickerRoots = computed(() => Object.values(filePicker.value?.roots ?? {}));
 
 const selectedAlbumItems = computed(() => asArray(albumItems.value?.items));
 const selectedAlbumAssets = computed(() => selectedAlbumItems.value.map((item) => item.asset));
@@ -620,13 +680,20 @@ function createLocalOSMLayer(onError: () => void): TileLayer<XYZ> {
   return layer;
 }
 
+function trackPreviewStyle() {
+  return [
+    new Style({ stroke: new Stroke({ color: "rgba(0,0,0,0.72)", width: 7 }) }),
+    new Style({ stroke: new Stroke({ color: "#ffd33d", width: 4 }) })
+  ];
+}
+
 function fitTrackMap(target: OLMap | null, source: VectorSource, maxZoom = 16) {
   if (!target || source.getFeatures().length === 0) return;
+  target.updateSize();
   const extent = source.getExtent();
   if (extent) {
     target.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom, duration: 120 });
   }
-  target.updateSize();
 }
 
 function fitGalleryTrack() {
@@ -655,12 +722,16 @@ async function refreshGalleryTrackPreview() {
   const current = galleryCurrent.value;
   if (!current || current.media_kind !== "track") {
     galleryTrackSource.clear();
+    galleryTrackPreviewStatus.value = "";
     return;
   }
   await nextTick();
   if (!galleryTrackElement.value) return;
   const preview = await api.trackPreview(current.id).catch(() => null);
-  if (!preview || galleryCurrent.value?.id !== current.id) return;
+  if (!preview || galleryCurrent.value?.id !== current.id) {
+    galleryTrackPreviewStatus.value = "Track preview data could not be loaded.";
+    return;
+  }
   renderGalleryTrackMap(preview);
 }
 
@@ -673,7 +744,7 @@ function renderGalleryTrackMap(preview: Record<string, unknown>) {
     galleryTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
     galleryTrackLayer = new VectorLayer({
       source: galleryTrackSource,
-      style: new Style({ stroke: new Stroke({ color: "#f8fafc", width: 3 }) })
+      style: trackPreviewStyle
     });
     galleryTrackLayer.setVisible(galleryTrackLayerVisible.value);
     galleryTrackMap = new OLMap({
@@ -687,21 +758,26 @@ function renderGalleryTrackMap(preview: Record<string, unknown>) {
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   galleryTrackSource.clear();
   galleryTrackSource.addFeatures(features);
+  galleryTrackPreviewStatus.value = trackPreviewStatus(preview, features.length);
   galleryTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
   galleryTrackLayer?.setVisible(galleryTrackLayerVisible.value);
-  fitGalleryTrack();
+  window.setTimeout(fitGalleryTrack, 60);
 }
 
 async function refreshSelectedTrackMap() {
   const detail = selectedTrack.value;
   if (!detail) {
     selectedTrackSource.clear();
+    selectedTrackPreviewStatus.value = "";
     return;
   }
   await nextTick();
   if (!selectedTrackMapElement.value) return;
   const preview = await api.trackPreview(detail.summary.track_asset_id, 4000).catch(() => null);
-  if (!preview || selectedTrack.value?.summary.track_asset_id !== detail.summary.track_asset_id) return;
+  if (!preview || selectedTrack.value?.summary.track_asset_id !== detail.summary.track_asset_id) {
+    selectedTrackPreviewStatus.value = "Track preview data could not be loaded.";
+    return;
+  }
   renderSelectedTrackMap(preview);
 }
 
@@ -714,7 +790,7 @@ function renderSelectedTrackMap(preview: Record<string, unknown>) {
     selectedTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
     selectedTrackLayer = new VectorLayer({
       source: selectedTrackSource,
-      style: new Style({ stroke: new Stroke({ color: "#e6edf3", width: 3 }) })
+      style: trackPreviewStyle
     });
     selectedTrackLayer.setVisible(selectedTrackLayerVisible.value);
     selectedTrackMap = new OLMap({
@@ -728,9 +804,20 @@ function renderSelectedTrackMap(preview: Record<string, unknown>) {
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   selectedTrackSource.clear();
   selectedTrackSource.addFeatures(features);
+  selectedTrackPreviewStatus.value = trackPreviewStatus(preview, features.length);
   selectedTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
   selectedTrackLayer?.setVisible(selectedTrackLayerVisible.value);
-  fitSelectedTrack();
+  window.setTimeout(fitSelectedTrack, 60);
+}
+
+function trackPreviewStatus(preview: Record<string, unknown>, renderedFeatures: number): string {
+  const summary = (preview.summary ?? {}) as Record<string, unknown>;
+  const points = Number(summary.point_count ?? 0);
+  const format = String(summary.source_format ?? "track");
+  if (renderedFeatures === 0) {
+    return "No geometry returned for this track preview.";
+  }
+  return `${renderedFeatures} layer feature${renderedFeatures === 1 ? "" : "s"} · ${points.toLocaleString()} points · ${format.toUpperCase()}`;
 }
 
 function trackProfilePath(profile: TrackProfile | null): string {
@@ -1158,6 +1245,11 @@ async function refresh() {
 	      ai,
 	      aiWorkerRows,
 	      vector,
+	      aiSummaryPayload,
+	      aiTagsPayload,
+	      aiPredictionsPayload,
+	      aiFacesPayload,
+	      aiSafetyData,
 	      settingsPayload,
 	      exportRows
     ] = await Promise.all([
@@ -1182,6 +1274,11 @@ async function refresh() {
 	      api.aiStatus(),
 	      api.aiWorkers(),
 	      api.vectorStatus(),
+	      api.aiSummary(),
+	      api.aiTags(),
+	      api.aiPredictions(),
+	      api.aiFaces(),
+	      api.aiSafety(),
 	      api.settings(),
       api.dbExports()
 		]);
@@ -1234,6 +1331,11 @@ async function refresh() {
 	    aiStatus.value = ai;
 	    aiWorkers.value = aiWorkerRows;
 	    vectorStatus.value = vector;
+	    aiSummary.value = aiSummaryPayload;
+	    aiTagPayload.value = aiTagsPayload;
+	    aiPredictionPayload.value = aiPredictionsPayload;
+	    aiFacePayload.value = aiFacesPayload;
+	    aiSafetyPayload.value = aiSafetyData;
     settings.value = settingsPayload;
     initializePendingConfig(settingsPayload);
     dbExports.value = asArray(exportRows);
@@ -1527,6 +1629,12 @@ function configureVectorStore() {
   }, 3000);
 }
 
+async function runAIVectorSearch() {
+  if (!aiVectorQuery.value.trim()) return;
+  const response = await api.vectorSearch(aiVectorQuery.value.trim(), 12);
+  aiVectorResults.value = asArray((response as Record<string, unknown>).results as Record<string, unknown>[]);
+}
+
 async function startDryRun() {
   const storage = dryRunStorage.value || storages.value[0]?.name || "";
   const prefixes = adapterRelativePrefixes();
@@ -1700,6 +1808,67 @@ async function validateExistingStorage(name: string) {
   } catch (err) {
     storageMessage.value = err instanceof Error ? err.message : String(err);
   }
+}
+
+async function openFilePicker(target: string, kind: "file" | "folder" = "folder") {
+  filePickerTarget.value = target;
+  filePickerKind.value = kind;
+  filePickerMessage.value = "";
+  filePickerOpen.value = true;
+  filePicker.value = await api.browseFiles().catch((err) => {
+    filePickerMessage.value = err instanceof Error ? err.message : String(err);
+    return null;
+  });
+  const preferredRoot = target.includes("model") || target.includes("cache") || target.includes("export") ? "cartolensia" : "tmp";
+  if (filePicker.value?.roots?.[preferredRoot]) {
+    await chooseFilePickerRoot(preferredRoot);
+  }
+}
+
+async function chooseFilePickerRoot(rootID: string) {
+  filePickerRoot.value = rootID;
+  filePickerPath.value = "";
+  await loadFilePickerPath("");
+}
+
+async function loadFilePickerPath(path = filePickerPath.value) {
+  if (!filePickerRoot.value) return;
+  try {
+    filePicker.value = await api.browseFiles(filePickerRoot.value, path, filePickerKind.value);
+    filePickerPath.value = filePicker.value.current_path ?? "";
+    filePickerMessage.value = "";
+  } catch (err) {
+    filePickerMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function filePickerAbsolute(path = filePickerPath.value): string {
+  const root = filePicker.value?.root?.path ?? "";
+  if (!root) return path;
+  const cleanRoot = root.endsWith("/") ? root.slice(0, -1) : root;
+  return path ? `${cleanRoot}/${path}` : cleanRoot;
+}
+
+async function openFilePickerEntry(entry: { path: string; kind: string }) {
+  if (entry.kind === "folder") {
+    await loadFilePickerPath(entry.path);
+    return;
+  }
+  if (filePickerKind.value === "file") {
+    selectFilePickerPath(entry.path);
+  }
+}
+
+function selectFilePickerPath(path = filePickerPath.value) {
+  const selected = filePickerAbsolute(path);
+  if (filePickerTarget.value === "storageDraft.root") {
+    storageDraft.value.root = selected;
+  } else if (filePickerTarget.value === "pending:storages.0.root") {
+    setPendingStorageField(0, "root", selected);
+  } else if (filePickerTarget.value.startsWith("pending:")) {
+    setPendingValue(filePickerTarget.value.slice("pending:".length), selected);
+  }
+  filePickerOpen.value = false;
 }
 
 type RuntimeSettingSpec = { key: string; label: string; help: string; kind?: "text" | "number" | "boolean" };
@@ -3115,6 +3284,10 @@ onBeforeUnmount(() => {
             <div class="track-detail-grid">
               <div class="map-shell">
                 <div ref="selectedTrackMapElement" class="track-detail-map"></div>
+                <div class="map-status-overlay">
+                  <i class="bi bi-signpost-split" aria-hidden="true"></i>
+                  {{ selectedTrackPreviewStatus || "Loading track geometry..." }}
+                </div>
                 <div class="map-layer-control">
                   <button type="button" class="icon-button" @click="showSelectedTrackLayerMenu = !showSelectedTrackLayerMenu">
                     <i class="bi bi-layers" aria-hidden="true"></i>
@@ -3317,7 +3490,7 @@ onBeforeUnmount(() => {
           <div v-show="mapPopup" ref="mapPopupElement" class="map-popup">
             <div class="job-row">
               <strong>{{ mapPopup?.title }}</strong>
-              <button type="button" class="icon-button" @click="mapPopup = null">
+              <button type="button" class="icon-button danger-close" @click="mapPopup = null">
                 <i class="bi bi-x-lg" aria-hidden="true"></i>
                 Close
               </button>
@@ -3406,22 +3579,112 @@ onBeforeUnmount(() => {
             <h2>Transcoding</h2>
             <span>{{ transcodingCapabilities?.ffmpeg.available ? "ffmpeg detected" : "ffmpeg unavailable" }}</span>
           </header>
+          <div class="settings-tabs secondary-tabs">
+            <button v-for="tab in ['capabilities', 'presets', 'rules', 'templates', 'planner', 'metrics']" :key="tab" type="button" :class="{ active: transcodePageTab === tab }" @click="transcodePageTab = tab">
+              {{ tab }}
+            </button>
+          </div>
           <div class="metrics">
             <article><strong>{{ transcodingCapabilities?.ffmpeg.available ? "yes" : "no" }}</strong><span>ffmpeg</span></article>
             <article><strong>{{ transcodingCapabilities?.ffprobe.available ? "yes" : "no" }}</strong><span>ffprobe</span></article>
             <article><strong>{{ transcodingCapabilities?.encoders.length ?? 0 }}</strong><span>Video encoders</span></article>
             <article><strong>immutable</strong><span>Originals</span></article>
           </div>
-          <table>
-            <thead><tr><th>Encoder</th><th>Codec</th><th>Hardware</th></tr></thead>
-            <tbody>
-              <tr v-for="encoder in transcodingCapabilities?.encoders ?? []" :key="encoder.name">
-                <td>{{ encoder.name }}</td>
-                <td>{{ encoder.codec_family }}</td>
-                <td>{{ encoder.hardware }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div v-if="transcodePageTab === 'capabilities'" class="settings-grid">
+            <article class="settings-form">
+              <h3>Hardware</h3>
+              <div class="detail-grid compact-detail">
+                <article v-for="item in transcodeHardwareStatus" :key="item.label">
+                  <strong>{{ item.value ? "available" : "unavailable" }}</strong>
+                  <span>{{ item.label }}</span>
+                  <small>{{ item.note }}</small>
+                </article>
+              </div>
+            </article>
+            <article class="settings-form settings-wide">
+              <h3>Encoders</h3>
+              <table>
+                <thead><tr><th>Encoder</th><th>Codec</th><th>Hardware</th></tr></thead>
+                <tbody>
+                  <tr v-for="encoder in transcodingCapabilities?.encoders ?? []" :key="encoder.name">
+                    <td>{{ encoder.name }}</td>
+                    <td>{{ encoder.codec_family }}</td>
+                    <td>{{ encoder.hardware || "cpu/software" }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+          </div>
+          <div v-else-if="transcodePageTab === 'presets'" class="settings-grid">
+            <article class="settings-form settings-wide">
+              <h3>Presets</h3>
+              <p class="muted">Built-ins cannot be removed. Custom presets are saved as metadata and used by the video player Apply flow.</p>
+              <table>
+                <thead><tr><th>Name</th><th>Hardware</th><th>Codec</th><th>Encoder</th><th>Mode</th><th>Value</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-for="preset in transcodePresets" :key="preset.id">
+                    <td>{{ preset.name }}</td>
+                    <td>{{ preset.hardware }}</td>
+                    <td>{{ preset.codec }}</td>
+                    <td>{{ preset.ffmpeg_encoder }}</td>
+                    <td>{{ preset.mode }}</td>
+                    <td>{{ preset.parameter_value }}</td>
+                    <td>{{ preset.available ? "available" : preset.disabled_reason }}</td>
+                    <td>
+                      <button v-if="!preset.built_in" type="button" class="btn btn-sm btn-outline-danger" @click="removeTranscodePreset(preset.id)">Remove</button>
+                      <span v-else class="status-badge">built-in</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+          </div>
+          <div v-else-if="transcodePageTab === 'rules'" class="settings-grid">
+            <article class="settings-form">
+              <h3>Auto-Selection Rule Draft</h3>
+              <p class="muted">MVP planning surface. Rule evaluation is conservative and does not start transcodes.</p>
+              <label>Source codec contains <input v-model="transcodeRuleSourceCodec" type="text" placeholder="hevc, h264, vp9" /></label>
+              <label>Target preset
+                <select v-model="transcodeRuleTargetPreset">
+                  <option v-for="preset in transcodePresets" :key="preset.id" :value="preset.id">{{ preset.name }}</option>
+                </select>
+              </label>
+              <p class="alert">Current draft: if codec matches “{{ transcodeRuleSourceCodec || 'any' }}”, use {{ transcodeRuleTargetPreset }}. Output remains cache-only.</p>
+            </article>
+          </div>
+          <div v-else-if="transcodePageTab === 'templates'" class="settings-grid">
+            <article class="settings-form settings-wide">
+              <h3>Command Template Draft</h3>
+              <p class="muted">Allowed variables: ${input}, ${output}, ${workdir}, ${preset}, ${width}, ${height}, ${fps}, ${source_codec}. Use argv-style implementation before enabling arbitrary templates.</p>
+              <textarea v-model="transcodeTemplate" rows="5"></textarea>
+              <p :class="['alert', transcodeTemplateSafe ? 'alert-info' : 'alert-danger']">
+                {{ transcodeTemplateSafe ? "Template draft looks free of obvious shell separators." : "Template contains shell metacharacters and must be converted to safe argv form before use." }}
+              </p>
+            </article>
+          </div>
+          <div v-else-if="transcodePageTab === 'planner'" class="settings-grid">
+            <article class="settings-form">
+              <h3>Job Planner</h3>
+              <p class="muted">{{ transcodePlannerMessage }}</p>
+              <button type="button" class="btn btn-outline-primary" @click="transcodePlannerMessage = `Plan generated for ${selectedAssets.size || 'current video scope'} asset(s); execution is intentionally manual.`">
+                Plan selected/current scope
+              </button>
+              <p class="alert">Original replacement, writes beside originals, and archive writes are disabled.</p>
+            </article>
+          </div>
+          <div v-else-if="transcodePageTab === 'metrics'" class="settings-grid">
+            <article class="settings-form">
+              <h3>Quality Metrics Foundation</h3>
+              <p class="muted">Short sample metrics can be added on top of the existing hardware-test path. Long metrics jobs are intentionally not launched here.</p>
+              <div class="detail-grid compact-detail">
+                <article v-for="metric in transcodeMetricsStatus" :key="metric.metric">
+                  <strong>{{ metric.available ? "available" : "unavailable" }}</strong>
+                  <span>{{ metric.metric }}</span>
+                  <small>{{ metric.note }}</small>
+                </article>
+              </div>
+            </article>
+          </div>
         </section>
 
 	        <section v-else-if="active === 'Base AI'" class="panel">
@@ -3431,7 +3694,9 @@ onBeforeUnmount(() => {
 	          </header>
 	          <div class="metrics">
 	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.cpu ? "yes" : "unknown" }}</strong><span>CPU</span></article>
-	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.nvidia_smi ? "yes" : "no" }}</strong><span>NVIDIA</span></article>
+	            <article><strong>{{ nativeCudaAvailable ? "available" : ((aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.nvidia_smi ? "present" : "no") }}</strong><span>Native CUDA</span></article>
+	            <article><strong>{{ dockerNvidiaRuntime ? "detected" : "not detected" }}</strong><span>Docker NVIDIA</span></article>
+	            <article><strong>{{ aiDevicePolicy.active_device ?? "cpu" }}</strong><span>Active AI device</span></article>
 	            <article><strong>{{ (aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.dev_dri ? "yes" : "no" }}</strong><span>/dev/dri</span></article>
 	            <article><strong>{{ aiCounts.asset_tags ?? 0 }}</strong><span>AI tags</span></article>
 	            <article><strong>{{ aiCounts.predictions ?? 0 }}</strong><span>Predictions</span></article>
@@ -3459,7 +3724,8 @@ onBeforeUnmount(() => {
 	                  </div>
 	                  <span>{{ (worker as Record<string, unknown>).profile }}</span>
 	                  <small>{{ (worker as Record<string, unknown>).endpoint || "profile available when configured" }}</small>
-	                  <small>{{ (worker as Record<string, unknown>).available === false ? "hardware not detected" : "hardware/profile available" }}</small>
+	                  <small v-if="(worker as Record<string, unknown>).device">Device: {{ (worker as Record<string, unknown>).device }}</small>
+	                  <small>{{ (worker as Record<string, unknown>).note || ((worker as Record<string, unknown>).available === false ? "hardware not detected" : "hardware/profile available") }}</small>
 	                </article>
 	              </div>
 	            </article>
@@ -3552,6 +3818,126 @@ onBeforeUnmount(() => {
 	            <pre class="geojson">{{ JSON.stringify({ aiStatus, aiWorkers, vectorStatus }, null, 2) }}</pre>
 	          </details>
 	        </section>
+
+        <section v-else-if="active === 'AI Classification'" class="panel ai-classification-page">
+          <header class="panel-head">
+            <h2>AI Classification</h2>
+            <span>Local predictions, tags, faces, safety review, and vector search. Predictions are suggestions, not truth.</span>
+          </header>
+          <div class="metrics">
+            <article><strong>{{ aiCounts.asset_tags ?? 0 }}</strong><span>AI tags</span></article>
+            <article><strong>{{ aiCounts.predictions ?? 0 }}</strong><span>Predictions</span></article>
+            <article><strong>{{ aiCounts.face_detections ?? 0 }}</strong><span>Face detections</span></article>
+            <article><strong>{{ vectorStatus?.embedded_assets ?? vectorLimits.embedded_assets ?? 0 }}</strong><span>Embedded assets</span></article>
+            <article><strong>{{ aiCounts.safety_candidates ?? 0 }}</strong><span>Safety candidates</span></article>
+          </div>
+          <div class="settings-grid">
+            <article class="settings-form">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-tags" aria-hidden="true"></i> Tags / Categories</h3>
+                  <p class="muted">Click a tag to search the Explorer.</p>
+                </div>
+              </div>
+              <div v-if="aiTags.length === 0" class="empty-state">No AI tags stored yet.</div>
+              <div v-else class="chip-row">
+                <button
+                  v-for="tag in aiTags.slice(0, 40)"
+                  :key="`${String((tag as Record<string, unknown>).source)}-${String((tag as Record<string, unknown>).tag)}`"
+                  type="button"
+                  class="chip button-chip"
+                  @click="explorerQ = `tag:${String((tag as Record<string, unknown>).tag)}`; setActive('Explorer')"
+                >
+                  {{ (tag as Record<string, unknown>).tag }}
+                  <small>{{ (tag as Record<string, unknown>).count }}</small>
+                </button>
+              </div>
+            </article>
+
+            <article class="settings-form">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-shield-check" aria-hidden="true"></i> Safety Review</h3>
+                  <p class="muted">Local NSFW/safety labels remain reviewable metadata only.</p>
+                </div>
+                <button v-if="(aiSafetyPayload?.review_album as Record<string, unknown> | undefined)?.id" type="button" class="btn btn-sm btn-outline-danger" @click="selectedAlbumId = String((aiSafetyPayload?.review_album as Record<string, unknown>).id); setActive('Albums'); selectAlbum(selectedAlbumId)">
+                  Potentially Unsafe Album
+                </button>
+              </div>
+              <div v-if="aiSafetyCandidates.length === 0" class="empty-state">No safety candidates require review.</div>
+              <table v-else>
+                <thead><tr><th>Asset</th><th>Tag</th><th>Source</th><th>Action</th></tr></thead>
+                <tbody>
+                  <tr v-for="candidate in aiSafetyCandidates.slice(0, 20)" :key="`${String((candidate as Record<string, unknown>).asset_id)}-${String((candidate as Record<string, unknown>).tag)}`">
+                    <td><button type="button" class="link-button" @click="openAsset(String((candidate as Record<string, unknown>).asset_id))">{{ String((candidate as Record<string, unknown>).asset_id).slice(0, 8) }}</button></td>
+                    <td>{{ (candidate as Record<string, unknown>).tag }}</td>
+                    <td>{{ (candidate as Record<string, unknown>).source }}</td>
+                    <td><button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(String((candidate as Record<string, unknown>).asset_id))">Review</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="settings-form settings-wide">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-table" aria-hidden="true"></i> Recent Predictions</h3>
+                  <p class="muted">Latest stored model outputs across classification, captions, safety, and faces.</p>
+                </div>
+              </div>
+              <div v-if="aiPredictions.length === 0" class="empty-state">No AI predictions stored yet.</div>
+              <table v-else>
+                <thead><tr><th>Asset</th><th>Task</th><th>Label</th><th>Confidence</th><th>Model</th><th>Created</th></tr></thead>
+                <tbody>
+                  <tr v-for="prediction in aiPredictions.slice(0, 80)" :key="String((prediction as Record<string, unknown>).id)">
+                    <td><button type="button" class="link-button" @click="openAsset(String((prediction as Record<string, unknown>).asset_id))">{{ String((prediction as Record<string, unknown>).asset_id).slice(0, 8) }}</button></td>
+                    <td>{{ (prediction as Record<string, unknown>).task }}</td>
+                    <td>{{ (prediction as Record<string, unknown>).label }}</td>
+                    <td>{{ typeof (prediction as Record<string, unknown>).confidence === 'number' ? Number((prediction as Record<string, unknown>).confidence).toFixed(3) : '' }}</td>
+                    <td>{{ (prediction as Record<string, unknown>).model_name }}</td>
+                    <td>{{ (prediction as Record<string, unknown>).created_at }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="settings-form">
+              <h3><i class="bi bi-person-bounding-box" aria-hidden="true"></i> Face Detections</h3>
+              <p class="muted">Local-only face boxes. No real-world identity is inferred.</p>
+              <div v-if="aiFaces.length === 0" class="empty-state">No face detections stored.</div>
+              <table v-else>
+                <thead><tr><th>Asset</th><th>Confidence</th><th>Box</th></tr></thead>
+                <tbody>
+                  <tr v-for="face in aiFaces.slice(0, 30)" :key="String((face as Record<string, unknown>).id)">
+                    <td><button type="button" class="link-button" @click="openAsset(String((face as Record<string, unknown>).asset_id))">{{ String((face as Record<string, unknown>).asset_id).slice(0, 8) }}</button></td>
+                    <td>{{ typeof (face as Record<string, unknown>).confidence === 'number' ? Number((face as Record<string, unknown>).confidence).toFixed(3) : '' }}</td>
+                    <td>{{ Number((face as Record<string, unknown>).width ?? 0).toFixed(2) }} × {{ Number((face as Record<string, unknown>).height ?? 0).toFixed(2) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="settings-form">
+              <h3><i class="bi bi-search" aria-hidden="true"></i> Vector Text Search</h3>
+              <p class="muted">Uses the local JSON/brute-force fallback over stored OpenCLIP embeddings.</p>
+              <div class="input-group">
+                <input v-model="aiVectorQuery" class="form-control" type="search" placeholder="e.g. mountain road" @keyup.enter="runAIVectorSearch" />
+                <button type="button" class="btn btn-primary" @click="runAIVectorSearch">Search</button>
+              </div>
+              <div v-if="aiVectorResults.length === 0" class="empty-state">No vector search has been run in this session.</div>
+              <table v-else>
+                <thead><tr><th>Asset</th><th>Score</th><th>Match</th></tr></thead>
+                <tbody>
+                  <tr v-for="result in aiVectorResults" :key="String(((result.asset as Record<string, unknown> | undefined)?.id) ?? result.match)">
+                    <td><button type="button" class="link-button" @click="openAsset(String((result.asset as Record<string, unknown>).id))">{{ (result.asset as Record<string, unknown>)?.display_name }}</button></td>
+                    <td>{{ Number(result.score ?? 0).toFixed(3) }}</td>
+                    <td>{{ result.match }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+          </div>
+        </section>
 
         <section v-else-if="active === 'Settings'" class="panel settings-page">
           <header class="panel-head">
@@ -3647,6 +4033,15 @@ onBeforeUnmount(() => {
                     :value="pendingValue(spec.key)"
                     @input="setPendingValue(spec.key, spec.kind === 'number' ? Number(($event.target as HTMLInputElement).value) : ($event.target as HTMLInputElement).value)"
                   />
+                  <button
+                    v-if="spec.kind !== 'number' && (spec.key.includes('path') || spec.key.includes('dir'))"
+                    type="button"
+                    class="btn btn-outline-secondary btn-sm align-self-start"
+                    @click="openFilePicker(`pending:${spec.key}`, spec.key.includes('ffmpeg') || spec.key.includes('ffprobe') ? 'file' : 'folder')"
+                  >
+                    <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                    Browse
+                  </button>
                   <small>{{ spec.help }}</small>
                 </label>
               </div>
@@ -3730,7 +4125,15 @@ onBeforeUnmount(() => {
               <p class="muted">Adds a filesystem adapter to the active process. Only non-destructive modes are enabled.</p>
               <label>Name <input v-model="storageDraft.name" type="text" placeholder="synthetic_fixture" /></label>
               <label>Kind <input v-model="storageDraft.kind" type="text" /></label>
-              <label>Root <input v-model="storageDraft.root" type="text" placeholder="/tmp/cartolensia_synthetic_media" /></label>
+              <label>Root
+                <span class="input-with-button">
+                  <input v-model="storageDraft.root" type="text" placeholder="/tmp/cartolensia_synthetic_media" />
+                  <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker('storageDraft.root', 'folder')">
+                    <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                    Browse
+                  </button>
+                </span>
+              </label>
               <label>Mode
                 <select v-model="storageDraft.mode">
                   <option value="strict_read_only">strict_read_only</option>
@@ -3749,7 +4152,15 @@ onBeforeUnmount(() => {
               <h3>Pending Restart Storage</h3>
               <p class="muted">Use this for YAML-bound storage changes that should survive a restart.</p>
               <label>Name <input :value="pendingStorageField(0, 'name')" type="text" @input="setPendingStorageField(0, 'name', ($event.target as HTMLInputElement).value)" /></label>
-              <label>Root <input :value="pendingStorageField(0, 'root')" type="text" @input="setPendingStorageField(0, 'root', ($event.target as HTMLInputElement).value)" /></label>
+              <label>Root
+                <span class="input-with-button">
+                  <input :value="pendingStorageField(0, 'root')" type="text" @input="setPendingStorageField(0, 'root', ($event.target as HTMLInputElement).value)" />
+                  <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker('pending:storages.0.root', 'folder')">
+                    <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                    Browse
+                  </button>
+                </span>
+              </label>
               <label>Mode
                 <select :value="pendingStorageField(0, 'mode')" @change="setPendingStorageField(0, 'mode', ($event.target as HTMLSelectElement).value)">
                   <option value="strict_read_only">strict_read_only</option>
@@ -3815,9 +4226,31 @@ onBeforeUnmount(() => {
                   <small>Local fallback is production-safe for small personal/lab collections and requires no extension.</small>
                 </label>
                 <label>
+                  <span>Preferred AI device</span>
+                  <select :value="pendingValue('ai.device_preference', 'auto')" @change="setPendingValue('ai.device_preference', ($event.target as HTMLSelectElement).value)">
+                    <option value="auto">auto - prefer largest available GPU</option>
+                    <option value="cpu">CPU fallback</option>
+                    <option value="nvidia" :disabled="!nativeCudaAvailable && !dockerNvidiaRuntime">NVIDIA CUDA</option>
+                    <option value="amd" :disabled="!(aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.dev_dri">AMD/ROCm or VAAPI - unverified</option>
+                    <option value="intel" :disabled="!(aiStatus?.accelerator_hints as Record<string, unknown> | undefined)?.dev_dri">Intel/XPU or QSV - unverified</option>
+                  </select>
+                  <small>Active now: {{ aiDevicePolicy.active_device ?? "cpu" }}. CPU fallback remains available.</small>
+                </label>
+                <label>
                   <span>Worker endpoint</span>
                   <input :value="pendingValue('ai.worker_endpoint')" type="text" @input="setPendingValue('ai.worker_endpoint', ($event.target as HTMLInputElement).value)" />
                   <small>Native sidecar default: http://127.0.0.1:19090.</small>
+                </label>
+                <label>
+                  <span>Model cache directory</span>
+                  <span class="input-with-button">
+                    <input :value="pendingValue('ai.model_cache_dir', '.cartolensia/models')" type="text" @input="setPendingValue('ai.model_cache_dir', ($event.target as HTMLInputElement).value)" />
+                    <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker('pending:ai.model_cache_dir', 'folder')">
+                      <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                      Browse
+                    </button>
+                  </span>
+                  <small>Must stay outside original storage. Default is repo-local.</small>
                 </label>
               </div>
               <div class="settings-actions">
@@ -3960,7 +4393,10 @@ onBeforeUnmount(() => {
       </section>
     </div>
     <div v-if="galleryOpen && galleryCurrent" class="gallery-overlay" role="dialog" aria-modal="true">
-      <button type="button" class="gallery-close" aria-label="Close viewer" @click="closeGallery">Close</button>
+      <button type="button" class="gallery-close danger-close" aria-label="Close viewer" @click="closeGallery">
+        <i class="bi bi-x-lg" aria-hidden="true"></i>
+        Close
+      </button>
       <button type="button" class="gallery-nav gallery-prev" aria-label="Previous asset" @click="nextGallery(-1)">‹</button>
       <figure class="gallery-stage">
         <img
@@ -3991,6 +4427,10 @@ onBeforeUnmount(() => {
             role="img"
             aria-label="Interactive track preview"
           ></div>
+          <div class="map-status-overlay">
+            <i class="bi bi-signpost-split" aria-hidden="true"></i>
+            {{ galleryTrackPreviewStatus || "Loading track geometry..." }}
+          </div>
           <div class="map-layer-control">
             <button type="button" class="icon-button" @click="showGalleryTrackLayerMenu = !showGalleryTrackLayerMenu">
               <i class="bi bi-layers" aria-hidden="true"></i>
@@ -4065,6 +4505,81 @@ onBeforeUnmount(() => {
     </div>
 
     <div
+      v-if="filePickerOpen"
+      class="modal fade show d-block file-picker-modal"
+      tabindex="-1"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Browse server paths"
+    >
+      <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content bg-dark text-light">
+          <div class="modal-header">
+            <h2 class="modal-title h5">
+              <i class="bi bi-folder2-open" aria-hidden="true"></i>
+              Browse Server Paths
+            </h2>
+            <button type="button" class="btn-close btn-close-white" aria-label="Close" @click="filePickerOpen = false"></button>
+          </div>
+          <div class="modal-body">
+            <p class="muted">Read-only path picker. It lists only allowlisted roots and never writes to storage.</p>
+            <div v-if="filePickerMessage" class="alert">{{ filePickerMessage }}</div>
+            <div class="settings-grid">
+              <label class="form-label">
+                Root
+                <select class="form-select" :value="filePickerRoot" @change="chooseFilePickerRoot(($event.target as HTMLSelectElement).value)">
+                  <option value="">Choose root...</option>
+                  <option v-for="root in filePickerRoots" :key="root.id" :value="root.id">
+                    {{ root.label }} · {{ root.path }}
+                  </option>
+                </select>
+              </label>
+              <label class="form-label">
+                Current path
+                <span class="input-with-button">
+                  <input v-model="filePickerPath" class="form-control" type="text" @keyup.enter="loadFilePickerPath()" />
+                  <button type="button" class="btn btn-outline-light btn-sm" @click="loadFilePickerPath()">Open</button>
+                </span>
+              </label>
+            </div>
+            <div class="breadcrumb-line">
+              <button v-if="filePicker?.parent !== undefined" type="button" class="btn btn-sm btn-outline-light" @click="loadFilePickerPath(filePicker?.parent || '')">
+                <i class="bi bi-arrow-up" aria-hidden="true"></i>
+                Parent
+              </button>
+              <span>{{ filePickerAbsolute() }}</span>
+            </div>
+            <div v-for="warning in filePicker?.warnings ?? []" :key="warning" class="alert alert-warning">{{ warning }}</div>
+            <div class="file-picker-list">
+              <button
+                v-for="entry in filePicker?.entries ?? []"
+                :key="entry.path"
+                type="button"
+                :class="['file-picker-entry', { folder: entry.kind === 'folder' }]"
+                @dblclick="openFilePickerEntry(entry)"
+                @click="entry.kind === 'folder' ? loadFilePickerPath(entry.path) : filePickerKind === 'file' && selectFilePickerPath(entry.path)"
+              >
+                <i :class="['bi', entry.kind === 'folder' ? 'bi-folder2' : 'bi-file-earmark']" aria-hidden="true"></i>
+                <span>{{ entry.name }}</span>
+                <small>{{ entry.kind === 'folder' ? 'folder' : formatBytes(entry.size_bytes ?? 0) }}</small>
+              </button>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-light danger-close" @click="filePickerOpen = false">
+              <i class="bi bi-x-lg" aria-hidden="true"></i>
+              Close
+            </button>
+            <button type="button" class="btn btn-primary" @click="selectFilePickerPath()">
+              Select current {{ filePickerKind }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="filePickerOpen" class="modal-backdrop fade show"></div>
+
+    <div
       v-if="showAdvancedTranscode"
       class="modal fade show d-block transcode-modal"
       tabindex="-1"
@@ -4135,7 +4650,10 @@ onBeforeUnmount(() => {
             <pre v-if="transcodeValidation" class="logbox">{{ JSON.stringify(transcodeValidation, null, 2) }}</pre>
           </div>
           <div class="modal-footer">
-            <button type="button" class="btn btn-outline-light" @click="closeAdvancedTranscode">Close</button>
+            <button type="button" class="btn btn-outline-light danger-close" @click="closeAdvancedTranscode">
+              <i class="bi bi-x-lg" aria-hidden="true"></i>
+              Close
+            </button>
             <button type="button" class="btn btn-outline-info" :disabled="!advancedTranscodeAssetId" @click="testCustomTranscodePreset(advancedTranscodeAssetId)">
               Test current hardware configuration
             </button>

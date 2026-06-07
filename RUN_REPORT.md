@@ -1896,3 +1896,110 @@ Notes:
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-07 Focused GPU/AI/Transcoding Productization Sprint
+
+### Scope
+
+- Focused bugfix/productization pass only: GPU status clarity, AI action visibility, AI Classification page, track preview rendering, settings file picker, close-button polish, and Transcoding page structure.
+- The live real-peek PostgreSQL database was preserved.
+- No real-data scans were started.
+- No new AI models were downloaded.
+- No commit was made and no push was done.
+
+### Live Audit And Probes
+
+Queried the live service and host capability probes:
+
+- `/api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks, `619580406` indexed bytes.
+- `/api/v1/map/status`: `48` geotagged assets, `4` track geometries, OSM through the Cartolensia tile proxy, screen-distance clustering.
+- `/api/v1/gps/tracks`: `4` parsed GPX/KML summaries.
+- `/api/v1/ai/status`: native sidecar healthy at `127.0.0.1:19090`, active device `cuda:0`, `89` AI tags, `347` prediction rows, `82` face detections, `48` embeddings, `0` safety candidates.
+- `/api/v1/ai/workers`: `ai-local` is the active native CUDA worker; optional Docker profiles are reported separately. `ai-nvidia` is now clearly labeled as the optional Docker NVIDIA profile, not the native CUDA worker.
+- `/api/v1/vector/status`: `local_json_bruteforce`, `48` embedded assets, `512` dimensions, pgvector optional/not enabled.
+- `/api/v1/settings/schema`: runtime and restart-required tabs are available, including Indexing, Preview, Map, GPS/KML, Transcoding, AI/Vector, Plugins, and Raw config.
+- `/api/v1/files/browse`: returns allowlisted roots only until a root is explicitly selected; the real archive storage root is marked read-only with a warning.
+- `/api/v1/media/377c2280-f0b3-407c-9ee2-580503c2b5b1/track-preview?max_points=20`: returned a non-empty GPX LineString preview with `17522` source points.
+- `/api/v1/transcoding/capabilities`: ffmpeg/ffprobe available; native NVIDIA, `/dev/dri`, VAAPI, and QSV capabilities are reported from probes.
+- `/api/v1/transcoding/presets`: built-ins plus custom `NV 750k` preset are visible.
+
+Host probes:
+
+- `docker info --format '{{json .Runtimes}}'`: Docker reports the `nvidia` runtime.
+- `docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi`: approved probe succeeded and exposed the RTX 3090 Ti inside Docker.
+- `nvidia-smi`: native host probe succeeded outside the sandbox and reported NVIDIA GeForce RTX 3090 Ti.
+- `ls -l /dev/dri`: render nodes are present outside the sandbox.
+- `ffmpeg -hide_banner -hwaccels`: CUDA, VAAPI, QSV, DRM, OpenCL, and Vulkan are listed.
+- `ffmpeg -hide_banner -encoders | grep -Ei 'nvenc|vaapi|qsv|amf|264|265|hevc|av1'`: NVIDIA H.264/HEVC/AV1 encoders plus VAAPI/QSV encoders are listed.
+
+### Fixes Implemented
+
+- AI/GPU status model:
+  - `/api/v1/ai/status` now distinguishes the native local worker, Docker profile workers, device policy, Docker NVIDIA runtime availability, native NVIDIA availability, and CPU fallback.
+  - Base AI shows `Native CUDA: available`, `Docker NVIDIA profile: available/not configured`, and active device `cuda:0` rather than implying NVIDIA is unavailable.
+  - Settings -> AI/Vector includes a device preference selector and model-cache path picker entry point.
+- AI action visibility:
+  - AI action endpoints now create visible job records even though the bounded action executes synchronously through the API handler.
+  - Action results include a `job_id` so the Base AI page can link progress/results to Jobs.
+  - Job records include kind, status, target/processed/skipped counts, stored-output counters, and errors/logs.
+- AI Classification page:
+  - Replaced the stub with a real dashboard page.
+  - Added summary cards, tag/category browser, latest predictions table, safety panel, face detection table, vector search panel, and links into Explorer/assets/albums.
+  - Added backend list endpoints: `/api/v1/ai/summary`, `/api/v1/ai/tags`, `/api/v1/ai/faces`, `/api/v1/ai/safety`, and bounded all-asset reads for `/api/v1/ai/predictions`.
+- Track previews:
+  - Hardened track preview rendering in the GPS/KML manager and gallery overlay.
+  - Track vector layers now draw above OSM tiles with a visible outline/bright line style.
+  - Maps fit after the vector source and OpenLayers target are ready.
+  - Status overlays report loaded features/point counts or a load error.
+- Safe file/folder picker:
+  - Added `GET /api/v1/files/browse` with allowlisted roots only, traversal rejection, and read-only listing.
+  - Added a reusable Bootstrap-like picker modal for storage roots, cache dirs, model cache dir, export dir, and ffmpeg/ffprobe-style path settings.
+  - The picker does not write files and does not scan/index selected paths.
+- Close-button polish:
+  - Gallery, map popup, advanced transcode modal, and file picker close buttons now include Bootstrap Icons and use a red/danger hover state.
+- Transcoding page:
+  - Added structured tabs for Capabilities, Presets, Auto-selection Rules, Command Templates, Job Planner, and Metrics.
+  - Added visible preset table, custom rule/template drafts, safe command-template validation feedback, cache-only planner copy, and metrics availability/status cards.
+  - Kept long transcode execution out of this sprint.
+- GPU integration settings/status:
+  - Transcoding capabilities now include Docker/NVIDIA hints in addition to ffmpeg encoder discovery.
+  - UI labels clarify that AMD/Intel paths are only usable when device access and encoders are actually available.
+
+### Verification
+
+Passed:
+
+- `gofmt -w internal/server/server.go internal/transcoding/transcoding.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Notes:
+
+- Vite still warns that the main JavaScript chunk is larger than 500 kB; the build passes.
+- No browser automation was run in this sprint; manual inspection should verify the new file picker modal, track preview line visibility, AI Classification page layout, and Transcoding page tabs.
+
+### Live Validation After Restart
+
+- Live app was restarted with `go run ./cmd/cartolensia -config .cartolensia/runtime/realpeek.yaml`.
+- `http://127.0.0.1:18080/api/v1/health` returned `ok`.
+- `/api/v1/ai/status`, `/api/v1/ai/summary`, `/api/v1/ai/tags`, `/api/v1/ai/predictions?limit=3`, `/api/v1/files/browse`, `/api/v1/gps/tracks`, `/api/v1/media/{track_asset_id}/track-preview`, `/api/v1/transcoding/capabilities`, and `/api/v1/transcoding/presets` all returned live data after restart.
+
+### Remaining Issues
+
+- AI actions are visible as durable job records, but execution still happens inside bounded API handlers. Moving AI execution into long-running leased workers remains future hardening.
+- Transcoding page now has management surfaces and validation scaffolding; full durable transcode job planning/execution and VMAF/SSIM/PSNR sample runs remain future work.
+- Manual browser inspection is still needed for the new UI surfaces.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, AI models, previews, tiles, exports, transcodes, temp files, database files, or caches were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
