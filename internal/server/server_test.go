@@ -324,7 +324,7 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	ocrConfidence := 0.82
-	if _, err := store.CreateAIPrediction(ctx, catalog.AIPrediction{
+	ocrPrediction, err := store.CreateAIPrediction(ctx, catalog.AIPrediction{
 		AssetID:    photo.Asset.ID,
 		Task:       "ocr_image",
 		Label:      "Laboratory sample label",
@@ -338,7 +338,8 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 			"width":    140,
 			"height":   24,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
@@ -356,6 +357,31 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cache_only"`) || !strings.Contains(rec.Body.String(), `"Yerevan"`) || !strings.Contains(rec.Body.String(), `"Vanadzor"`) {
 		t.Fatalf("place cache status %d body %s", rec.Code, rec.Body.String())
 	}
+	placePayload := `{"name":"Fixture Lab","display_name":"Fixture Lab, Armenia","aliases":["fixture road"],"provider":"local","country":"Armenia","city":"Yerevan","road":"Fixture Road","lat":40.18,"lon":44.51,"bbox":{"min_lon":44.50,"min_lat":40.17,"max_lon":44.52,"max_lat":40.19},"source":"test"}`
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/places", strings.NewReader(placePayload)))
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"Fixture Lab"`) {
+		t.Fatalf("create place status %d body %s", rec.Code, rec.Body.String())
+	}
+	var createdPlace catalog.PlaceCacheEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &createdPlace); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/places?q=fixture", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Fixture Lab"`) || !strings.Contains(rec.Body.String(), `"Fixture Road"`) {
+		t.Fatalf("list places status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/places/"+createdPlace.ID, strings.NewReader(`{"display_name":"Fixture Lab Cache"}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Fixture Lab Cache"`) {
+		t.Fatalf("patch place status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/places/"+createdPlace.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"deleted"`) {
+		t.Fatalf("delete place status %d body %s", rec.Code, rec.Body.String())
+	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID, nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"places"`) || !strings.Contains(rec.Body.String(), `"Yerevan, Armenia"`) {
@@ -365,6 +391,34 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ocr", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Laboratory sample label"`) || !strings.Contains(rec.Body.String(), `"blocks"`) {
 		t.Fatalf("asset OCR status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/assets/"+photo.Asset.ID+"/ocr/"+ocrPrediction.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"deleted"`) {
+		t.Fatalf("delete OCR status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ocr", nil))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"Laboratory sample label"`) {
+		t.Fatalf("asset OCR after delete status %d body %s", rec.Code, rec.Body.String())
+	}
+	ocrPrediction, err = store.CreateAIPrediction(ctx, catalog.AIPrediction{
+		AssetID:    photo.Asset.ID,
+		Task:       "ocr_image",
+		Label:      "Laboratory sample label",
+		Confidence: &ocrConfidence,
+		ModelName:  "tesseract-test",
+		Metadata: map[string]any{
+			"language": "eng",
+			"engine":   "tesseract",
+			"x":        10,
+			"y":        12,
+			"width":    140,
+			"height":   24,
+		},
+	})
+	if err != nil || ocrPrediction.ID == "" {
+		t.Fatalf("recreate OCR prediction: %v", err)
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/ocr/runs", nil))

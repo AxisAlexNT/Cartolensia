@@ -252,6 +252,33 @@ type BBox struct {
 	MaxLat float64 `json:"max_lat"`
 }
 
+type PlaceCacheEntry struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	NormalizedName string         `json:"normalized_name"`
+	Aliases        []string       `json:"aliases,omitempty"`
+	Provider       string         `json:"provider"`
+	DisplayName    string         `json:"display_name"`
+	Country        string         `json:"country,omitempty"`
+	Region         string         `json:"region,omitempty"`
+	City           string         `json:"city,omitempty"`
+	Road           string         `json:"road,omitempty"`
+	Lat            float64        `json:"lat"`
+	Lon            float64        `json:"lon"`
+	BBox           BBox           `json:"bbox"`
+	Source         string         `json:"source"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	LastUsedAt     *time.Time     `json:"last_used_at,omitempty"`
+}
+
+type PlaceQuery struct {
+	Q      string
+	Limit  int
+	Offset int
+}
+
 type GPSTrackQuery struct {
 	Q        string
 	BBox     *BBox
@@ -481,6 +508,10 @@ type Store interface {
 	ListAssetTags(context.Context, string) ([]AssetTag, error)
 	CreateAIPrediction(context.Context, AIPrediction) (AIPrediction, error)
 	ListAIPredictions(context.Context, string) ([]AIPrediction, error)
+	DeleteAIPrediction(context.Context, string, string) error
+	UpsertPlace(context.Context, PlaceCacheEntry) (PlaceCacheEntry, error)
+	ListPlaces(context.Context, PlaceQuery) ([]PlaceCacheEntry, error)
+	DeletePlace(context.Context, string) error
 	CreateFaceDetection(context.Context, FaceDetection) (FaceDetection, error)
 	ListFaceDetections(context.Context, string) ([]FaceDetection, error)
 	UpsertFaceCluster(context.Context, FaceCluster) (FaceCluster, error)
@@ -520,6 +551,7 @@ type MemoryStore struct {
 	transcodePresets map[string]TranscodingPreset
 	assetTags        map[string]map[string]AssetTag
 	aiPredictions    map[string][]AIPrediction
+	places           map[string]PlaceCacheEntry
 	faceDetections   map[string][]FaceDetection
 	faceClusters     map[string]FaceCluster
 	embeddingModels  map[string]EmbeddingModel
@@ -543,6 +575,7 @@ func NewMemoryStore() *MemoryStore {
 		transcodePresets: make(map[string]TranscodingPreset),
 		assetTags:        make(map[string]map[string]AssetTag),
 		aiPredictions:    make(map[string][]AIPrediction),
+		places:           make(map[string]PlaceCacheEntry),
 		faceDetections:   make(map[string][]FaceDetection),
 		faceClusters:     make(map[string]FaceCluster),
 		embeddingModels:  make(map[string]EmbeddingModel),

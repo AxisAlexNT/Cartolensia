@@ -1320,6 +1320,134 @@ func (db *DB) ListAIPredictions(ctx context.Context, assetID string) ([]catalog.
 	return out, rows.Err()
 }
 
+func (db *DB) DeleteAIPrediction(ctx context.Context, assetID, predictionID string) error {
+	tag, err := db.pool.Exec(ctx, `
+		delete from ai_predictions
+		where id::text=$1 and asset_id::text=$2 and task in ('ocr_image','ocr','ocr_text')`,
+		predictionID, assetID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return catalog.ErrNotFound
+	}
+	return nil
+}
+
+func (db *DB) UpsertPlace(ctx context.Context, place catalog.PlaceCacheEntry) (catalog.PlaceCacheEntry, error) {
+	if place.ID == "" {
+		place.ID = id.NewUUID()
+	}
+	if place.NormalizedName == "" {
+		place.NormalizedName = normalizeDBPlaceName(place.Name)
+	}
+	if place.Provider == "" {
+		place.Provider = "local"
+	}
+	if place.DisplayName == "" {
+		place.DisplayName = place.Name
+	}
+	if place.Source == "" {
+		place.Source = "operator_cache"
+	}
+	aliases, err := json.Marshal(place.Aliases)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(place.Metadata))
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	var aliasesOut []byte
+	var metadataOut []byte
+	err = db.pool.QueryRow(ctx, `
+		insert into place_cache(id, name, normalized_name, aliases_json, provider, display_name, country, region, city, road, lat, lon, min_lon, min_lat, max_lon, max_lat, source, metadata_json)
+		values($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
+		on conflict(provider, normalized_name) do update set
+			name=excluded.name,
+			aliases_json=excluded.aliases_json,
+			display_name=excluded.display_name,
+			country=excluded.country,
+			region=excluded.region,
+			city=excluded.city,
+			road=excluded.road,
+			lat=excluded.lat,
+			lon=excluded.lon,
+			min_lon=excluded.min_lon,
+			min_lat=excluded.min_lat,
+			max_lon=excluded.max_lon,
+			max_lat=excluded.max_lat,
+			source=excluded.source,
+			metadata_json=excluded.metadata_json,
+			updated_at=now()
+		returning id, name, normalized_name, aliases_json, provider, display_name, country, region, city, road, lat, lon, min_lon, min_lat, max_lon, max_lat, source, metadata_json, created_at, updated_at, last_used_at`,
+		place.ID, place.Name, place.NormalizedName, aliases, place.Provider, place.DisplayName, place.Country, place.Region, place.City, place.Road,
+		place.Lat, place.Lon, place.BBox.MinLon, place.BBox.MinLat, place.BBox.MaxLon, place.BBox.MaxLat, place.Source, metadata,
+	).Scan(
+		&place.ID, &place.Name, &place.NormalizedName, &aliasesOut, &place.Provider, &place.DisplayName, &place.Country, &place.Region, &place.City, &place.Road,
+		&place.Lat, &place.Lon, &place.BBox.MinLon, &place.BBox.MinLat, &place.BBox.MaxLon, &place.BBox.MaxLat, &place.Source, &metadataOut, &place.CreatedAt, &place.UpdatedAt, &place.LastUsedAt,
+	)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	_ = json.Unmarshal(aliasesOut, &place.Aliases)
+	if err := json.Unmarshal(metadataOut, &place.Metadata); err != nil || place.Metadata == nil {
+		place.Metadata = map[string]any{}
+	}
+	return place, nil
+}
+
+func (db *DB) ListPlaces(ctx context.Context, query catalog.PlaceQuery) ([]catalog.PlaceCacheEntry, error) {
+	limit, offset := normalizeDBPage(query.Limit, query.Offset)
+	q := normalizeDBPlaceName(query.Q)
+	rows, err := db.pool.Query(ctx, `
+		select id, name, normalized_name, aliases_json, provider, display_name, country, region, city, road, lat, lon, min_lon, min_lat, max_lon, max_lat, source, metadata_json, created_at, updated_at, last_used_at
+		from place_cache
+		where $1='' or normalized_name like '%' || $1 || '%' or lower(display_name) like '%' || $1 || '%' or lower(country) like '%' || $1 || '%' or lower(region) like '%' || $1 || '%' or lower(city) like '%' || $1 || '%' or lower(road) like '%' || $1 || '%' or lower(aliases_json::text) like '%' || $1 || '%'
+		order by name asc, id asc
+		limit $2 offset $3`,
+		q, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.PlaceCacheEntry{}
+	for rows.Next() {
+		var place catalog.PlaceCacheEntry
+		var aliases []byte
+		var metadata []byte
+		if err := rows.Scan(
+			&place.ID, &place.Name, &place.NormalizedName, &aliases, &place.Provider, &place.DisplayName, &place.Country, &place.Region, &place.City, &place.Road,
+			&place.Lat, &place.Lon, &place.BBox.MinLon, &place.BBox.MinLat, &place.BBox.MaxLon, &place.BBox.MaxLat, &place.Source, &metadata, &place.CreatedAt, &place.UpdatedAt, &place.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(aliases, &place.Aliases)
+		if err := json.Unmarshal(metadata, &place.Metadata); err != nil || place.Metadata == nil {
+			place.Metadata = map[string]any{}
+		}
+		out = append(out, place)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) DeletePlace(ctx context.Context, placeID string) error {
+	tag, err := db.pool.Exec(ctx, `delete from place_cache where id::text=$1`, placeID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return catalog.ErrNotFound
+	}
+	return nil
+}
+
+func normalizeDBPlaceName(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
 func (db *DB) CreateFaceDetection(ctx context.Context, face catalog.FaceDetection) (catalog.FaceDetection, error) {
 	if face.ID == "" {
 		face.ID = id.NewUUID()

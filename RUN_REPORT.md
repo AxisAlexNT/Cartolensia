@@ -1505,6 +1505,75 @@ Continue from the current Cartolensia repository and live real-peek service. Imp
 - PostgreSQL was not reset.
 - No commit and no push were done.
 
+## 2026-06-08 OCR Runtime And Durable Place Cache Pass
+
+This pass continued from the live real-peek service after the operator installed OCR packages. I did not install packages, download models, pull Docker images, scan new real-data prefixes, reset PostgreSQL, run missing-file marking, commit, or push.
+
+### Implemented
+
+- Real Tesseract OCR sidecar runtime:
+  - added `/ocr-image` to the FastAPI sidecar in real and dummy modes;
+  - the real backend calls the local `tesseract` CLI, parses TSV output, returns text blocks with bounding boxes/confidence, and reports structured missing-engine/language errors;
+  - required OCR languages are English, Russian, Armenian, Simplified Chinese, and Traditional Chinese;
+  - temporary OCR inputs are bounded and stay under safe temp/cache paths, never original storage.
+- OCR backend/UI hardening:
+  - added metadata-only OCR block deletion through `DELETE /api/v1/assets/{id}/ocr/{block_id}`;
+  - added an OCR delete button to asset detail text records;
+  - tightened sidecar default OCR confidence filtering to reduce false positive blocks.
+- Durable local place cache:
+  - added forward migration `009_place_cache.sql`;
+  - added store methods and PostgreSQL/memory implementations for place cache CRUD;
+  - seeded local cache entries for `Yerevan`, `Armenia`, `Lori Province`, and `Vanadzor`;
+  - `/api/v1/places` now lists/creates operator-managed cache entries;
+  - `/api/v1/places/{id}` patches/deletes entries;
+  - universal search and asset-detail place rows now read from durable place entries with fallback defaults.
+- Settings Search/Places UI:
+  - added an operator place-cache editor with filter, add, edit, delete, and “Search this place” actions;
+  - kept online geocoding disabled/cache-only; no public geocoder calls are made automatically.
+
+### Live Validation
+
+- App restarted on `http://127.0.0.1:18080`.
+- AI sidecar restarted on `http://127.0.0.1:19090`.
+- `/api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks.
+- `/api/v1/places`: returned durable seeded entries for Armenia, Lori Province, Vanadzor, and Yerevan.
+- `/api/v1/search?q=Yerevan`: returned backend `postgres_local`, `48` media matches, and `4` track matches.
+- `/api/v1/search?q=Armenia&limit=5`: returned place-cache matches for current assets.
+- `/api/v1/search?q=Vanadzor&limit=5`: returned the cached Vanadzor place with `0` current media, expected for the bounded Yerevan real-peek set.
+- `/api/v1/ai/status`: native sidecar `ok`; OCR model reports `/usr/bin/tesseract` and installed languages `eng`, `rus`, `hye`, `chi_sim`, `chi_tra`.
+- Synthetic OCR smoke on `/tmp/cartolensia_ocr_live_smoke.png` through `POST http://127.0.0.1:19090/ocr-image`: succeeded with one recognized text block.
+- The earlier low-confidence real-peek OCR smoke blocks created during this run were deleted via the new metadata-only endpoint; `/api/v1/assets/e8ba8b1b-2266-48a6-ba6d-a9171d2693ae/ocr` now returns no blocks.
+
+### Verification
+
+Passed:
+
+- `.cartolensia/ai-venv/bin/python -m compileall services/ai/cartolensia_ai`
+- `gofmt -w internal/catalog/catalog.go internal/catalog/extended_store.go internal/database/extended.go internal/server/server.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+### Known Limitations
+
+- VMAF remains unavailable: current ffmpeg has SSIM/PSNR filters but not `libvmaf`; package-manager VMAF packages were not available in the earlier probe.
+- Online geocoding remains intentionally disabled and unimplemented beyond cache scaffolding.
+- OCR job history still records the earlier smoke job payload, but the persisted noisy OCR block metadata was removed.
+- Long-caption workflows, safety/private hiding, WebDAV, and full multi-storage adapters remain future work.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, OCR temp/cache files, model files, previews, transcodes, exports, database files, or caches were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
 ## 2026-06-07 Long Productization/Workflow Stabilization Run
 
 Start state:

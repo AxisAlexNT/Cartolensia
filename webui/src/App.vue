@@ -36,6 +36,7 @@ import {
   type IndexingStatus,
   type MonthBucket,
   type OCRBlock,
+  type PlaceCacheEntry,
   type PluginManifest,
   type PreviewCacheEntry,
   type PreviewCacheStats,
@@ -174,6 +175,24 @@ const universalSearchWarnings = ref<string[]>([]);
 const universalSearchMessage = ref("");
 const universalSearchBackend = ref("");
 const searchPlaceCache = ref<SearchPlacesResponse | null>(null);
+const editablePlaces = ref<PlaceCacheEntry[]>([]);
+const placeCacheQuery = ref("");
+const placeCacheMessage = ref("");
+const placeDraft = ref<PlaceCacheEntry>({
+  name: "",
+  display_name: "",
+  provider: "local",
+  country: "",
+  region: "",
+  city: "",
+  road: "",
+  aliases: [],
+  lat: 40.1872,
+  lon: 44.5152,
+  bbox: { min_lon: 44.35, min_lat: 40.05, max_lon: 44.68, max_lat: 40.28 },
+  source: "operator_cache"
+});
+const placeDraftAliases = ref("");
 const assetDetail = ref<AssetDetail | null>(null);
 const jobs = ref<Job[]>([]);
 const jobStats = ref<JobStats | null>(null);
@@ -1725,6 +1744,7 @@ async function refresh() {
 	      faceClusterPayload,
 	      settingsPayload,
 	      placeCachePayload,
+	      editablePlacePayload,
 	      exportRows
     ] = await Promise.all([
       api.explorer(explorerQueryString()),
@@ -1757,6 +1777,7 @@ async function refresh() {
 	      api.faceClusters(),
 	      api.settings(),
 	      api.searchPlaces(),
+	      api.places(placeCacheQuery.value),
       api.dbExports()
 		]);
 		rows.value = asArray(explorerRows);
@@ -1817,6 +1838,7 @@ async function refresh() {
     faceClustersPayload.value = faceClusterPayload;
     settings.value = settingsPayload;
     searchPlaceCache.value = placeCachePayload;
+    editablePlaces.value = asArray(editablePlacePayload.places);
     initializePendingConfig(settingsPayload);
     dbExports.value = asArray(exportRows);
     if (principal.value && backendStatus.auth?.mode === "local") {
@@ -2440,6 +2462,91 @@ async function saveRuntimeSettings() {
   const result = await api.patchRuntimeSettings(settings.value.runtime_settings);
   settings.value.runtime_settings = (result.runtime_settings ?? settings.value.runtime_settings) as Record<string, unknown>;
   settingsMessage.value = "Runtime settings saved and applied where supported.";
+}
+
+function normalizedPlacePayload(place: PlaceCacheEntry, aliasesText?: string): PlaceCacheEntry {
+  const aliases = aliasesText !== undefined
+    ? aliasesText.split(",").map((alias) => alias.trim()).filter(Boolean)
+    : asArray(place.aliases).map((alias) => String(alias).trim()).filter(Boolean);
+  return {
+    ...place,
+    aliases,
+    provider: place.provider || "local",
+    display_name: place.display_name || place.name,
+    source: place.source || "operator_cache",
+    lat: Number(place.lat),
+    lon: Number(place.lon),
+    bbox: {
+      min_lon: Number(place.bbox?.min_lon),
+      min_lat: Number(place.bbox?.min_lat),
+      max_lon: Number(place.bbox?.max_lon),
+      max_lat: Number(place.bbox?.max_lat)
+    }
+  };
+}
+
+async function refreshPlaceCache() {
+  try {
+    const [summary, entries] = await Promise.all([
+      api.searchPlaces(),
+      api.places(placeCacheQuery.value)
+    ]);
+    searchPlaceCache.value = summary;
+    editablePlaces.value = asArray(entries.places);
+    placeCacheMessage.value = "Place cache refreshed.";
+  } catch (err) {
+    placeCacheMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function createPlaceFromDraft() {
+  try {
+    const created = await api.createPlace(normalizedPlacePayload(placeDraft.value, placeDraftAliases.value));
+    placeCacheMessage.value = `Created ${created.display_name || created.name}.`;
+    placeDraft.value = {
+      name: "",
+      display_name: "",
+      provider: "local",
+      country: "",
+      region: "",
+      city: "",
+      road: "",
+      aliases: [],
+      lat: created.lat,
+      lon: created.lon,
+      bbox: { ...created.bbox },
+      source: "operator_cache"
+    };
+    placeDraftAliases.value = "";
+    await refreshPlaceCache();
+  } catch (err) {
+    placeCacheMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function savePlace(place: PlaceCacheEntry) {
+  if (!place.id) return;
+  try {
+    const updated = await api.updatePlace(place.id, normalizedPlacePayload(place));
+    placeCacheMessage.value = `Saved ${updated.display_name || updated.name}.`;
+    await refreshPlaceCache();
+  } catch (err) {
+    placeCacheMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function deletePlace(place: PlaceCacheEntry) {
+  if (!place.id) return;
+  if (!window.confirm(`Delete cached place "${place.display_name || place.name}"? This only removes Cartolensia place metadata.`)) {
+    return;
+  }
+  try {
+    await api.deletePlace(place.id);
+    placeCacheMessage.value = `Deleted ${place.display_name || place.name}.`;
+    await refreshPlaceCache();
+  } catch (err) {
+    placeCacheMessage.value = err instanceof Error ? err.message : String(err);
+  }
 }
 
 async function validateStorageDraft() {
@@ -3074,6 +3181,15 @@ async function deleteFaceDetection(face: FaceDetection) {
     assetDetail.value = await api.asset(assetDetail.value.asset.id);
   }
   await refreshFaceClusters();
+}
+
+async function deleteOCRBlock(block: OCRBlock) {
+  await api.deleteOCRBlock(block.asset_id, block.id);
+  if (selectedAssetOCRId.value === block.id) selectedAssetOCRId.value = "";
+  if (assetDetail.value) {
+    assetDetail.value = await api.asset(assetDetail.value.asset.id);
+  }
+  await refresh();
 }
 
 async function mapLoadTrackTimeAssets() {
@@ -4070,6 +4186,10 @@ onBeforeUnmount(() => {
                 <button type="button" class="btn btn-sm btn-outline-secondary" @click.stop="copyText(block.text)">
                   <i class="bi bi-clipboard" aria-hidden="true"></i>
                   Copy
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-danger" @click.stop="deleteOCRBlock(block)">
+                  <i class="bi bi-trash" aria-hidden="true"></i>
+                  Delete
                 </button>
               </article>
             </section>
@@ -5557,6 +5677,92 @@ onBeforeUnmount(() => {
                 <article><strong>{{ searchPlaceCache?.backend ?? 'postgres_local' }}</strong><span>Search backend</span></article>
                 <article><strong>{{ searchPlaceCache?.provider ?? 'local_place_cache' }}</strong><span>Geocoder provider</span></article>
                 <article><strong>{{ searchPlaceCache?.places?.length ?? 0 }}</strong><span>Cached places</span></article>
+              </div>
+              <div class="settings-subsection">
+                <div class="section-title compact-title">
+                  <div>
+                    <h4><i class="bi bi-database-gear" aria-hidden="true"></i> Operator Place Cache</h4>
+                    <p class="muted">Editable local entries power offline place search and asset-detail reverse geocoding. No public geocoder is called here.</p>
+                  </div>
+                  <button type="button" class="btn btn-outline-primary btn-sm" @click="refreshPlaceCache">
+                    <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+                    Refresh
+                  </button>
+                </div>
+                <div class="row g-2 align-items-end">
+                  <label class="col-md-5">
+                    <span>Filter cached places</span>
+                    <input v-model="placeCacheQuery" class="form-control" placeholder="Yerevan, Lori, road name" @keyup.enter="refreshPlaceCache" />
+                  </label>
+                  <div class="col-md-auto">
+                    <button type="button" class="btn btn-outline-secondary" @click="refreshPlaceCache">
+                      <i class="bi bi-search" aria-hidden="true"></i>
+                      Filter
+                    </button>
+                  </div>
+                  <p v-if="placeCacheMessage" class="col-12 muted mb-0">{{ placeCacheMessage }}</p>
+                </div>
+                <div class="place-editor-grid">
+                  <article class="place-editor-card">
+                    <h5>Add Place</h5>
+                    <div class="row g-2">
+                      <label class="col-md-4"><span>Name</span><input v-model="placeDraft.name" class="form-control" placeholder="Place name" /></label>
+                      <label class="col-md-4"><span>Display name</span><input v-model="placeDraft.display_name" class="form-control" placeholder="Display name" /></label>
+                      <label class="col-md-4"><span>Aliases</span><input v-model="placeDraftAliases" class="form-control" placeholder="comma separated" /></label>
+                      <label class="col-md-3"><span>Country</span><input v-model="placeDraft.country" class="form-control" /></label>
+                      <label class="col-md-3"><span>Region</span><input v-model="placeDraft.region" class="form-control" /></label>
+                      <label class="col-md-3"><span>City</span><input v-model="placeDraft.city" class="form-control" /></label>
+                      <label class="col-md-3"><span>Road</span><input v-model="placeDraft.road" class="form-control" /></label>
+                      <label class="col-md-2"><span>Lat</span><input v-model.number="placeDraft.lat" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Lon</span><input v-model.number="placeDraft.lon" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Min lat</span><input v-model.number="placeDraft.bbox.min_lat" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Max lat</span><input v-model.number="placeDraft.bbox.max_lat" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Min lon</span><input v-model.number="placeDraft.bbox.min_lon" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Max lon</span><input v-model.number="placeDraft.bbox.max_lon" type="number" step="0.000001" class="form-control" /></label>
+                    </div>
+                    <button type="button" class="btn btn-primary mt-2" @click="createPlaceFromDraft">
+                      <i class="bi bi-plus-lg" aria-hidden="true"></i>
+                      Add cached place
+                    </button>
+                  </article>
+                  <article v-for="place in editablePlaces" :key="place.id || `${place.provider}-${place.name}`" class="place-editor-card">
+                    <div class="d-flex justify-content-between gap-2 align-items-start">
+                      <div>
+                        <h5>{{ place.display_name || place.name }}</h5>
+                        <p class="muted mb-0">{{ place.provider || 'local' }} · {{ place.source || 'operator_cache' }}</p>
+                      </div>
+                      <div class="btn-group btn-group-sm">
+                        <button type="button" class="btn btn-outline-primary" @click="savePlace(place)">
+                          <i class="bi bi-save" aria-hidden="true"></i>
+                          Save
+                        </button>
+                        <button type="button" class="btn btn-outline-danger" @click="deletePlace(place)">
+                          <i class="bi bi-trash" aria-hidden="true"></i>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    <div class="row g-2 mt-1">
+                      <label class="col-md-4"><span>Name</span><input v-model="place.name" class="form-control" /></label>
+                      <label class="col-md-4"><span>Display name</span><input v-model="place.display_name" class="form-control" /></label>
+                      <label class="col-md-4"><span>Aliases</span><input :value="(place.aliases || []).join(', ')" class="form-control" @input="place.aliases = ($event.target as HTMLInputElement).value.split(',').map((alias) => alias.trim()).filter(Boolean)" /></label>
+                      <label class="col-md-3"><span>Country</span><input v-model="place.country" class="form-control" /></label>
+                      <label class="col-md-3"><span>Region</span><input v-model="place.region" class="form-control" /></label>
+                      <label class="col-md-3"><span>City</span><input v-model="place.city" class="form-control" /></label>
+                      <label class="col-md-3"><span>Road</span><input v-model="place.road" class="form-control" /></label>
+                      <label class="col-md-2"><span>Lat</span><input v-model.number="place.lat" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Lon</span><input v-model.number="place.lon" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Min lat</span><input v-model.number="place.bbox.min_lat" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Max lat</span><input v-model.number="place.bbox.max_lat" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Min lon</span><input v-model.number="place.bbox.min_lon" type="number" step="0.000001" class="form-control" /></label>
+                      <label class="col-md-2"><span>Max lon</span><input v-model.number="place.bbox.max_lon" type="number" step="0.000001" class="form-control" /></label>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary mt-2" @click="universalSearchQ = place.name; setActive('Search'); runUniversalSearch()">
+                      <i class="bi bi-search" aria-hidden="true"></i>
+                      Search this place
+                    </button>
+                  </article>
+                </div>
               </div>
               <div v-if="searchPlaceCache?.places?.length" class="search-place-row">
                 <article v-for="place in searchPlaceCache.places" :key="`${place.provider}-${place.name}`" class="search-place-card compact-place-card">

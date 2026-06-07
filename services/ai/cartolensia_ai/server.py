@@ -91,6 +91,12 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
             )
         return backend.embed_text(request)
 
+    @app.post("/ocr-image", response_model=InferenceResponse, status_code=202)
+    def ocr_image(request: ImageRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return backend.infer("ocr-image", request)
+        return backend.ocr_image(request)
+
     return app
 
 

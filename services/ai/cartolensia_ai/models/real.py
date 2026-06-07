@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 from cartolensia_ai.config import ServiceConfig
-from cartolensia_ai.image_io import load_pillow_image
+from cartolensia_ai.image_io import load_pillow_image, read_image_bytes
 from cartolensia_ai.schemas import ImageRequest, InferenceResponse, Prediction, TextRequest
 
 
@@ -19,7 +23,31 @@ CAPABILITIES = [
     "describe_image",
     "embed_image",
     "embed_text",
+    "ocr_image",
 ]
+
+DEFAULT_OCR_LANGUAGES = ["eng", "rus", "hye", "chi_sim", "chi_tra"]
+OCR_LANGUAGE_ALIASES = {
+    "english": "eng",
+    "en": "eng",
+    "eng": "eng",
+    "russian": "rus",
+    "ru": "rus",
+    "rus": "rus",
+    "armenian": "hye",
+    "hy": "hye",
+    "hye": "hye",
+    "chinese": "chi_sim",
+    "zh": "chi_sim",
+    "zh-cn": "chi_sim",
+    "zh-hans": "chi_sim",
+    "simplified_chinese": "chi_sim",
+    "chi_sim": "chi_sim",
+    "zh-tw": "chi_tra",
+    "zh-hant": "chi_tra",
+    "traditional_chinese": "chi_tra",
+    "chi_tra": "chi_tra",
+}
 
 
 @dataclass
@@ -98,6 +126,7 @@ class RealBackend:
                 "name": self.config.caption_model,
                 "loaded": self._caption is not None,
             },
+            "ocr": _tesseract_status(),
         }
 
     def classify_image(self, request: ImageRequest) -> InferenceResponse:
@@ -292,6 +321,95 @@ class RealBackend:
         except Exception as exc:
             return _error("embed-text", exc)
 
+    def ocr_image(self, request: ImageRequest) -> InferenceResponse:
+        try:
+            tesseract = shutil.which("tesseract")
+            if not tesseract:
+                raise MissingModelError("tesseract executable is not installed")
+            available_languages = _available_tesseract_languages(tesseract)
+            requested_languages = _requested_ocr_languages(request.options)
+            missing_languages = [lang for lang in requested_languages if lang not in available_languages]
+            if missing_languages:
+                packages = [f"tesseract-ocr-{lang.replace('_', '-')}" for lang in missing_languages]
+                raise MissingModelError(
+                    "missing Tesseract language data: "
+                    + ", ".join(missing_languages)
+                    + "; install "
+                    + ", ".join(packages)
+                )
+
+            image_bytes = read_image_bytes(request, self.config)
+            timeout = _int_option(request.options, "timeout_seconds", 45)
+            psm = str(request.options.get("psm", "3") if request.options else "3")
+            min_confidence = _float_option(request.options, "min_confidence", 0.35)
+            with tempfile.NamedTemporaryFile(prefix="cartolensia-ocr-", suffix=".img", delete=True) as handle:
+                handle.write(image_bytes)
+                handle.flush()
+                command = [
+                    tesseract,
+                    handle.name,
+                    "stdout",
+                    "-l",
+                    "+".join(requested_languages),
+                    "--psm",
+                    psm,
+                    "tsv",
+                ]
+                proc = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(5, min(timeout, 180)),
+                )
+            if proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "tesseract returned a non-zero status").strip()
+                return InferenceResponse(
+                    status="error",
+                    endpoint="ocr-image",
+                    reason=reason[-2000:],
+                    metadata={
+                        "asset_id": request.asset_id,
+                        "engine": "tesseract",
+                        "available_languages": sorted(available_languages),
+                        "requested_languages": requested_languages,
+                    },
+                )
+            blocks = _parse_tesseract_tsv(proc.stdout, requested_languages, min_confidence)
+            full_text = "\n".join(block["text"] for block in blocks if block.get("text")).strip()
+            return InferenceResponse(
+                status="ok",
+                endpoint="ocr-image",
+                predictions=[],
+                metadata={
+                    "asset_id": request.asset_id,
+                    "engine": "tesseract",
+                    "model": "tesseract",
+                    "languages": requested_languages,
+                    "available_languages": sorted(available_languages),
+                    "min_confidence": min_confidence,
+                    "blocks": blocks,
+                    "text": full_text,
+                    "block_count": len(blocks),
+                },
+            )
+        except MissingModelError as exc:
+            return InferenceResponse(
+                status="model_missing",
+                endpoint="ocr-image",
+                reason=str(exc),
+                metadata={"engine": "tesseract", **_tesseract_status()},
+            )
+        except subprocess.TimeoutExpired as exc:
+            return InferenceResponse(
+                status="error",
+                endpoint="ocr-image",
+                reason=f"tesseract timed out after {exc.timeout} seconds",
+                metadata={"engine": "tesseract"},
+            )
+        except Exception as exc:
+            return _error("ocr-image", exc)
+
     def _select_device(self) -> str:
         requested = self.config.device
         if requested in {"cpu", "cuda"}:
@@ -458,6 +576,168 @@ def _cuda_available() -> bool:
 def _unsafe_label(label: str) -> bool:
     normalized = label.strip().lower()
     return any(part in normalized for part in ("unsafe", "nsfw", "porn", "sexy", "hentai"))
+
+
+def _tesseract_status() -> dict[str, Any]:
+    path = shutil.which("tesseract")
+    if not path:
+        return {
+            "name": "tesseract",
+            "available": False,
+            "loaded": False,
+            "available_languages": [],
+            "required_languages": DEFAULT_OCR_LANGUAGES,
+            "missing_languages": DEFAULT_OCR_LANGUAGES,
+        }
+    languages = _available_tesseract_languages(path)
+    missing = [lang for lang in DEFAULT_OCR_LANGUAGES if lang not in languages]
+    return {
+        "name": "tesseract",
+        "available": len(missing) == 0,
+        "loaded": True,
+        "path": path,
+        "available_languages": sorted(languages),
+        "required_languages": DEFAULT_OCR_LANGUAGES,
+        "missing_languages": missing,
+    }
+
+
+def _available_tesseract_languages(tesseract_path: str) -> set[str]:
+    try:
+        proc = subprocess.run(
+            [tesseract_path, "--list-langs"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return set()
+    languages: set[str] = set()
+    for line in (proc.stdout + "\n" + proc.stderr).splitlines():
+        value = line.strip()
+        if not value or value.lower().startswith("list of available"):
+            continue
+        if all(ch.isalnum() or ch == "_" for ch in value):
+            languages.add(value)
+    return languages
+
+
+def _requested_ocr_languages(options: dict[str, Any] | None) -> list[str]:
+    raw = None if not options else options.get("languages") or options.get("language")
+    values: list[str]
+    if raw is None or raw == "":
+        values = DEFAULT_OCR_LANGUAGES
+    elif isinstance(raw, str):
+        values = [part.strip() for part in raw.replace("+", ",").split(",")]
+    elif isinstance(raw, list):
+        values = [str(part).strip() for part in raw]
+    else:
+        values = [str(raw).strip()]
+    normalized: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        key = value.lower().replace(" ", "_")
+        normalized.append(OCR_LANGUAGE_ALIASES.get(key, key))
+    if not normalized:
+        normalized = DEFAULT_OCR_LANGUAGES
+    return list(dict.fromkeys(normalized))
+
+
+def _int_option(options: dict[str, Any] | None, key: str, default: int) -> int:
+    if not options or key not in options:
+        return default
+    try:
+        return int(options[key])
+    except Exception:
+        return default
+
+
+def _float_option(options: dict[str, Any] | None, key: str, default: float) -> float:
+    if not options or key not in options:
+        return default
+    try:
+        return float(options[key])
+    except Exception:
+        return default
+
+
+def _parse_tesseract_tsv(raw: str, languages: list[str], min_confidence: float) -> list[dict[str, Any]]:
+    words: list[dict[str, Any]] = []
+    reader = csv.DictReader(raw.splitlines(), delimiter="\t")
+    for row in reader:
+        text = (row.get("text") or "").strip()
+        if not text:
+            continue
+        confidence = _parse_tesseract_confidence(row.get("conf"))
+        if confidence is None:
+            continue
+        if confidence < min_confidence:
+            continue
+        try:
+            left = float(row.get("left") or 0)
+            top = float(row.get("top") or 0)
+            width = float(row.get("width") or 0)
+            height = float(row.get("height") or 0)
+        except ValueError:
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        words.append(
+            {
+                "text": text,
+                "confidence": confidence,
+                "x": left,
+                "y": top,
+                "width": width,
+                "height": height,
+                "block_num": row.get("block_num") or "0",
+                "par_num": row.get("par_num") or "0",
+                "line_num": row.get("line_num") or "0",
+            }
+        )
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for word in words:
+        key = (str(word["block_num"]), str(word["par_num"]), str(word["line_num"]))
+        grouped.setdefault(key, []).append(word)
+    blocks: list[dict[str, Any]] = []
+    for key, items in grouped.items():
+        items.sort(key=lambda item: (float(item["y"]), float(item["x"])))
+        min_x = min(float(item["x"]) for item in items)
+        min_y = min(float(item["y"]) for item in items)
+        max_x = max(float(item["x"]) + float(item["width"]) for item in items)
+        max_y = max(float(item["y"]) + float(item["height"]) for item in items)
+        confidence = sum(float(item["confidence"]) for item in items) / len(items)
+        if confidence < min_confidence:
+            continue
+        blocks.append(
+            {
+                "text": " ".join(str(item["text"]) for item in items),
+                "confidence": confidence,
+                "x": min_x,
+                "y": min_y,
+                "width": max_x - min_x,
+                "height": max_y - min_y,
+                "language": "+".join(languages),
+                "engine": "tesseract",
+                "block": int(key[0]) if key[0].isdigit() else key[0],
+                "paragraph": int(key[1]) if key[1].isdigit() else key[1],
+                "line": int(key[2]) if key[2].isdigit() else key[2],
+            }
+        )
+    blocks.sort(key=lambda item: (float(item["y"]), float(item["x"])))
+    return blocks
+
+
+def _parse_tesseract_confidence(raw: str | None) -> float | None:
+    try:
+        value = float(raw or "")
+    except ValueError:
+        return None
+    if value < 0:
+        return None
+    return max(0.0, min(value / 100.0, 1.0))
 
 
 def _model_missing(endpoint: str, error: Exception) -> InferenceResponse:

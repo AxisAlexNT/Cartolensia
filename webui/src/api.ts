@@ -575,6 +575,34 @@ export type SearchPlace = {
   matched_assets: number;
 };
 
+export type PlaceCacheEntry = {
+  id?: string;
+  name: string;
+  normalized_name?: string;
+  aliases?: string[];
+  provider?: string;
+  display_name?: string;
+  country?: string;
+  region?: string;
+  city?: string;
+  road?: string;
+  lat: number;
+  lon: number;
+  bbox: { min_lon: number; min_lat: number; max_lon: number; max_lat: number };
+  source?: string;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+  last_used_at?: string;
+};
+
+export type PlacesResponse = {
+  places: PlaceCacheEntry[];
+  mode: string;
+  online_enabled: boolean;
+  note?: string;
+};
+
 export type SearchResponse = {
   query: string;
   tokens: string[];
@@ -1012,6 +1040,10 @@ export const api = {
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
   aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
+  deleteOCRBlock: (assetId: string, blockId: string) =>
+    request<{ status: string }>(`/api/v1/assets/${encodeURIComponent(assetId)}/ocr/${encodeURIComponent(blockId)}`, {
+      method: "DELETE"
+    }),
   aiSummary: () => request<Record<string, unknown>>("/api/v1/ai/summary"),
   aiTags: () => request<Record<string, unknown>>("/api/v1/ai/tags"),
   aiPredictions: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/predictions?limit=${limit}`),
@@ -1091,6 +1123,22 @@ export const api = {
       page: response.page ?? { limit, offset, total: 0 }
     })),
   searchPlaces: () => request<SearchPlacesResponse>("/api/v1/search/places"),
+  places: (q = "") =>
+    request<PlacesResponse>(`/api/v1/places${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
+  createPlace: (place: PlaceCacheEntry) =>
+    request<PlaceCacheEntry>("/api/v1/places", {
+      method: "POST",
+      body: JSON.stringify(place)
+    }),
+  updatePlace: (id: string, place: Partial<PlaceCacheEntry>) =>
+    request<PlaceCacheEntry>(`/api/v1/places/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(place)
+    }),
+  deletePlace: (id: string) =>
+    request<Record<string, unknown>>(`/api/v1/places/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    }),
   settings: () => request<SettingsPayload>("/api/v1/settings"),
   pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
   patchPendingSettings: (settings: Record<string, unknown>) =>

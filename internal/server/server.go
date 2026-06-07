@@ -135,6 +135,7 @@ func New(deps Dependencies) *Server {
 		geoAlignSessions:   map[string]*geoAlignSession{},
 		videoTrackSessions: map[string]*videoTrackPlayerSession{},
 	}
+	s.seedDefaultPlaces()
 	s.routes()
 	return s
 }
@@ -191,6 +192,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
 	s.mux.HandleFunc("/api/v1/search", s.handleSearch)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
+	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
+	s.mux.HandleFunc("/api/v1/places/", s.handlePlaceByID)
 	s.mux.HandleFunc("/api/v1/duplicates", s.handleDuplicates)
 	s.mux.HandleFunc("/api/v1/albums", s.handleAlbums)
 	s.mux.HandleFunc("/api/v1/albums/", s.handleAlbumByID)
@@ -1216,7 +1219,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	trackMatches := []trackResult{}
 	if tracks, err := s.deps.Store.ListGPSTracks(r.Context(), catalog.GPSTrackQuery{Limit: 1000}); err == nil {
 		for _, track := range tracks {
-			matched := trackSearchMatches(track, tokens)
+			matched := trackSearchMatches(track, tokens, searchCtx.placeEntries)
 			if len(tokens) > 0 && len(matched) == 0 {
 				continue
 			}
@@ -1251,8 +1254,9 @@ func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	places := make([]searchPlaceMatch, 0, len(localPlaceEntries()))
-	for _, place := range localPlaceEntries() {
+	entries := s.placeEntries(r.Context())
+	places := make([]searchPlaceMatch, 0, len(entries))
+	for _, place := range entries {
 		matchedAssets := 0
 		geos, err := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{BBox: &place.BBox, Limit: 10000})
 		if err == nil {
@@ -1263,11 +1267,11 @@ func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 			matchedAssets = len(seen)
 		}
 		places = append(places, searchPlaceMatch{
-			Query:         strings.ToLower(place.Name),
+			Query:         place.NormalizedName,
 			Name:          place.Name,
 			DisplayName:   place.DisplayName,
-			Provider:      "local",
-			Source:        "built_in_place_cache",
+			Provider:      place.Provider,
+			Source:        place.Source,
 			Lat:           place.Lat,
 			Lon:           place.Lon,
 			BBox:          place.BBox,
@@ -1284,6 +1288,185 @@ func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handlePlaces(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		places, err := s.deps.Store.ListPlaces(r.Context(), catalog.PlaceQuery{
+			Q:      r.URL.Query().Get("q"),
+			Limit:  limit,
+			Offset: offset,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"places":         places,
+			"mode":           "cache_only",
+			"online_enabled": false,
+			"note":           "Place cache is operator-managed. Cartolensia does not call online geocoders automatically.",
+		})
+	case http.MethodPost:
+		place, err := decodePlacePayload(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		created, err := s.deps.Store.UpsertPlace(r.Context(), place)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, created)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handlePlaceByID(w http.ResponseWriter, r *http.Request) {
+	placeID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/places/"), "/")
+	if placeID == "" || strings.Contains(placeID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch:
+		places, err := s.deps.Store.ListPlaces(r.Context(), catalog.PlaceQuery{Limit: 10000})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		var existing catalog.PlaceCacheEntry
+		for _, place := range places {
+			if place.ID == placeID {
+				existing = place
+				break
+			}
+		}
+		if existing.ID == "" {
+			writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+			return
+		}
+		var patch catalog.PlaceCacheEntry
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&patch); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		merged := mergePlacePatch(existing, patch)
+		merged.ID = placeID
+		updated, err := s.deps.Store.UpsertPlace(r.Context(), merged)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
+	case http.MethodDelete:
+		if err := s.deps.Store.DeletePlace(r.Context(), placeID); err != nil {
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": placeID})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func decodePlacePayload(r *http.Request) (catalog.PlaceCacheEntry, error) {
+	var payload catalog.PlaceCacheEntry
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+		return payload, err
+	}
+	return normalizePlacePayload(payload)
+}
+
+func normalizePlacePayload(place catalog.PlaceCacheEntry) (catalog.PlaceCacheEntry, error) {
+	place.Name = strings.TrimSpace(place.Name)
+	place.NormalizedName = strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(firstNonEmpty(place.NormalizedName, place.Name)))), " ")
+	place.Provider = firstNonEmpty(strings.TrimSpace(place.Provider), "local")
+	place.DisplayName = firstNonEmpty(strings.TrimSpace(place.DisplayName), place.Name)
+	place.Source = firstNonEmpty(strings.TrimSpace(place.Source), "operator_cache")
+	place.Country = strings.TrimSpace(place.Country)
+	place.Region = strings.TrimSpace(place.Region)
+	place.City = strings.TrimSpace(place.City)
+	place.Road = strings.TrimSpace(place.Road)
+	place.Aliases = compactStrings(place.Aliases)
+	if place.Metadata == nil {
+		place.Metadata = map[string]any{}
+	}
+	if place.Name == "" {
+		return place, fmt.Errorf("place name is required")
+	}
+	if place.Lat < -90 || place.Lat > 90 || place.Lon < -180 || place.Lon > 180 {
+		return place, fmt.Errorf("place coordinates are invalid")
+	}
+	if place.BBox.MinLon == 0 && place.BBox.MaxLon == 0 && place.BBox.MinLat == 0 && place.BBox.MaxLat == 0 {
+		place.BBox = catalog.BBox{
+			MinLon: place.Lon - 0.01,
+			MinLat: place.Lat - 0.01,
+			MaxLon: place.Lon + 0.01,
+			MaxLat: place.Lat + 0.01,
+		}
+	}
+	if place.BBox.MinLon > place.BBox.MaxLon || place.BBox.MinLat > place.BBox.MaxLat {
+		return place, fmt.Errorf("place bbox is invalid")
+	}
+	return place, nil
+}
+
+func mergePlacePatch(existing, patch catalog.PlaceCacheEntry) catalog.PlaceCacheEntry {
+	if strings.TrimSpace(patch.Name) != "" {
+		existing.Name = patch.Name
+	}
+	if strings.TrimSpace(patch.NormalizedName) != "" {
+		existing.NormalizedName = patch.NormalizedName
+	}
+	if len(patch.Aliases) > 0 {
+		existing.Aliases = patch.Aliases
+	}
+	if strings.TrimSpace(patch.Provider) != "" {
+		existing.Provider = patch.Provider
+	}
+	if strings.TrimSpace(patch.DisplayName) != "" {
+		existing.DisplayName = patch.DisplayName
+	}
+	if strings.TrimSpace(patch.Country) != "" {
+		existing.Country = patch.Country
+	}
+	if strings.TrimSpace(patch.Region) != "" {
+		existing.Region = patch.Region
+	}
+	if strings.TrimSpace(patch.City) != "" {
+		existing.City = patch.City
+	}
+	if strings.TrimSpace(patch.Road) != "" {
+		existing.Road = patch.Road
+	}
+	if patch.Lat != 0 || patch.Lon != 0 {
+		existing.Lat = patch.Lat
+		existing.Lon = patch.Lon
+	}
+	if patch.BBox.MinLon != 0 || patch.BBox.MinLat != 0 || patch.BBox.MaxLon != 0 || patch.BBox.MaxLat != 0 {
+		existing.BBox = patch.BBox
+	}
+	if strings.TrimSpace(patch.Source) != "" {
+		existing.Source = patch.Source
+	}
+	if patch.Metadata != nil {
+		existing.Metadata = patch.Metadata
+	}
+	normalized, err := normalizePlacePayload(existing)
+	if err == nil {
+		return normalized
+	}
+	return existing
+}
+
 type assetSearchContext struct {
 	albumAssetMatches map[string]map[string]struct{}
 	trackNameMatches  map[string]map[string]struct{}
@@ -1292,6 +1475,7 @@ type assetSearchContext struct {
 	faceMatches       map[string]map[string]struct{}
 	placeMatches      map[string]map[string]struct{}
 	places            []searchPlaceMatch
+	placeEntries      []catalog.PlaceCacheEntry
 }
 
 type SearchBackend interface {
@@ -1355,15 +1539,6 @@ type ocrBlockRecord struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
-type localPlaceEntry struct {
-	Name        string
-	DisplayName string
-	Aliases     []string
-	Lat         float64
-	Lon         float64
-	BBox        catalog.BBox
-}
-
 func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetSearchContext {
 	out := assetSearchContext{
 		albumAssetMatches: map[string]map[string]struct{}{},
@@ -1373,6 +1548,7 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 		faceMatches:       map[string]map[string]struct{}{},
 		placeMatches:      map[string]map[string]struct{}{},
 	}
+	out.placeEntries = s.placeEntries(ctx)
 	var indexedAssets []catalog.Asset
 	for _, token := range tokens {
 		prefix, plain, ok := strings.Cut(token, ":")
@@ -1385,7 +1561,7 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 			continue
 		}
 		if prefix == "" || prefix == "place" {
-			if place, ok := localPlaceForQuery(plain); ok {
+			if place, ok := placeForQuery(plain, out.placeEntries); ok {
 				matches := map[string]struct{}{}
 				geos, err := s.deps.Store.QueryAssetGeo(ctx, catalog.GeoQuery{BBox: &place.BBox, Limit: 10000})
 				if err == nil {
@@ -1398,8 +1574,8 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 					Query:         plain,
 					Name:          place.Name,
 					DisplayName:   place.DisplayName,
-					Provider:      "local",
-					Source:        "built_in_place_cache",
+					Provider:      place.Provider,
+					Source:        place.Source,
 					Lat:           place.Lat,
 					Lon:           place.Lon,
 					BBox:          place.BBox,
@@ -1543,14 +1719,10 @@ func (s *Server) handleDuplicates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/assets/"), "/")
 	parts := strings.Split(rest, "/")
 	assetID := parts[0]
-	if assetID == "" || len(parts) > 2 {
+	if assetID == "" || len(parts) > 3 {
 		http.NotFound(w, r)
 		return
 	}
@@ -1561,6 +1733,26 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "ocr" {
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w)
+			return
+		}
+		if err := s.deps.Store.DeleteAIPrediction(r.Context(), asset.ID, parts[2]); err != nil {
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "asset_id": asset.ID, "block_id": parts[2]})
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
 		return
 	}
 	if len(parts) == 2 {
@@ -5442,7 +5634,7 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 	return uniqueStrings(out)
 }
 
-func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
+func trackSearchMatches(track catalog.TrackSummary, tokens []string, places []catalog.PlaceCacheEntry) []string {
 	if len(tokens) == 0 {
 		return []string{"all parsed tracks"}
 	}
@@ -5468,7 +5660,7 @@ func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
 		if strings.Contains(text, plain) {
 			matched = append(matched, "track metadata")
 		}
-		if place, ok := localPlaceForQuery(plain); ok && trackOverlapsPlace(track, place) {
+		if place, ok := placeForQuery(plain, places); ok && trackOverlapsPlace(track, place) {
 			matched = append(matched, "local place bbox")
 		}
 		if track.PointCount > 0 && strings.Contains(strconv.Itoa(track.PointCount), plain) {
@@ -5482,13 +5674,16 @@ func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
 	return uniqueStrings(matched)
 }
 
-func localPlaceForQuery(query string) (localPlaceEntry, bool) {
+func placeForQuery(query string, places []catalog.PlaceCacheEntry) (catalog.PlaceCacheEntry, bool) {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if query == "" {
-		return localPlaceEntry{}, false
+		return catalog.PlaceCacheEntry{}, false
 	}
-	for _, place := range localPlaceEntries() {
+	for _, place := range places {
 		if strings.EqualFold(query, strings.ToLower(place.Name)) {
+			return place, true
+		}
+		if query == strings.ToLower(place.NormalizedName) {
 			return place, true
 		}
 		for _, alias := range place.Aliases {
@@ -5496,43 +5691,67 @@ func localPlaceForQuery(query string) (localPlaceEntry, bool) {
 				return place, true
 			}
 		}
+		if strings.Contains(strings.ToLower(strings.Join([]string{place.DisplayName, place.Country, place.Region, place.City, place.Road}, " ")), query) {
+			return place, true
+		}
 	}
-	return localPlaceEntry{}, false
+	return catalog.PlaceCacheEntry{}, false
 }
 
-func localPlaceEntries() []localPlaceEntry {
-	return []localPlaceEntry{
+func defaultPlaceEntries() []catalog.PlaceCacheEntry {
+	return []catalog.PlaceCacheEntry{
 		{
-			Name:        "Yerevan",
-			DisplayName: "Yerevan, Armenia",
-			Aliases:     []string{"yerevan", "erevan", "երեւան", "երևան"},
-			Lat:         40.1872,
-			Lon:         44.5152,
-			BBox:        catalog.BBox{MinLon: 44.35, MinLat: 40.05, MaxLon: 44.68, MaxLat: 40.28},
+			Name:           "Yerevan",
+			NormalizedName: "yerevan",
+			DisplayName:    "Yerevan, Armenia",
+			Aliases:        []string{"yerevan", "erevan", "երեւան", "երևան"},
+			Provider:       "local",
+			Country:        "Armenia",
+			Region:         "Yerevan",
+			City:           "Yerevan",
+			Lat:            40.1872,
+			Lon:            44.5152,
+			BBox:           catalog.BBox{MinLon: 44.35, MinLat: 40.05, MaxLon: 44.68, MaxLat: 40.28},
+			Source:         "built_in_seed",
 		},
 		{
-			Name:        "Vanadzor",
-			DisplayName: "Vanadzor, Lori Province, Armenia",
-			Aliases:     []string{"vanadzor", "kirovakan", "վանաձոր"},
-			Lat:         40.8128,
-			Lon:         44.4883,
-			BBox:        catalog.BBox{MinLon: 44.38, MinLat: 40.72, MaxLon: 44.62, MaxLat: 40.90},
+			Name:           "Vanadzor",
+			NormalizedName: "vanadzor",
+			DisplayName:    "Vanadzor, Lori Province, Armenia",
+			Aliases:        []string{"vanadzor", "kirovakan", "վանաձոր"},
+			Provider:       "local",
+			Country:        "Armenia",
+			Region:         "Lori Province",
+			City:           "Vanadzor",
+			Lat:            40.8128,
+			Lon:            44.4883,
+			BBox:           catalog.BBox{MinLon: 44.38, MinLat: 40.72, MaxLon: 44.62, MaxLat: 40.90},
+			Source:         "built_in_seed",
 		},
 		{
-			Name:        "Lori Province",
-			DisplayName: "Lori Province, Armenia",
-			Aliases:     []string{"lori", "lori province", "lori marz", "լոռի", "լոռու մարզ"},
-			Lat:         40.9631,
-			Lon:         44.4730,
-			BBox:        catalog.BBox{MinLon: 43.78, MinLat: 40.68, MaxLon: 45.05, MaxLat: 41.32},
+			Name:           "Lori Province",
+			NormalizedName: "lori province",
+			DisplayName:    "Lori Province, Armenia",
+			Aliases:        []string{"lori", "lori province", "lori marz", "լոռի", "լոռու մարզ"},
+			Provider:       "local",
+			Country:        "Armenia",
+			Region:         "Lori Province",
+			Lat:            40.9631,
+			Lon:            44.4730,
+			BBox:           catalog.BBox{MinLon: 43.78, MinLat: 40.68, MaxLon: 45.05, MaxLat: 41.32},
+			Source:         "built_in_seed",
 		},
 		{
-			Name:        "Armenia",
-			DisplayName: "Armenia",
-			Aliases:     []string{"armenia", "hayastan", "հայաստան"},
-			Lat:         40.0691,
-			Lon:         45.0382,
-			BBox:        catalog.BBox{MinLon: 43.45, MinLat: 38.80, MaxLon: 46.70, MaxLat: 41.35},
+			Name:           "Armenia",
+			NormalizedName: "armenia",
+			DisplayName:    "Armenia",
+			Aliases:        []string{"armenia", "hayastan", "հայաստան"},
+			Provider:       "local",
+			Country:        "Armenia",
+			Lat:            40.0691,
+			Lon:            45.0382,
+			BBox:           catalog.BBox{MinLon: 43.45, MinLat: 38.80, MaxLon: 46.70, MaxLat: 41.35},
+			Source:         "built_in_seed",
 		},
 	}
 }
@@ -5572,8 +5791,9 @@ func (s *Server) assetPlaceRecords(ctx context.Context, asset catalog.Asset) []a
 	}
 	out := []assetPlaceRecord{}
 	seen := map[string]struct{}{}
+	places := s.placeEntries(ctx)
 	for _, coordinate := range coordinates {
-		for _, place := range localPlacesForPoint(coordinate.lat, coordinate.lon) {
+		for _, place := range placesForPoint(coordinate.lat, coordinate.lon, places) {
 			key := fmt.Sprintf("%s|%s|%.6f|%.6f", coordinate.source, strings.ToLower(place.Name), coordinate.lat, coordinate.lon)
 			if _, ok := seen[key]; ok {
 				continue
@@ -5586,8 +5806,8 @@ func (s *Server) assetPlaceRecords(ctx context.Context, asset catalog.Asset) []a
 				Lon:              coordinate.lon,
 				PlaceName:        place.Name,
 				DisplayName:      place.DisplayName,
-				Provider:         "local",
-				Source:           "built_in_place_cache",
+				Provider:         place.Provider,
+				Source:           place.Source,
 				Match:            "coordinate inside cached place bbox",
 				BBox:             place.BBox,
 				Metadata:         coordinate.metadata,
@@ -5646,9 +5866,25 @@ func ocrBlocksFromPredictions(predictions []catalog.AIPrediction) []ocrBlockReco
 	return out
 }
 
-func localPlacesForPoint(lat, lon float64) []localPlaceEntry {
-	out := []localPlaceEntry{}
-	for _, place := range localPlaceEntries() {
+func (s *Server) seedDefaultPlaces() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for _, place := range defaultPlaceEntries() {
+		_, _ = s.deps.Store.UpsertPlace(ctx, place)
+	}
+}
+
+func (s *Server) placeEntries(ctx context.Context) []catalog.PlaceCacheEntry {
+	places, err := s.deps.Store.ListPlaces(ctx, catalog.PlaceQuery{Limit: 1000})
+	if err == nil && len(places) > 0 {
+		return places
+	}
+	return defaultPlaceEntries()
+}
+
+func placesForPoint(lat, lon float64, places []catalog.PlaceCacheEntry) []catalog.PlaceCacheEntry {
+	out := []catalog.PlaceCacheEntry{}
+	for _, place := range places {
 		if lon >= place.BBox.MinLon && lon <= place.BBox.MaxLon && lat >= place.BBox.MinLat && lat <= place.BBox.MaxLat {
 			out = append(out, place)
 		}
@@ -5686,7 +5922,7 @@ func metadataFloat(value any) (float64, bool) {
 	}
 }
 
-func trackOverlapsPlace(track catalog.TrackSummary, place localPlaceEntry) bool {
+func trackOverlapsPlace(track catalog.TrackSummary, place catalog.PlaceCacheEntry) bool {
 	if track.MinLat == nil || track.MinLon == nil || track.MaxLat == nil || track.MaxLon == nil {
 		return false
 	}

@@ -922,6 +922,111 @@ func (s *MemoryStore) ListAIPredictions(_ context.Context, assetID string) ([]AI
 	return out, nil
 }
 
+func (s *MemoryStore) DeleteAIPrediction(_ context.Context, assetID, predictionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	predictions := s.aiPredictions[assetID]
+	for idx, prediction := range predictions {
+		if prediction.ID == predictionID {
+			s.aiPredictions[assetID] = append(predictions[:idx], predictions[idx+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (s *MemoryStore) UpsertPlace(_ context.Context, place PlaceCacheEntry) (PlaceCacheEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if place.ID == "" {
+		place.ID = id.NewUUID()
+	}
+	if place.NormalizedName == "" {
+		place.NormalizedName = normalizePlaceName(place.Name)
+	}
+	if place.Provider == "" {
+		place.Provider = "local"
+	}
+	if place.DisplayName == "" {
+		place.DisplayName = place.Name
+	}
+	if place.Source == "" {
+		place.Source = "operator_cache"
+	}
+	if place.Metadata == nil {
+		place.Metadata = map[string]any{}
+	}
+	if existing, ok := s.places[place.ID]; ok && !existing.CreatedAt.IsZero() {
+		place.CreatedAt = existing.CreatedAt
+	}
+	if place.CreatedAt.IsZero() {
+		place.CreatedAt = now
+	}
+	place.UpdatedAt = now
+	s.places[place.ID] = place
+	return place, nil
+}
+
+func (s *MemoryStore) ListPlaces(_ context.Context, query PlaceQuery) ([]PlaceCacheEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	limit, offset := normalizePage(query.Limit, query.Offset)
+	q := normalizePlaceName(query.Q)
+	out := []PlaceCacheEntry{}
+	for _, place := range s.places {
+		if q != "" && !placeMatchesQuery(place, q) {
+			continue
+		}
+		out = append(out, place)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	if offset > len(out) {
+		return []PlaceCacheEntry{}, nil
+	}
+	end := offset + limit
+	if end > len(out) {
+		end = len(out)
+	}
+	return append([]PlaceCacheEntry{}, out[offset:end]...), nil
+}
+
+func (s *MemoryStore) DeletePlace(_ context.Context, placeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.places[placeID]; !ok {
+		return ErrNotFound
+	}
+	delete(s.places, placeID)
+	return nil
+}
+
+func normalizePlaceName(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func placeMatchesQuery(place PlaceCacheEntry, query string) bool {
+	if query == "" {
+		return true
+	}
+	text := normalizePlaceName(strings.Join([]string{
+		place.Name,
+		place.NormalizedName,
+		place.DisplayName,
+		place.Country,
+		place.Region,
+		place.City,
+		place.Road,
+		strings.Join(place.Aliases, " "),
+	}, " "))
+	return strings.Contains(text, query)
+}
+
 func (s *MemoryStore) CreateFaceDetection(_ context.Context, face FaceDetection) (FaceDetection, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -376,3 +376,24 @@ Settings path fields can use the server-side file/folder picker. The picker is r
 - Video Track Player sessions require a reliable media timestamp plus selected track timestamps. If a video lacks `taken_at`, the UI should report that synchronization needs a user-provided start/end time or offset.
 - AV1 live playback is currently disabled for HLS sessions unless a verified browser-compatible encoder/container path exists. Prefer H.264/NVENC for interactive streaming.
 - Transcoding metrics can report `ssim` and `psnr` with the current ffmpeg build. `libvmaf` requires an ffmpeg build with the `libvmaf` filter.
+
+## OCR And Place Cache Operations
+
+Check OCR engine status through the sidecar and backend:
+
+```bash
+curl -fsS http://127.0.0.1:19090/capabilities
+curl -fsS http://127.0.0.1:18080/api/v1/ai/status
+curl -fsS http://127.0.0.1:18080/api/v1/ocr/runs
+```
+
+The required OCR language set is `eng`, `rus`, `hye`, `chi_sim`, and `chi_tra`. If any language is missing, OCR jobs should fail with an actionable missing-language message rather than falling back to a remote service. OCR should be run manually on selected/current scopes only; do not run OCR as part of unbounded discovery.
+
+Manage local place cache from Settings -> Search/Places or through:
+
+```bash
+curl -fsS http://127.0.0.1:18080/api/v1/places
+curl -fsS "http://127.0.0.1:18080/api/v1/search?q=Yerevan"
+```
+
+Place search is cache-only by default. Do not bulk geocode public providers. Future online provider use must be user-triggered, rate-limited, and cached before reuse.

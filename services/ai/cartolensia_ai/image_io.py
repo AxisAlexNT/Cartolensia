@@ -48,6 +48,12 @@ def load_pillow_image(request: ImageRequest, config: ServiceConfig) -> Any:
         return image.convert("RGB").copy()
 
 
+def read_image_bytes(request: ImageRequest, config: ServiceConfig) -> bytes:
+    """Read bounded image bytes while enforcing the sidecar input boundary."""
+
+    return _read_image_bytes(request, config)
+
+
 def _read_image_bytes(request: ImageRequest, config: ServiceConfig) -> bytes:
     if request.media_url:
         return _read_localhost_url(request.media_url)

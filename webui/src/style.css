@@ -1827,6 +1827,53 @@ td {
   font-size: 0.98rem;
 }
 
+.settings-subsection {
+  border-top: 1px solid #d8dee4;
+  display: grid;
+  gap: 14px;
+  padding-top: 14px;
+}
+
+.compact-title h4,
+.place-editor-card h5 {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  font-size: 15px;
+  margin: 0;
+}
+
+.place-editor-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  max-height: 640px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.place-editor-card {
+  background: #f6f8fa;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.place-editor-card label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.place-editor-card label span {
+  color: #57606a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .search-result-tiles {
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   padding: 0;

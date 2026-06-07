@@ -151,3 +151,10 @@ Current added dependency notes:
 - Video Track Player sessions are read-only and derive transient marker positions from existing media metadata and track points.
 - Map cluster popups and track previews read existing metadata and tile/cache data only; they do not trigger discovery or missing-file marking.
 - AV1 live HLS is blocked when unsupported so the system does not start expensive, failing transcodes without a clear operator decision. The verified browser route is cache-scoped `video/webm` output when a compatible encoder is available.
+
+## 2026-06-08 OCR And Geocoding Safety Notes
+
+- Tesseract OCR is local-only and manual. It reads bounded localhost media URLs or safe temp/cache paths and writes only database metadata; it must not create OCR sidecars or cache files under original storage.
+- OCR block deletion is metadata-only and scoped to OCR prediction rows for the selected asset.
+- Place-cache editing changes Cartolensia metadata only. It does not write to media files, does not start discovery, and does not call public geocoding APIs.
+- Local place search uses durable cache entries plus existing geotag metadata. Online geocoder support remains disabled by default and must be user-triggered, rate-limited, and cached if implemented later.

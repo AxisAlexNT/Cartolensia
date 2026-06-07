@@ -7,7 +7,7 @@ from typing import Any
 from cartolensia_ai.schemas import ImageRequest, InferenceResponse
 
 
-CAPABILITIES = ["classify_image", "detect_faces", "describe_image", "embed_image"]
+CAPABILITIES = ["classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"]
 
 
 class DummyBackend:
@@ -30,4 +30,3 @@ class DummyBackend:
             "model_state": self.model_state,
             "capabilities": CAPABILITIES,
         }
-

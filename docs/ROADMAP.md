@@ -172,3 +172,20 @@ Next:
 - Install and validate Tesseract OCR language packs for English, Russian, Armenian, and Chinese in the supervised environment, then wire the sidecar OCR runtime into `/ocr-image`.
 - Add browser automation for Geo Align Shift-drag editing, track point popups, place search cards, and face-crop thumbnails.
 - Move long AV1 jobs to durable queued/offline transcoding with progress and cancellation.
+
+## 2026-06-08 OCR/Place Cache Progress
+
+Completed:
+
+- Tesseract OCR runtime is wired into the sidecar `/ocr-image` endpoint.
+- English, Russian, Armenian, Simplified Chinese, and Traditional Chinese language availability is reported in AI worker status.
+- OCR blocks are searchable metadata with bounding boxes and asset-detail delete controls.
+- Durable `place_cache` migration/store/API is implemented for local/cache-only place search.
+- Settings Search/Places now provides an operator place-cache editor.
+
+Next:
+
+- Add JSON import/export for place cache entries under `.cartolensia/exports`.
+- Add browser automation around OCR overlay highlighting, place-cache editing, and place-search navigation.
+- Add long-caption workflow controls and storage.
+- Continue safety/private visibility and WebDAV/productization work.

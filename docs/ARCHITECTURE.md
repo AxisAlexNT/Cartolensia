@@ -256,3 +256,10 @@ Settings path fields use `GET /api/v1/files/browse` for an allowlisted file/fold
 - Video-track playback is represented by scoped in-memory sessions. The position endpoint interpolates selected tracks against video playback time when a reliable video timestamp exists and returns a warning when synchronization inputs are insufficient.
 - Job list responses summarize very large payloads by default to keep operational pages responsive. Full payloads remain available to callers that explicitly request them.
 - Transcoding capability reporting now includes metrics filter detection for `libvmaf`, `ssim`, and `psnr`. AV1 live HLS is treated as unsupported unless a verified browser-compatible route is selected.
+
+## 2026-06-08 OCR And Place Cache Update
+
+- The AI sidecar now includes a real `ocr_image` implementation backed by the local Tesseract CLI. OCR is still explicit/manual, reads only bounded localhost or safe temp/cache inputs, and returns text blocks with bounding boxes and confidence.
+- OCR records are stored as Cartolensia metadata/prediction rows so the existing asset-detail overlays and PostgreSQL/local search can index OCR text without modifying originals or writing sidecars.
+- `place_cache` is now a durable PostgreSQL/memory store concept. The app seeds cache-only entries for Yerevan, Armenia, Lori Province, and Vanadzor, and exposes operator CRUD through `/api/v1/places`.
+- Search and asset-detail reverse-place rows now read from durable local place entries with built-in defaults only as fallback. Online geocoding remains intentionally absent from automatic flows.
