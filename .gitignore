@@ -143,6 +143,10 @@ var/
 wheels/
 share/python-wheels/
 
+# Keep distribution builder scripts tracked; generated packages stay under repo-root dist/.
+!scripts/dist/
+!scripts/dist/**
+
 *.egg-info/
 .installed.cfg
 *.egg

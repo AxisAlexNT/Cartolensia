@@ -5,7 +5,7 @@ APP_NAME := cartolensia
 WEBUI_DIR := webui
 GOCACHE ?= /tmp/cartolensia-go-build
 
-.PHONY: help check-tools backend-run backend-test webui-install webui-build compose-up compose-down smoke dev-db reset-dev-db
+.PHONY: help check-tools backend-run backend-test webui-install webui-build compose-up compose-down smoke dev-db reset-dev-db dist-offline-linux
 
 help:
 > @printf 'Targets:\n'
@@ -17,6 +17,7 @@ help:
 > @printf '  make compose-up     Start development PostgreSQL\n'
 > @printf '  make compose-down   Stop development PostgreSQL\n'
 > @printf '  make smoke          Run available smoke checks\n'
+> @printf '  make dist-offline-linux  Build a local offline 7z distribution\n'
 
 check-tools:
 > @bash scripts/check-tools.sh
@@ -47,3 +48,6 @@ reset-dev-db:
 
 smoke:
 > @bash scripts/smoke-test.sh
+
+dist-offline-linux:
+> bash scripts/dist/build-offline-linux.sh

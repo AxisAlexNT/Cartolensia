@@ -397,3 +397,35 @@ curl -fsS "http://127.0.0.1:18080/api/v1/search?q=Yerevan"
 ```
 
 Place search is cache-only by default. Do not bulk geocode public providers. Future online provider use must be user-triggered, rate-limited, and cached before reuse.
+
+## Offline Distribution Builds
+
+Build a local Linux x86_64 offline package with:
+
+```bash
+make dist-offline-linux
+```
+
+or call the packager directly:
+
+```bash
+CARTOLENSIA_DIST_AI_FLAVOR=runtime \
+CARTOLENSIA_DIST_INCLUDE_TOOLS=1 \
+CARTOLENSIA_DIST_INCLUDE_POSTGRES=1 \
+bash scripts/dist/build-offline-linux.sh
+```
+
+The package builder writes only under repo-local `dist/` by default. It stages:
+
+- `bin/cartolensia`;
+- built `webui/dist` assets;
+- offline launcher scripts and configs;
+- optional ffmpeg/ffprobe/Tesseract/OCR language data;
+- optional PostgreSQL runtime files;
+- optional Python AI runtime packages;
+- optional reviewed model cache;
+- license notices, dependency manifests, and optional AGPL source snapshot.
+
+The GitHub Actions workflow `Build Offline Distribution` is manually triggerable and creates or updates a release with a `.7z` archive and `.sha256` checksum. Use `ai_flavor=runtime` for a compact OCR-capable package, `cpu` for CPU AI packages, and `cuda128` only after reviewing CUDA/PyTorch redistribution terms.
+
+Offline packages are self-contained application bundles for compatible Linux x86_64 hosts, but they cannot include host kernel/GPU drivers. GPU acceleration therefore still depends on compatible host drivers already being installed. Model weights are bundled only when `include_models` is enabled and the model cache has been reviewed for license/provenance.

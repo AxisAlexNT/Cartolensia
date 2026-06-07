@@ -54,6 +54,7 @@ Current implemented slices:
 * [Architecture](docs/ARCHITECTURE.md)
 * [Operations](docs/OPERATIONS.md)
 * [Security](docs/SECURITY.md)
+* [Offline distribution](docs/DISTRIBUTION.md)
 * [Real archive dry-run guide](docs/REAL_ARCHIVE_DRY_RUN.md)
 * [Target architecture](docs/ARCHITECTURE_TARGET.md)
 * [AI assistance note](docs/AI_ASSISTANCE.md)

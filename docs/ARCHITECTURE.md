@@ -241,6 +241,21 @@ Settings path fields use `GET /api/v1/files/browse` for an allowlisted file/fold
 - Live video-track sync is represented in schema by `track_points` and `asset_track_links`, including `time_offset_ms`, with a marker interpolation API for linked videos.
 - Transcoding contracts and capability detection exist. Cache-scoped HLS sessions and preset management are implemented as a safe MVP; durable transcoding jobs and managed output libraries are still future work.
 
+## Distribution Architecture
+
+Offline distribution is handled by `scripts/dist/build-offline-linux.sh`. The packager builds a Linux x86_64 application archive from normal package-manager/runtime inputs instead of vendoring third-party source into the repository. A staged package contains the Go backend binary, built WebUI assets, offline YAML configs, launcher scripts, docs, license manifests, optional source snapshot, and optional runtime toolchains.
+
+Optional bundled components are isolated by directory:
+
+- `external/bin`, `external/lib`, and `external/share/tessdata` for ffmpeg/ffprobe/Tesseract and OCR language data;
+- `external/postgres` for a local PostgreSQL runtime discovered from `pg_config`;
+- `python` and `ai/python-site` for a copied Python runtime plus target-installed sidecar packages;
+- `.cartolensia/models` for explicitly reviewed model weights.
+
+The launcher prefers bundled PostgreSQL when available and falls back to the memory config otherwise. It starts the AI sidecar only when a bundled Python runtime and sidecar site-packages are present. Runtime state is kept under the extracted package's `runtime`, `logs`, and `.cartolensia/cache` directories; media defaults to a `strict_read_only` local `media` directory.
+
+The GitHub Actions offline release workflow is manual. It verifies Go/WebUI builds, assembles the package, uploads workflow artifacts, and attaches the archive/checksum to a GitHub release. GPU drivers and public map/geocoder data are not bundled.
+
 ## 2026-06-07 Update
 
 - GPS/KML track detail now has a dedicated API/UI flow with OpenLayers geometry preview, altitude and speed profiles, point-info lookup, media-by-time lookup, and nearby-geotag media lookup.

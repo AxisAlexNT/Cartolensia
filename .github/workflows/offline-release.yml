@@ -1,0 +1,160 @@
+name: Build Offline Distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to create or update"
+        required: true
+        default: "offline-manual"
+      release_name:
+        description: "Release title"
+        required: true
+        default: "Cartolensia offline distribution"
+      prerelease:
+        description: "Mark release as prerelease"
+        required: true
+        type: boolean
+        default: true
+      ai_flavor:
+        description: "AI bundle flavor"
+        required: true
+        type: choice
+        default: "runtime"
+        options:
+          - "none"
+          - "runtime"
+          - "cpu"
+          - "cuda128"
+      include_postgres:
+        description: "Bundle PostgreSQL runtime from the runner"
+        required: true
+        type: boolean
+        default: true
+      include_tools:
+        description: "Bundle ffmpeg/ffprobe/Tesseract from the runner"
+        required: true
+        type: boolean
+        default: true
+      include_models:
+        description: "Bundle .cartolensia/models if a reviewed cache is present"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-offline-linux:
+    name: Build Linux x86_64 7z
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "webui/package-lock.json"
+
+      - name: Set up Python runtime to bundle
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install distribution toolchain packages
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            p7zip-full \
+            rsync \
+            ffmpeg \
+            tesseract-ocr \
+            tesseract-ocr-eng \
+            tesseract-ocr-rus \
+            tesseract-ocr-hye \
+            tesseract-ocr-chi-sim \
+            tesseract-ocr-chi-tra \
+            libpq-dev \
+            postgresql \
+            postgresql-client
+
+      - name: Verify OCR language packs
+        run: |
+          set -euxo pipefail
+          tesseract --version
+          tesseract --list-langs | tee /tmp/cartolensia-tesseract-langs.txt
+          grep -qx eng /tmp/cartolensia-tesseract-langs.txt
+          grep -qx rus /tmp/cartolensia-tesseract-langs.txt
+          grep -qx hye /tmp/cartolensia-tesseract-langs.txt
+          grep -qx chi_sim /tmp/cartolensia-tesseract-langs.txt
+          grep -qx chi_tra /tmp/cartolensia-tesseract-langs.txt
+
+      - name: Run verification before packaging
+        run: |
+          set -euxo pipefail
+          export GOCACHE=/tmp/cartolensia-go-build
+          export GOTOOLCHAIN=local
+          go test ./...
+          npm --prefix webui ci
+          npm --prefix webui run build
+
+      - name: Build offline archive
+        env:
+          CARTOLENSIA_DIST_VERSION: ${{ inputs.tag_name }}
+          CARTOLENSIA_DIST_AI_FLAVOR: ${{ inputs.ai_flavor }}
+          CARTOLENSIA_DIST_INCLUDE_POSTGRES: ${{ inputs.include_postgres && '1' || '0' }}
+          CARTOLENSIA_DIST_INCLUDE_TOOLS: ${{ inputs.include_tools && '1' || '0' }}
+          CARTOLENSIA_DIST_INCLUDE_MODELS: ${{ inputs.include_models && '1' || '0' }}
+        run: |
+          set -euxo pipefail
+          export CARTOLENSIA_BUNDLED_PYTHON_ROOT="${pythonLocation}"
+          bash scripts/dist/build-offline-linux.sh
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cartolensia-offline-linux-x86_64
+          path: |
+            dist/*.7z
+            dist/*.7z.sha256
+            dist/*-RELEASE_NOTES.md
+          if-no-files-found: error
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euxo pipefail
+          notes_file="$(ls dist/*-RELEASE_NOTES.md | head -n 1)"
+          archive="$(ls dist/*.7z | head -n 1)"
+          checksum="${archive}.sha256"
+          release_flags=()
+          if [ "${PRERELEASE}" = "true" ]; then
+            release_flags+=(--prerelease)
+          fi
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release edit "${TAG_NAME}" --title "${RELEASE_NAME}" --notes-file "${notes_file}" "${release_flags[@]}"
+          else
+            gh release create "${TAG_NAME}" --title "${RELEASE_NAME}" --notes-file "${notes_file}" "${release_flags[@]}"
+          fi
+          gh release upload "${TAG_NAME}" "${archive}" "${checksum}" --clobber

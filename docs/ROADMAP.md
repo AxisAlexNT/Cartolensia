@@ -182,6 +182,7 @@ Completed:
 - OCR blocks are searchable metadata with bounding boxes and asset-detail delete controls.
 - Durable `place_cache` migration/store/API is implemented for local/cache-only place search.
 - Settings Search/Places now provides an operator place-cache editor.
+- Linux x86_64 offline distribution packaging is implemented with a local `7z` packager, manual GitHub Actions release workflow, launcher scripts, optional OCR/media/PostgreSQL/Python runtime bundling, dependency manifests, and release checksums.
 
 Next:
 
@@ -189,3 +190,5 @@ Next:
 - Add browser automation around OCR overlay highlighting, place-cache editing, and place-search navigation.
 - Add long-caption workflow controls and storage.
 - Continue safety/private visibility and WebDAV/productization work.
+- Add cross-platform distribution targets after the Linux x86_64 package has been validated on clean offline hosts.
+- Add a release-time license review checklist for model weights, CUDA wheels, and ffmpeg codec flags.

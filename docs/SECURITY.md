@@ -158,3 +158,12 @@ Current added dependency notes:
 - OCR block deletion is metadata-only and scoped to OCR prediction rows for the selected asset.
 - Place-cache editing changes Cartolensia metadata only. It does not write to media files, does not start discovery, and does not call public geocoding APIs.
 - Local place search uses durable cache entries plus existing geotag metadata. Online geocoder support remains disabled by default and must be user-triggered, rate-limited, and cached if implemented later.
+
+## 2026-06-08 Distribution Safety Notes
+
+- Offline package builds write to repo-local `dist/` by default and must not stage archives, source snapshots, tools, AI environments, model weights, or generated runtime files under original media storage.
+- The generated offline configs default to a package-local `media/` directory with `strict_read_only` mode.
+- Bundled model weights are opt-in and require a license/provenance-reviewed model cache. The workflow default keeps model bundling disabled.
+- Bundled ffmpeg, Tesseract, PostgreSQL, Python packages, and CUDA wheels must be reviewed before public redistribution. The packager records manifests and Debian copyright files where available, but those records do not replace legal review.
+- GPU drivers are intentionally not bundled. CUDA-capable packages still depend on compatible host drivers and must not attempt to install kernel or system GPU components on the target host.
+- GitHub release builds are manual. Release operators should use prerelease mode until the package has been tested on a clean offline host.

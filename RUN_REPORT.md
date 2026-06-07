@@ -2441,3 +2441,77 @@ Live validation after restart:
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-08 Offline Distribution Packaging Run
+
+This run added the first production-oriented offline packaging path. It did not scan new data, reset PostgreSQL, download models, pull Docker images, or write to `/mnt/Models/rclone`.
+
+### Implemented
+
+- Added `scripts/dist/build-offline-linux.sh`:
+  - builds the Vue WebUI and Go backend;
+  - stages launcher scripts, offline configs, docs, project license, third-party notices, dependency manifests, and optional AGPL source snapshot;
+  - can bundle ffmpeg, ffprobe, Tesseract, OCR language data, PostgreSQL runtime files, Python runtime/site packages, and a reviewed model cache;
+  - supports AI bundle flavors `none`, `runtime`, `cpu`, and `cuda128`;
+  - writes `.7z`, `.7z.sha256`, and release-notes outputs under `dist/`;
+  - copies runtime trees without preserving owner/group/perms so archives are portable across build filesystems.
+- Added `.github/workflows/offline-release.yml`:
+  - manual `workflow_dispatch` release build;
+  - installs runner-side distribution dependencies, including p7zip, ffmpeg, Tesseract language packs, PostgreSQL, and `libpq-dev`;
+  - runs Go/WebUI verification before packaging;
+  - builds the offline Linux x86_64 archive;
+  - uploads workflow artifacts;
+  - creates or updates a GitHub release and attaches the `.7z` plus checksum.
+- Added `docs/DISTRIBUTION.md` and `make dist-offline-linux`.
+- Linked the offline distribution docs from `README.md`.
+- Added a narrow `.gitignore` exception so `scripts/dist/` packager code is tracked while generated repo-root `dist/` archives remain ignored.
+
+### Package Smoke Results
+
+Minimal smoke package:
+
+- Command: `CARTOLENSIA_DIST_VERSION=local-smoke CARTOLENSIA_DIST_AI_FLAVOR=none CARTOLENSIA_DIST_INCLUDE_TOOLS=0 CARTOLENSIA_DIST_INCLUDE_POSTGRES=0 CARTOLENSIA_DIST_INCLUDE_SOURCE=0 bash scripts/dist/build-offline-linux.sh`
+- Archive: `dist/cartolensia-local-smoke-linux-x86_64-offline.7z`
+- Size: about `3.9 MiB`
+- Verified archive contents include the backend binary, WebUI assets, launcher scripts, configs, docs, and notices.
+
+Tools/OCR smoke package:
+
+- Command: `CARTOLENSIA_DIST_VERSION=local-tools-smoke CARTOLENSIA_DIST_AI_FLAVOR=none CARTOLENSIA_DIST_INCLUDE_TOOLS=1 CARTOLENSIA_DIST_INCLUDE_POSTGRES=0 CARTOLENSIA_DIST_INCLUDE_SOURCE=0 bash scripts/dist/build-offline-linux.sh`
+- Archive: `dist/cartolensia-local-tools-smoke-linux-x86_64-offline.7z`
+- Size: about `90 MiB` compressed, `318 MiB` staged.
+- SHA256: `4d90c4d7d7fef9a258e86d16924cf34e6ce5011aae6cd5e750e68763d605e21c`
+- Bundled tool check passed:
+  - staged Tesseract lists `eng`, `rus`, `hye`, `chi_sim`, `chi_tra`, and `osd`;
+  - staged ffmpeg/ffprobe start successfully with copied libraries.
+
+### Verification
+
+Passed:
+
+- `bash -n scripts/dist/build-offline-linux.sh`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- minimal offline package smoke build
+- tools/OCR offline package smoke build
+- staged Tesseract language-data check
+- staged ffmpeg/ffprobe startup check
+
+### Known Limitations
+
+- The offline archive is Linux x86_64 focused. Additional target OS/architecture packages need separate runners and packaging logic.
+- GPU drivers cannot be bundled; CUDA AI packages still require compatible host GPU drivers.
+- Model weights are included only when explicitly enabled and a license-reviewed `.cartolensia/models` cache is present.
+- The package builder records dependency manifests and Debian copyright files where available, but public redistribution still needs legal review, especially for ffmpeg codec flags, CUDA wheels, and model weights.
+- GitHub-hosted runners cannot include private local model caches unless the release process explicitly provides them.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, model files, OCR cache, transcodes, exports, DB files, or package outputs were written under `/mnt/Models/rclone`.
+- Package outputs were written under repo-local `dist/`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
