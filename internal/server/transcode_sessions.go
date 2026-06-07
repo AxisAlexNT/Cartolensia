@@ -26,6 +26,7 @@ type transcodeSession struct {
 	Profile         string    `json:"profile"`
 	Hardware        string    `json:"hardware,omitempty"`
 	Encoder         string    `json:"encoder,omitempty"`
+	Container       string    `json:"container,omitempty"`
 	Dir             string    `json:"dir"`
 	Playlist        string    `json:"playlist_url"`
 	Status          string    `json:"status"`
@@ -138,14 +139,19 @@ func (s *Server) handleTranscodeSessionStart(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	streamURL := "/api/v1/media/transcode-sessions/" + sessionID + "/master.m3u8"
+	if strings.EqualFold(resolvedPreset.Container, "webm") {
+		streamURL = "/api/v1/media/transcode-sessions/" + sessionID + "/output.webm"
+	}
 	session := &transcodeSession{
 		ID:              sessionID,
 		AssetID:         assetID,
 		Profile:         profile,
 		Hardware:        resolvedPreset.Hardware,
 		Encoder:         resolvedPreset.FFmpegEncoder,
+		Container:       resolvedPreset.Container,
 		Dir:             sessionDir,
-		Playlist:        "/api/v1/media/transcode-sessions/" + sessionID + "/master.m3u8",
+		Playlist:        streamURL,
 		Status:          "pending",
 		CreatedAt:       time.Now().UTC(),
 		MinReadySeconds: 10,
@@ -170,7 +176,7 @@ func (s *Server) handleTranscodeSessionStart(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}()
-	waitForHLSReady(session, 15*time.Second)
+	waitForTranscodeReady(session, 45*time.Second)
 	writeJSON(w, http.StatusAccepted, publicTranscodeSession(session))
 }
 
@@ -223,6 +229,8 @@ func (s *Server) handleTranscodeSession(w http.ResponseWriter, r *http.Request, 
 			w.Header().Set("Content-Type", "video/iso.segment")
 		} else if strings.HasSuffix(name, ".m3u8") {
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		} else if strings.HasSuffix(name, ".webm") {
+			w.Header().Set("Content-Type", "video/webm")
 		}
 		http.ServeFile(w, r, target)
 		return
@@ -328,7 +336,7 @@ func (s *Server) validateTranscodeRequest(ctx context.Context, req transcodeVali
 	if err := validateTranscodingPreset(req.Preset, caps); err != nil {
 		return map[string]any{"valid": false, "error": err.Error(), "warnings": warnings, "preset": req.Preset}
 	}
-	args, err := hlsArgsForPreset(req.Preset, "/tmp/input.mp4", "/tmp/cartolensia-transcode-preview")
+	args, err := transcodeArgsForPreset(req.Preset, "/tmp/input.mp4", "/tmp/cartolensia-transcode-preview")
 	if err != nil {
 		return map[string]any{"valid": false, "error": err.Error(), "warnings": warnings, "preset": req.Preset}
 	}
@@ -444,6 +452,7 @@ func publicTranscodeSession(session *transcodeSession) map[string]any {
 		"profile":           session.Profile,
 		"hardware":          session.Hardware,
 		"encoder":           session.Encoder,
+		"container":         session.Container,
 		"playlist_url":      session.Playlist,
 		"status":            session.Status,
 		"created_at":        session.CreatedAt,
@@ -464,7 +473,7 @@ func (s *transcodeSession) stderrTail() string {
 	return s.stderr.Tail()
 }
 
-func waitForHLSReady(session *transcodeSession, timeout time.Duration) {
+func waitForTranscodeReady(session *transcodeSession, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		updateTranscodeReadiness(session)
@@ -479,6 +488,11 @@ func updateTranscodeReadiness(session *transcodeSession) {
 	transcodeSessions.Lock()
 	defer transcodeSessions.Unlock()
 	if session.Status != "pending" {
+		return
+	}
+	if strings.EqualFold(session.Container, "webm") {
+		// WebM is served as a finalized browser file, not as a partial HLS-style stream.
+		// The cmd.Wait goroutine marks the session finished when ffmpeg closes the file.
 		return
 	}
 	if ready, seconds := hlsReady(session.Dir, session.MinReadySeconds); ready {
@@ -536,11 +550,20 @@ func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePr
 		if err := validateTranscodingPreset(preset, transcoding.Detect(ctx)); err != nil {
 			return nil, catalog.TranscodingPreset{}, err
 		}
-		args, err := hlsArgsForPreset(preset, inputPath, sessionDir)
+		args, err := transcodeArgsForPreset(preset, inputPath, sessionDir)
 		return args, preset, err
 	}
 	if args, err := hlsArgs(profile, inputPath, sessionDir); err == nil {
 		return args, builtInPresetByID(profile, transcoding.Detect(ctx)), nil
+	}
+	if profile == "av1_low_bitrate" || profile == "av1-preview" {
+		caps := transcoding.Detect(ctx)
+		preset := builtInPresetByID("av1_low_bitrate", caps)
+		if err := validateTranscodingPreset(preset, caps); err != nil {
+			return nil, catalog.TranscodingPreset{}, err
+		}
+		args, err := transcodeArgsForPreset(preset, inputPath, sessionDir)
+		return args, preset, err
 	}
 	custom, err := s.deps.Store.ListTranscodingPresets(ctx)
 	if err != nil {
@@ -548,7 +571,7 @@ func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePr
 	}
 	for _, preset := range custom {
 		if preset.ID == profile {
-			args, err := hlsArgsForPreset(preset, inputPath, sessionDir)
+			args, err := transcodeArgsForPreset(preset, inputPath, sessionDir)
 			return args, preset, err
 		}
 	}
@@ -558,14 +581,15 @@ func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePr
 func builtInTranscodingPresets(caps transcoding.Capabilities) []catalog.TranscodingPreset {
 	now := time.Now().UTC()
 	h264Available := caps.FFmpeg.Available && encoderAvailable(caps, "libx264")
-	av1Available := false
+	av1Encoder := chooseAV1Encoder(caps)
+	av1Available := caps.FFmpeg.Available && av1Encoder != ""
 	h264Disabled := ""
 	if !h264Available {
 		h264Disabled = "ffmpeg/libx264 is unavailable"
 	}
 	av1Disabled := ""
 	if !av1Available {
-		av1Disabled = "AV1 encoder is unavailable or not configured for browser-safe HLS"
+		av1Disabled = "No CPU AV1 encoder (libsvtav1, libaom-av1, or librav1e) is available in ffmpeg"
 	}
 	return []catalog.TranscodingPreset{
 		{
@@ -620,14 +644,23 @@ func builtInTranscodingPresets(caps transcoding.Capabilities) []catalog.Transcod
 			DisabledReason: av1Disabled,
 			Hardware:       "cpu",
 			Codec:          "av1",
-			FFmpegEncoder:  "libsvtav1",
+			FFmpegEncoder:  av1Encoder,
 			Mode:           "quality",
-			ParameterValue: "34",
-			Container:      "hls",
+			ParameterValue: "38",
+			Container:      "webm",
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		},
 	}
+}
+
+func chooseAV1Encoder(caps transcoding.Capabilities) string {
+	for _, encoder := range []string{"libsvtav1", "libaom-av1", "librav1e", "av1_qsv", "av1_nvenc", "av1_vaapi"} {
+		if encoderAvailable(caps, encoder) {
+			return encoder
+		}
+	}
+	return ""
 }
 
 func builtInPresetByID(profile string, caps transcoding.Capabilities) catalog.TranscodingPreset {
@@ -698,13 +731,60 @@ func hlsArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir st
 	return hlsArgsWithVideoAudio(inputPath, sessionDir, videoArgs, audioArgs), nil
 }
 
+func transcodeArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir string) ([]string, error) {
+	if strings.EqualFold(preset.Container, "webm") {
+		return webmArgsForPreset(preset, inputPath, sessionDir)
+	}
+	return hlsArgsForPreset(preset, inputPath, sessionDir)
+}
+
+func webmArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir string) ([]string, error) {
+	encoder := preset.FFmpegEncoder
+	if encoder == "" {
+		encoder = defaultEncoderForCodec(preset.Codec)
+	}
+	if !strings.Contains(strings.ToLower(encoder), "av1") {
+		return nil, fmt.Errorf("webm live-preview sessions currently require an AV1 encoder")
+	}
+	videoArgs := []string{"-c:v", encoder}
+	switch {
+	case strings.Contains(encoder, "svtav1"):
+		videoArgs = append(videoArgs, "-preset", "10", "-crf", safeNumericParameter(preset.ParameterValue, "38"))
+	case strings.Contains(encoder, "libaom"):
+		videoArgs = append(videoArgs, "-cpu-used", "8", "-row-mt", "1", "-crf", safeNumericParameter(preset.ParameterValue, "38"), "-b:v", "0")
+	case strings.Contains(encoder, "rav1e"):
+		videoArgs = append(videoArgs, "-speed", "10", "-qp", safeNumericParameter(preset.ParameterValue, "100"))
+	default:
+		videoArgs = append(videoArgs, "-b:v", safeBitrateParameter(preset.ParameterValue, "900k"))
+	}
+	videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2", "-pix_fmt", "yuv420p")
+	output := filepath.Join(sessionDir, "output.webm")
+	args := []string{"-hide_banner", "-nostdin", "-y", "-i", inputPath, "-map", "0:v:0", "-map", "0:a?"}
+	args = append(args, videoArgs...)
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		// libopus is broadly available in common ffmpeg builds; if not, ffmpeg exits with a clear stderr tail.
+		args = append(args, "-c:a", "libopus", "-b:a", "96k")
+	}
+	args = append(args, "-f", "webm", output)
+	return args, nil
+}
+
 func videoArgsForPreset(preset catalog.TranscodingPreset) ([]string, error) {
 	encoder := preset.FFmpegEncoder
 	if encoder == "" {
 		encoder = defaultEncoderForCodec(preset.Codec)
 	}
 	videoArgs := []string{"-c:v", encoder}
-	if strings.Contains(encoder, "nvenc") {
+	if strings.Contains(strings.ToLower(encoder), "av1") {
+		switch {
+		case strings.Contains(encoder, "svtav1"):
+			videoArgs = append(videoArgs, "-preset", "10")
+		case strings.Contains(encoder, "libaom"):
+			videoArgs = append(videoArgs, "-cpu-used", "8", "-row-mt", "1")
+		case strings.Contains(encoder, "rav1e"):
+			videoArgs = append(videoArgs, "-speed", "10")
+		}
+	} else if strings.Contains(encoder, "nvenc") {
 		videoArgs = append(videoArgs, "-preset", "p5")
 	} else {
 		videoArgs = append(videoArgs, "-preset", "veryfast")

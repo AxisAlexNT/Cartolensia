@@ -87,7 +87,7 @@ The guarded real-peek scripts use a temporary PostgreSQL Compose project, repo-l
 
 ## Media And External Tools
 
-ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery or core startup. Stream options expose direct original streaming by default. If ffmpeg is available, cache-scoped HLS transcode sessions can be started manually; generated HLS files stay under the configured Cartolensia cache directory and must never be written into original storage.
+ffprobe and ffmpeg are detected best-effort. Missing tools do not fail discovery or core startup. Stream options expose direct original streaming by default. If ffmpeg is available, cache-scoped transcode sessions can be started manually. H.264 profiles use HLS. AV1 profiles use a browser-oriented WebM route when a compatible encoder such as `libsvtav1` is available. Generated transcode files stay under the configured Cartolensia cache directory and must never be written into original storage.
 
 Transcoding preset records are metadata only. Built-in presets cannot be deleted, custom presets are validated before use, and session output is scoped to the configured transcode cache. The browser uses locally bundled `hls.js` where native HLS playback is unavailable; it does not fetch player code from a CDN.
 
@@ -129,7 +129,7 @@ Current added dependency notes:
 - Sidecar plugin health probing is a stub and sidecar execution is not implemented.
 - Real archive scan procedures must be supervised and bounded until rescan/missing-file semantics are fully hardened.
 - The OSM tile cache depends on network availability unless the tiles have already been viewed and cached; future fully-offline tile packs are not implemented yet.
-- HLS playback now uses native browser HLS where available and locally bundled `hls.js` elsewhere, but manual browser testing across Chromium/Firefox/Safari is still required.
+- HLS playback now uses native browser HLS where available and locally bundled `hls.js` elsewhere. AV1 preview playback uses cache-scoped `video/webm` output with Range support when the session has finished. Manual browser testing across Chromium/Firefox/Safari is still required.
 
 ## 2026-06-07 Safety Notes
 

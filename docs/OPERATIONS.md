@@ -351,6 +351,8 @@ Settings path fields can use the server-side file/folder picker. The picker is r
 
 - Face Gallery reviews local face detections and provisional/local clusters only. Naming or ignoring a detection updates Cartolensia metadata and does not identify a person or modify media originals.
 - Geo Align sessions are scoped to selected/current assets and optional selected tracks. Applying a session writes a Cartolensia DB geotag override only. `write-exif` is disabled for `strict_read_only` storage and should remain disabled for real-peek.
+- Manual face rectangles and deleted/ignored face flags are metadata-only edits. They never delete, move, or rewrite original files.
+- AV1 preview sessions write WebM output only under the configured transcode cache. The current live validation used `.cartolensia/realpeek-cache/transcode/.../output.webm` and did not write to original storage.
 - Video Track Player sessions require a reliable media timestamp plus selected track timestamps. If a video lacks `taken_at`, the UI should report that synchronization needs a user-provided start/end time or offset.
 - AV1 live playback is currently disabled for HLS sessions unless a verified browser-compatible encoder/container path exists. Prefer H.264/NVENC for interactive streaming.
 - Transcoding metrics can report `ssim` and `psnr` with the current ffmpeg build. `libvmaf` requires an ffmpeg build with the `libvmaf` filter.

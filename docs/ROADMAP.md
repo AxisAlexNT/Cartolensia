@@ -146,6 +146,9 @@ Next:
 
 - Replace provisional face grouping with embedding-based local clustering and merge/split review workflows.
 - Make Geo Align sessions durable and add the full OpenLayers shift-drag marker editor.
+- Harden face clustering with embedding-based merge/split workflows, representative crops, and better user review queues.
+- Promote AV1 WebM preview into durable queued AV1 jobs for longer videos while keeping direct/original and H.264 HLS as fast live paths.
+- Add browser automation for OSM tile visibility, track vector overlays, face rectangles, and AV1/HLS playback controls.
 - Add user-provided video start/end timestamp controls for reliable video-track synchronization.
 - Implement a verified AV1 browser playback route with WebM or fragmented MP4 when encoders and browser support are confirmed.
 - Add browser automation for gallery track previews, map cluster popups, modal focus/backdrop behavior, and face review.

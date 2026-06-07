@@ -460,11 +460,43 @@ td {
   position: relative;
 }
 
+.asset-photo-workbench {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  width: 100%;
+}
+
+.face-toolbar,
+.face-add-panel {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.face-add-panel {
+  background: #f6f8fa;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.face-add-panel label {
+  display: grid;
+  gap: 4px;
+}
+
 .asset-photo-frame img {
   border-radius: 8px;
   display: block;
   max-height: 72vh;
   max-width: 100%;
+}
+
+.asset-photo-frame.drawing {
+  cursor: crosshair;
 }
 
 .face-box {
@@ -476,6 +508,64 @@ td {
 
 .face-box.ignored {
   border-color: rgba(110, 118, 129, 0.85);
+}
+
+.face-box.selected {
+  border-color: #2f81f7;
+  box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.5), 0 0 12px rgba(47, 129, 247, 0.75);
+}
+
+.face-box.draft {
+  background: rgba(47, 129, 247, 0.14);
+  border-color: #2f81f7;
+  border-style: dashed;
+}
+
+.face-record-list {
+  display: grid;
+  gap: 10px;
+  max-height: 460px;
+  overflow: auto;
+}
+
+.face-record-card {
+  align-items: center;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 72px minmax(130px, 1fr) auto auto auto;
+  padding: 8px;
+}
+
+.face-record-card.selected {
+  border-color: #0969da;
+  box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.16);
+}
+
+.face-record-preview {
+  border: 0;
+  border-radius: 6px;
+  height: 54px;
+  overflow: hidden;
+  padding: 0;
+  width: 72px;
+}
+
+.face-record-preview img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.face-record-name {
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .face-record-card {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
 }
 
 .video-panel select,
@@ -1035,7 +1125,7 @@ td {
   color: inherit;
   display: grid;
   gap: 4px 10px;
-  grid-template-columns: 40px 1fr;
+  grid-template-columns: 54px 1fr;
   padding: 10px;
   text-align: left;
 }
@@ -1046,7 +1136,7 @@ td {
   box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.12);
 }
 
-.face-cluster-icon {
+.face-cluster-preview {
   align-items: center;
   background: #ddf4ff;
   border: 1px solid #54aeef;
@@ -1055,9 +1145,16 @@ td {
   display: inline-flex;
   font-size: 20px;
   grid-row: span 3;
-  height: 40px;
+  height: 54px;
   justify-content: center;
-  width: 40px;
+  overflow: hidden;
+  width: 54px;
+}
+
+.face-cluster-preview img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
 }
 
 .face-cluster-detail {
@@ -1066,6 +1163,31 @@ td {
 
 .cluster-name-editor {
   max-width: 460px;
+}
+
+.face-asset-grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
+  padding-left: 0;
+}
+
+.face-asset-tile {
+  min-height: 0;
+}
+
+.face-detection-details {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.face-table-thumb {
+  border-radius: 6px;
+  height: 42px;
+  object-fit: cover;
+  width: 56px;
+}
+
+.compact-search {
+  margin: 0 0 12px;
 }
 
 @media (max-width: 900px) {
@@ -1078,6 +1200,27 @@ td {
   }
 }
 
+.geo-align-layout {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+}
+
+.geo-align-sidebar {
+  align-self: start;
+  position: sticky;
+  top: 12px;
+}
+
+.geo-align-main {
+  min-width: 0;
+}
+
+.alignment-map-shell {
+  min-height: 620px;
+}
+
+.alignment-ol-map,
 .alignment-map-preview {
   background:
     linear-gradient(rgba(9, 105, 218, 0.08) 1px, transparent 1px),
@@ -1090,6 +1233,17 @@ td {
   overflow: hidden;
   position: relative;
   width: 100%;
+}
+
+.alignment-ol-map {
+  height: 620px;
+}
+
+.alignment-dom-markers {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 8;
 }
 
 .alignment-marker {
@@ -1106,6 +1260,7 @@ td {
   transform: translate(-50%, -50%);
   width: 30px;
   z-index: 3;
+  pointer-events: auto;
 }
 
 .alignment-marker img {
@@ -1128,6 +1283,28 @@ td {
 
 .alignment-marker.modified {
   box-shadow: 0 0 0 4px rgba(255, 211, 61, 0.55), 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+.modified-list {
+  border-top: 1px solid #d8dee4;
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+}
+
+.compact-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+@media (max-width: 980px) {
+  .geo-align-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .geo-align-sidebar {
+    position: static;
+  }
 }
 
 .video-track-split {
@@ -1274,6 +1451,38 @@ td {
   width: 100%;
 }
 
+.track-vector-fallback {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 3;
+}
+
+.track-vector-fallback path {
+  fill: none;
+  stroke: #ffd33d;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 4;
+  paint-order: stroke;
+  filter: drop-shadow(0 0 5px rgba(0, 0, 0, 0.85));
+}
+
+.track-point-popup {
+  background: rgba(13, 17, 23, 0.92);
+  border: 1px solid rgba(240, 246, 252, 0.18);
+  border-radius: 8px;
+  color: #f0f6fc;
+  display: grid;
+  gap: 6px;
+  left: 16px;
+  max-width: min(360px, calc(100% - 32px));
+  padding: 12px;
+  position: absolute;
+  top: 16px;
+  z-index: 12;
+}
+
 .track-profiles {
   display: grid;
   gap: 10px;
@@ -1378,6 +1587,56 @@ td {
 
 .settings-page .settings-tabs {
   background: #f6f8fa;
+}
+
+.search-hero {
+  align-items: end;
+  background: #ffffff;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 16px;
+  padding: 14px;
+}
+
+.search-hero label {
+  display: grid;
+  gap: 6px;
+}
+
+.search-hero input {
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  font: inherit;
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.search-results-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1.4fr) minmax(300px, 0.8fr);
+  padding: 0 16px 16px;
+}
+
+.search-result-tiles {
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  padding: 0;
+}
+
+.tile-media video {
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+@media (max-width: 980px) {
+  .search-hero,
+  .search-results-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .highlight-card {

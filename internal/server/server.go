@@ -226,6 +226,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/safety/", s.handleAISafetyByAsset)
 	s.mux.HandleFunc("/api/v1/faces/clusters", s.handleFaceClusters)
 	s.mux.HandleFunc("/api/v1/faces/clusters/", s.handleFaceClusterByID)
+	s.mux.HandleFunc("/api/v1/faces/detections", s.handleFaceDetections)
 	s.mux.HandleFunc("/api/v1/faces/detections/", s.handleFaceDetectionByID)
 	s.mux.HandleFunc("/api/v1/vector/status", s.handleVectorStatus)
 	s.mux.HandleFunc("/api/v1/search/vector", s.handleVectorSearch)
@@ -1190,6 +1191,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Matched     []string      `json:"matched"`
 		Explanation string        `json:"explanation"`
 	}
+	type trackResult struct {
+		Track       catalog.TrackSummary `json:"track"`
+		Matched     []string             `json:"matched"`
+		Explanation string               `json:"explanation"`
+	}
 	all := make([]result, 0, len(page.Assets))
 	for _, asset := range page.Assets {
 		matched := assetSearchMatches(asset, tokens, searchCtx)
@@ -1197,6 +1203,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		all = append(all, result{Asset: asset, Matched: matched, Explanation: searchExplanation(matched)})
+	}
+	trackMatches := []trackResult{}
+	if tracks, err := s.deps.Store.ListGPSTracks(r.Context(), catalog.GPSTrackQuery{Limit: 1000}); err == nil {
+		for _, track := range tracks {
+			matched := trackSearchMatches(track, tokens)
+			if len(tokens) > 0 && len(matched) == 0 {
+				continue
+			}
+			trackMatches = append(trackMatches, trackResult{Track: track, Matched: matched, Explanation: searchExplanation(matched)})
+		}
 	}
 	total := len(all)
 	if offset >= len(all) {
@@ -1212,6 +1228,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"query":    raw,
 		"tokens":   tokens,
 		"results":  all,
+		"tracks":   trackMatches,
 		"warnings": searchWarnings(tokens),
 		"page":     catalog.Page{Limit: limit, Offset: offset, Total: total},
 	})
@@ -1237,14 +1254,15 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 	for _, token := range tokens {
 		prefix, plain, ok := strings.Cut(token, ":")
 		if !ok {
-			continue
+			prefix = ""
+			plain = token
 		}
 		plain = strings.TrimSpace(strings.ToLower(plain))
 		if plain == "" {
 			continue
 		}
 		switch prefix {
-		case "album":
+		case "", "album":
 			matches := map[string]struct{}{}
 			albums, err := s.deps.Store.ListAlbums(ctx, catalog.AlbumQuery{Tree: true, Limit: 1000})
 			if err == nil {
@@ -1261,7 +1279,13 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 					}
 				}
 			}
-			out.albumAssetMatches[token] = matches
+			if len(matches) > 0 || prefix == "album" {
+				out.albumAssetMatches[token] = matches
+			}
+			if prefix != "" {
+				break
+			}
+			fallthrough
 		case "track":
 			matches := map[string]struct{}{}
 			tracks, err := s.deps.Store.ListGPSTracks(ctx, catalog.GPSTrackQuery{Limit: 1000})
@@ -1272,7 +1296,13 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 					}
 				}
 			}
-			out.trackNameMatches[token] = matches
+			if len(matches) > 0 || prefix == "track" {
+				out.trackNameMatches[token] = matches
+			}
+			if prefix != "" {
+				break
+			}
+			fallthrough
 		case "tag", "category", "safety", "caption", "face":
 			if indexedAssets == nil {
 				page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: 1000})
@@ -1281,13 +1311,30 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 				}
 			}
 			matches := map[string]struct{}{}
+			faceMatches := map[string]struct{}{}
 			for _, asset := range indexedAssets {
-				if prefix == "face" {
+				if prefix == "face" || prefix == "" {
 					faces, err := s.deps.Store.ListFaceDetections(ctx, asset.ID)
-					if err == nil && len(faces) > 0 && (plain == "" || plain == "detected" || plain == "yes") {
-						matches[asset.ID] = struct{}{}
+					if err == nil && len(faces) > 0 {
+						for _, face := range faces {
+							if metadataBool(face.Metadata, "ignored") || metadataBool(face.Metadata, "deleted") {
+								continue
+							}
+							label := strings.ToLower(strings.Join([]string{
+								"face detected yes unassigned",
+								face.ClusterID,
+								stringFromMap(face.Metadata, "label"),
+								stringFromMap(face.Metadata, "name"),
+								stringFromMap(face.Metadata, "review_status"),
+							}, " "))
+							if plain == "" || strings.Contains(label, plain) {
+								faceMatches[asset.ID] = struct{}{}
+							}
+						}
 					}
-					continue
+					if prefix == "face" {
+						continue
+					}
 				}
 				tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
 				for _, tag := range tags {
@@ -1304,11 +1351,12 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 					}
 				}
 			}
-			if prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" {
+			if prefix == "" || prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" {
 				out.tagMatches[token] = matches
 				out.predictionMatches[token] = matches
+				out.faceMatches[token] = faceMatches
 			} else {
-				out.faceMatches[token] = matches
+				out.faceMatches[token] = faceMatches
 			}
 		}
 	}
@@ -2656,14 +2704,114 @@ func (s *Server) handleFaceClusterByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cluster)
 }
 
-func (s *Server) handleFaceDetectionByID(w http.ResponseWriter, r *http.Request) {
-	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/faces/detections/"), "/")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" {
+func (s *Server) handleFaceDetections(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/v1/faces/detections" {
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "faces.detection.write") {
+		return
+	}
+	var req struct {
+		AssetID    string  `json:"asset_id"`
+		X          float64 `json:"x"`
+		Y          float64 `json:"y"`
+		Width      float64 `json:"width"`
+		Height     float64 `json:"height"`
+		Confidence float64 `json:"confidence"`
+		Label      string  `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.AssetID = strings.TrimSpace(req.AssetID)
+	if req.AssetID == "" || req.Width <= 0 || req.Height <= 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("asset_id and positive face rectangle dimensions are required"))
+		return
+	}
+	if _, err := s.deps.Store.GetAsset(r.Context(), req.AssetID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	confidence := req.Confidence
+	if confidence <= 0 || confidence > 1 {
+		confidence = 1
+	}
+	label := strings.TrimSpace(req.Label)
+	clusterID := ""
+	if label != "" {
+		cluster, err := s.deps.Store.UpsertFaceCluster(r.Context(), catalog.FaceCluster{
+			Label:    label,
+			Metadata: map[string]any{"manual": true, "local_only": true},
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		clusterID = cluster.ID
+	}
+	confidencePtr := confidence
+	face, err := s.deps.Store.CreateFaceDetection(r.Context(), catalog.FaceDetection{
+		ID:         id.NewUUID(),
+		AssetID:    req.AssetID,
+		PluginID:   "manual_face",
+		X:          req.X,
+		Y:          req.Y,
+		Width:      req.Width,
+		Height:     req.Height,
+		Confidence: &confidencePtr,
+		ClusterID:  clusterID,
+		Metadata: map[string]any{
+			"manual":        true,
+			"label":         label,
+			"review_status": "manual",
+			"local_only":    true,
+		},
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if clusterID != "" {
+		_, _ = s.deps.Store.UpsertFaceCluster(r.Context(), catalog.FaceCluster{
+			ID:                   clusterID,
+			Label:                label,
+			RepresentativeFaceID: face.ID,
+			Metadata:             map[string]any{"manual": true, "local_only": true},
+		})
+	}
+	writeJSON(w, http.StatusCreated, face)
+}
+
+func (s *Server) handleFaceDetectionByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/faces/detections/"), "/")
+	parts := strings.Split(path, "/")
+	if (len(parts) != 1 && len(parts) != 2) || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		if !s.requireWrite(w, r, "faces.detection.write") {
+			return
+		}
+		face, err := s.updateFaceDetectionMetadata(r.Context(), parts[0], map[string]any{"ignored": true, "deleted": true, "review_status": "deleted"})
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, catalog.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, face)
+		return
+	}
+	if len(parts) != 2 || r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
 	}
@@ -2775,10 +2923,12 @@ func (s *Server) faceClusterSummaries(ctx context.Context) ([]catalog.FaceCluste
 		storedByID[cluster.ID] = cluster
 	}
 	type aggregate struct {
-		cluster   catalog.FaceCluster
-		assetIDs  map[string]struct{}
-		faceIDs   []string
-		createdAt time.Time
+		cluster               catalog.FaceCluster
+		assetIDs              map[string]struct{}
+		faceIDs               []string
+		createdAt             time.Time
+		representativeAssetID string
+		representativeBox     map[string]any
 	}
 	groups := map[string]*aggregate{}
 	for _, face := range faces {
@@ -2808,6 +2958,10 @@ func (s *Server) faceClusterSummaries(ctx context.Context) ([]catalog.FaceCluste
 		if group.cluster.RepresentativeFaceID == "" {
 			group.cluster.RepresentativeFaceID = face.ID
 		}
+		if group.representativeAssetID == "" && !metadataBool(face.Metadata, "ignored") {
+			group.representativeAssetID = face.AssetID
+			group.representativeBox = map[string]any{"x": face.X, "y": face.Y, "width": face.Width, "height": face.Height, "confidence": face.Confidence}
+		}
 		if group.createdAt.IsZero() || face.CreatedAt.Before(group.createdAt) {
 			group.createdAt = face.CreatedAt
 		}
@@ -2827,6 +2981,13 @@ func (s *Server) faceClusterSummaries(ctx context.Context) ([]catalog.FaceCluste
 		}
 		group.cluster.Metadata["face_ids"] = group.faceIDs
 		group.cluster.Metadata["provisional"] = strings.HasPrefix(id, "asset:")
+		if group.representativeAssetID != "" {
+			group.cluster.Metadata["representative_asset_id"] = group.representativeAssetID
+			group.cluster.Metadata["representative_box"] = group.representativeBox
+			if asset, err := s.deps.Store.GetAsset(ctx, group.representativeAssetID); err == nil {
+				group.cluster.Metadata["representative_asset_name"] = asset.DisplayName
+			}
+		}
 		assetsByCluster[id] = len(group.assetIDs)
 		clusters = append(clusters, group.cluster)
 	}
@@ -4818,9 +4979,6 @@ func assetSearchMatches(asset catalog.Asset, tokens []string, searchCtx assetSea
 	var matched []string
 	for _, token := range tokens {
 		fields := assetTokenMatches(asset, token, searchCtx)
-		if len(fields) == 0 {
-			return nil
-		}
 		matched = append(matched, fields...)
 	}
 	sort.Strings(matched)
@@ -4909,6 +5067,21 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 	if strings.Contains(strings.ToLower(asset.DisplayName), plain) {
 		out = append(out, "filename")
 	}
+	if _, ok := searchCtx.tagMatches[token][asset.ID]; ok {
+		out = append(out, "AI tag")
+	}
+	if _, ok := searchCtx.predictionMatches[token][asset.ID]; ok {
+		out = append(out, "AI prediction/caption/class")
+	}
+	if _, ok := searchCtx.albumAssetMatches[token][asset.ID]; ok {
+		out = append(out, "album")
+	}
+	if _, ok := searchCtx.trackNameMatches[token][asset.ID]; ok {
+		out = append(out, "track")
+	}
+	if _, ok := searchCtx.faceMatches[token][asset.ID]; ok {
+		out = append(out, "face")
+	}
 	if strings.Contains(strings.ToLower(asset.MediaKind), plain) {
 		out = append(out, "media kind")
 	}
@@ -4933,6 +5106,67 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 		}
 	}
 	return uniqueStrings(out)
+}
+
+func trackSearchMatches(track catalog.TrackSummary, tokens []string) []string {
+	if len(tokens) == 0 {
+		return []string{"all parsed tracks"}
+	}
+	var matched []string
+	text := strings.ToLower(strings.Join([]string{
+		track.TrackAssetID,
+		track.Name,
+		track.SourceFormat,
+		timePtrSearchString(track.StartTime),
+		timePtrSearchString(track.EndTime),
+	}, " "))
+	for _, token := range tokens {
+		plain := strings.ToLower(strings.TrimSpace(token))
+		if before, after, ok := strings.Cut(plain, ":"); ok {
+			if before != "track" && before != "type" && before != "kind" && before != "media" && before != "format" && before != "date" {
+				continue
+			}
+			plain = after
+		}
+		if plain == "" {
+			continue
+		}
+		if strings.Contains(text, plain) {
+			matched = append(matched, "track metadata")
+		}
+		if track.PointCount > 0 && strings.Contains(strconv.Itoa(track.PointCount), plain) {
+			matched = append(matched, "point count")
+		}
+		if track.DistanceM > 0 && strings.Contains(fmt.Sprintf("%.2f", track.DistanceM/1000), plain) {
+			matched = append(matched, "distance")
+		}
+	}
+	sort.Strings(matched)
+	return uniqueStrings(matched)
+}
+
+func timePtrSearchString(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.Format(time.RFC3339 + " 2006-01-02 2006-01 2006")
+}
+
+func stringFromMap(values map[string]any, key string) string {
+	if values == nil {
+		return ""
+	}
+	switch value := values[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		if value == nil {
+			return ""
+		}
+		return fmt.Sprint(value)
+	}
 }
 
 func assetMatchesDateRange(asset catalog.Asset, token string) bool {

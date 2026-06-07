@@ -446,6 +446,11 @@ export type StreamOption = {
   session_endpoint?: string;
   description?: string;
   disabled_reason?: string;
+  built_in?: boolean;
+  hardware?: string;
+  codec?: string;
+  mode?: string;
+  parameter_value?: string;
 };
 
 export type StreamOptions = {
@@ -492,6 +497,7 @@ export type TranscodeSession = {
   profile: string;
   hardware?: string;
   encoder?: string;
+  container?: string;
   playlist_url: string;
   status: string;
   created_at: string;
@@ -529,6 +535,7 @@ export type SearchResponse = {
   query: string;
   tokens: string[];
   results: SearchResult[];
+  tracks?: Array<{ track: TrackSummary; matched: string[]; explanation: string }>;
   warnings: string[];
   page: { limit: number; offset: number; total: number };
 };
@@ -968,8 +975,23 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
+  createFaceDetection: (payload: {
+    asset_id: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    confidence?: number;
+    label?: string;
+  }) =>
+    request<FaceDetection>("/api/v1/faces/detections", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   ignoreFaceDetection: (detectionId: string) =>
     request<FaceDetection>(`/api/v1/faces/detections/${encodeURIComponent(detectionId)}/ignore`, { method: "POST" }),
+  deleteFaceDetection: (detectionId: string) =>
+    request<FaceDetection>(`/api/v1/faces/detections/${encodeURIComponent(detectionId)}`, { method: "DELETE" }),
   createGeoAlignSession: (payload: { asset_ids?: string[]; track_ids?: string[]; limit?: number }) =>
     request<GeoAlignSession>("/api/v1/geo-align/session", { method: "POST", body: JSON.stringify(payload) }),
   getGeoAlignSession: (id: string) => request<GeoAlignSession>(`/api/v1/geo-align/sessions/${encodeURIComponent(id)}`),

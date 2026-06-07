@@ -2148,3 +2148,90 @@ Passed:
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+## 2026-06-07 Geo Align/Faces/Tracks/AV1/Search Stabilization
+
+### Scope
+
+- Focused run against the current live real-peek service and existing temporary PostgreSQL data.
+- Fixed the user-visible issues on Geo Align, Face Gallery/asset faces, GPS/KML track detail maps, AV1 playback/transcoding, and universal search.
+- No new real-data scan was run.
+- PostgreSQL was not reset.
+
+### Implemented
+
+- Geo Align page:
+  - replaced the static grid-only preview with an OpenLayers map using the existing Cartolensia OSM tile proxy;
+  - added a left sidebar with scope, track IDs, layer toggles, status legend, session metrics, DB-only apply controls, and modified-media list;
+  - added photo/video marker thumbnails directly in the OpenLayers marker layer;
+  - kept Write EXIF disabled in strict-read-only real-peek mode.
+- GPS/KML track detail and track previews:
+  - forced OSM tile visibility defaults back on for track preview contexts;
+  - added a fallback SVG track path rendered from the same GeoJSON so track geometry remains visible even if OpenLayers tiles or sizing fail;
+  - added repeated `updateSize()`/fit calls after the map target and vector features settle;
+  - added click-to-point-info on the track detail map, returning clicked coordinates, nearest point, distance, timestamp/relative time when available, speed, and elevation.
+- Face Gallery and asset face management:
+  - face-folder cards now include representative image previews from cluster metadata;
+  - fixed face asset tile layout so images/text/buttons stay inside the tile;
+  - added a face search field on Face Gallery;
+  - asset detail now has an optional face-rectangle toggle;
+  - asset detail now has a scrollable face record list with thumbnail, name, confidence, and a Delete action;
+  - selecting a face record highlights the rectangle on the image;
+  - clicking a face name or thumbnail opens the corresponding Face Gallery folder;
+  - added manual face rectangle drawing on asset detail and a backend endpoint to save the new detection/name as metadata;
+  - Delete marks a detection ignored/deleted in metadata rather than touching originals.
+- Universal Search:
+  - added a Search page and sidebar entry;
+  - search accepts plain words and searches filenames, paths, extensions, hashes, dates, EXIF/camera metadata, tags/categories, AI predictions/captions, albums, faces, and GPS/KML tracks;
+  - `/api/v1/search` now returns both multimedia results and track results with match explanations;
+  - search uses inclusive plain-token matching so a simple word returns anything matching by at least one metadata surface.
+- AV1 playback/transcoding:
+  - AV1 presets are now enabled when ffmpeg exposes a software or hardware AV1 encoder;
+  - current machine detects `libsvtav1`, so the built-in AV1 preset is available as CPU/WebM;
+  - AV1 no longer uses the broken HLS route. It creates a cache-scoped WebM output and the frontend switches to that browser URL only after the session is ready/finished;
+  - H.264/NVENC HLS routes remain unchanged.
+
+### Live Validation
+
+- `GET /api/v1/health`: `ok`.
+- `GET /api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks.
+- `GET /api/v1/map/status`: `48` geotagged assets, `4` track geometries, Cartolensia OSM tile proxy enabled.
+- `GET /api/v1/media/56ff84bf-b7ae-4f23-baf4-ea0e6b5d633f/track-preview?max_points=1200`: returned one LineString feature with non-empty coordinates for the KML track.
+- `GET /api/v1/gps/tracks/56ff84bf-b7ae-4f23-baf4-ea0e6b5d633f/point-info?lat=40.19&lon=44.49`: returned nearest point details, distance, timestamp, relative time, speed, and elevation.
+- `GET /api/v1/search?q=jpg&limit=5`: returned photo media results matched by extension/filename/path.
+- `GET /api/v1/search?q=20260516&limit=5`: returned photo/track media plus track result rows.
+- `GET /api/v1/faces/clusters`: returned face folders with representative asset IDs/names for card previews.
+- `GET /api/v1/media/ce8b4866-33bd-474e-84ab-a0fd9388a313/stream-options`: returned AV1 low bitrate as available, CPU, `libsvtav1`, WebM.
+- `POST /api/v1/media/ce8b4866-33bd-474e-84ab-a0fd9388a313/transcode-session` with `av1_low_bitrate`: succeeded on the current 7-second video.
+- `GET /api/v1/media/transcode-sessions/86955015-121d-4d4a-93fa-36beb5dcc77b/output.webm`: returned `Content-Type: video/webm`, `Accept-Ranges: bytes`, `Content-Length: 5679003`.
+
+### Verification
+
+Passed:
+
+- `gofmt -w internal/server/server.go internal/server/transcode_sessions.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -p cartolensia_realpeek -f docker-compose.yml -f docker-compose.dev.yml ps`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+### Known Limitations
+
+- Face folders are still provisional until embedding-based merge/split clustering is hardened.
+- Manual face creation uses the displayed image coordinate model; browser inspection should verify rectangles line up on all image aspect ratios.
+- Geo Align has OpenLayers markers and sidebar controls; shift-drag map editing remains a future hardening target.
+- AV1 WebM works for the current short sample. Longer videos may need a durable queued job/offline mode rather than waiting in a request path.
+- Browser automation was not run; manual inspection should verify map tile visibility, face rectangle editing, and AV1 playback controls.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, AI models, previews, tiles, exports, database files, or caches were written under `/mnt/Models/rclone`.
+- The AV1 test wrote only to `.cartolensia/realpeek-cache/transcode/86955015-121d-4d4a-93fa-36beb5dcc77b/output.webm`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.

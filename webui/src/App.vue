@@ -9,7 +9,9 @@ import Overlay from "ol/Overlay";
 import VectorSource from "ol/source/Vector";
 import XYZ from "ol/source/XYZ";
 import { fromLonLat, toLonLat } from "ol/proj";
-import { Circle as CircleStyle, Fill, Stroke, Style, Text } from "ol/style";
+import Feature from "ol/Feature";
+import Point from "ol/geom/Point";
+import { Circle as CircleStyle, Fill, Icon, Stroke, Style, Text } from "ol/style";
 import Hls from "hls.js";
 import "ol/ol.css";
 import {
@@ -70,6 +72,7 @@ const nav = [
   "Base AI",
   "AI Classification",
   "Face Gallery",
+  "Search",
   "Geo Align",
   "Video Track Player"
 ];
@@ -95,6 +98,8 @@ const navPageAliases: Record<string, string> = {
   "ai-classification": "AI Classification",
   faces: "Face Gallery",
   "face-gallery": "Face Gallery",
+  search: "Search",
+  "universal-search": "Search",
   "geo-align": "Geo Align",
   "video-track-player": "Video Track Player"
 };
@@ -136,6 +141,7 @@ function navIcon(label: string): string {
     "Base AI": "bi-cpu",
     "AI Classification": "bi-tags",
     "Face Gallery": "bi-person-bounding-box",
+    Search: "bi-search-heart",
     "Geo Align": "bi-crosshair",
     "Video Track Player": "bi-play-btn"
   };
@@ -155,6 +161,11 @@ const explorerExtension = ref("");
 const explorerSort = ref("name");
 const searchResults = ref<SearchResult[]>([]);
 const searchWarnings = ref<string[]>([]);
+const universalSearchQ = ref("");
+const universalSearchResults = ref<SearchResult[]>([]);
+const universalSearchTrackResults = ref<Array<{ track: TrackSummary; matched: string[]; explanation: string }>>([]);
+const universalSearchWarnings = ref<string[]>([]);
+const universalSearchMessage = ref("");
 const assetDetail = ref<AssetDetail | null>(null);
 const jobs = ref<Job[]>([]);
 const jobStats = ref<JobStats | null>(null);
@@ -224,20 +235,30 @@ const mapElement = ref<HTMLDivElement | null>(null);
 const mapPopupElement = ref<HTMLDivElement | null>(null);
 const galleryTrackElement = ref<HTMLDivElement | null>(null);
 const selectedTrackMapElement = ref<HTMLDivElement | null>(null);
+const geoAlignMapElement = ref<HTMLDivElement | null>(null);
 const assetVideoElement = ref<HTMLVideoElement | null>(null);
 const galleryVideoElement = ref<HTMLVideoElement | null>(null);
 const showMapDebug = ref(localStorage.getItem("cartolensia.map.showDebug") === "true");
 const showMapLayerMenu = ref(false);
 const showSelectedTrackLayerMenu = ref(false);
 const showGalleryTrackLayerMenu = ref(false);
+const showGeoAlignLayerMenu = ref(false);
 const mapTilesVisible = ref(localStorage.getItem("cartolensia.map.tilesVisible") !== "false");
 const mapTracksVisible = ref(localStorage.getItem("cartolensia.map.tracksVisible") !== "false");
 const mapAssetsVisible = ref(localStorage.getItem("cartolensia.map.assetsVisible") !== "false");
-const trackPreviewTilesEnabled = ref(localStorage.getItem("cartolensia.trackPreview.tilesVisible") !== "false");
+const trackPreviewTilesEnabled = ref(true);
 const selectedTrackLayerVisible = ref(true);
 const galleryTrackLayerVisible = ref(true);
+const geoAlignTilesVisible = ref(true);
+const geoAlignTrackLayerVisible = ref(true);
+const geoAlignMarkerLayerVisible = ref(true);
 const selectedTrackPreviewStatus = ref("");
 const galleryTrackPreviewStatus = ref("");
+const selectedTrackFallbackPath = ref("");
+const galleryTrackFallbackPath = ref("");
+const selectedTrackPointInfo = ref<TrackPointInfo | null>(null);
+const selectedTrackPointMessage = ref("");
+const showSelectedTrackPointPopup = ref(false);
 let olMap: OLMap | null = null;
 let galleryTrackMap: OLMap | null = null;
 const galleryTrackSource = new VectorSource();
@@ -247,6 +268,13 @@ let selectedTrackMap: OLMap | null = null;
 const selectedTrackSource = new VectorSource();
 let selectedTrackTileLayer: TileLayer<XYZ> | null = null;
 let selectedTrackLayer: VectorLayer<VectorSource> | null = null;
+let selectedTrackClickBound = false;
+let geoAlignMap: OLMap | null = null;
+let geoAlignTileLayer: TileLayer<XYZ> | null = null;
+let geoAlignTrackLayer: VectorLayer<VectorSource> | null = null;
+let geoAlignMarkerLayer: VectorLayer<VectorSource> | null = null;
+const geoAlignTrackSource = new VectorSource();
+const geoAlignMarkerSource = new VectorSource();
 let mapOverlay: Overlay | null = null;
 let activeHls: Hls | null = null;
 let mapHasInitialFit = false;
@@ -286,6 +314,14 @@ const faceClusterAssets = ref<Asset[]>([]);
 const faceClusterDetections = ref<FaceDetection[]>([]);
 const faceGalleryMessage = ref("");
 const faceClusterNameDraft = ref("");
+const faceSearchQ = ref("");
+const showAssetFaceBoxes = ref(localStorage.getItem("cartolensia.asset.showFaceBoxes") !== "false");
+const selectedAssetFaceId = ref("");
+const faceAddMode = ref(false);
+const newFaceName = ref("");
+const newFaceConfidence = ref(1);
+const newFaceDraftBox = ref<{ x: number; y: number; width: number; height: number } | null>(null);
+let faceDraftStart: { x: number; y: number } | null = null;
 const geoAlignSession = ref<GeoAlignSession | null>(null);
 const geoAlignMessage = ref("");
 const geoAlignTrackIds = ref("");
@@ -495,6 +531,25 @@ const aiPredictions = computed(() => asArray((aiPredictionPayload.value?.predict
 const aiFaces = computed(() => asArray((aiFacePayload.value?.faces as unknown[]) ?? []));
 const aiSafetyCandidates = computed(() => asArray((aiSafetyPayload.value?.candidates as unknown[]) ?? []));
 const faceClusters = computed(() => asArray(faceClustersPayload.value?.clusters));
+const filteredFaceClusters = computed(() => {
+  const query = faceSearchQ.value.trim().toLowerCase();
+  if (!query) return faceClusters.value;
+  return faceClusters.value.filter((cluster) => {
+    const metadata = cluster.metadata ?? {};
+    const text = [
+      cluster.label,
+      cluster.id,
+      metadata.representative_asset_name,
+      metadata.representative_asset_id,
+      metadata.provisional ? "provisional unassigned" : ""
+    ].join(" ").toLowerCase();
+    return text.includes(query);
+  });
+});
+const visibleAssetFaces = computed(() => {
+  const faces = asArray(assetDetail.value?.face_detections as unknown[]) as FaceDetection[];
+  return faces.filter((face) => !faceIgnored(face));
+});
 const filePickerRoots = computed(() => Object.values(filePicker.value?.roots ?? {}));
 
 const selectedAlbumItems = computed(() => asArray(albumItems.value?.items));
@@ -767,6 +822,7 @@ async function refreshGalleryTrackPreview() {
   if (!current || current.media_kind !== "track") {
     galleryTrackSource.clear();
     galleryTrackPreviewStatus.value = "";
+    galleryTrackFallbackPath.value = "";
     return;
   }
   await nextTick();
@@ -802,6 +858,7 @@ function renderGalleryTrackMap(preview: Record<string, unknown>) {
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   galleryTrackSource.clear();
   galleryTrackSource.addFeatures(features);
+  galleryTrackFallbackPath.value = trackFallbackPathFromPreview(preview);
   galleryTrackPreviewStatus.value = trackPreviewStatus(preview, features.length);
   galleryTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
   galleryTrackLayer?.setVisible(galleryTrackLayerVisible.value);
@@ -813,6 +870,7 @@ async function refreshSelectedTrackMap() {
   if (!detail) {
     selectedTrackSource.clear();
     selectedTrackPreviewStatus.value = "";
+    selectedTrackFallbackPath.value = "";
     return;
   }
   await nextTick();
@@ -842,16 +900,191 @@ function renderSelectedTrackMap(preview: Record<string, unknown>) {
       layers: [selectedTrackTileLayer, selectedTrackLayer],
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
     });
+    if (!selectedTrackClickBound) {
+      selectedTrackClickBound = true;
+      selectedTrackMap.on("singleclick", (event) => {
+        void loadSelectedTrackPointInfo(event.coordinate);
+      });
+    }
   } else {
     selectedTrackMap.setTarget(selectedTrackMapElement.value);
   }
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   selectedTrackSource.clear();
   selectedTrackSource.addFeatures(features);
+  selectedTrackFallbackPath.value = trackFallbackPathFromPreview(preview);
   selectedTrackPreviewStatus.value = trackPreviewStatus(preview, features.length);
   selectedTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
   selectedTrackLayer?.setVisible(selectedTrackLayerVisible.value);
   refitTrackMapWhenStable(selectedTrackMap, selectedTrackSource, fitSelectedTrack);
+}
+
+async function loadSelectedTrackPointInfo(coordinate: number[]) {
+  if (!selectedTrack.value) return;
+  const lonLat = toLonLat(coordinate);
+  selectedTrackPointMessage.value = "Loading track point details...";
+  showSelectedTrackPointPopup.value = true;
+  selectedTrackPointInfo.value = null;
+  try {
+    selectedTrackPointInfo.value = await api.gpsTrackPointInfo(
+      selectedTrack.value.summary.track_asset_id,
+      Number(lonLat[1]),
+      Number(lonLat[0])
+    );
+    selectedTrackPointMessage.value = "";
+  } catch (err) {
+    selectedTrackPointMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function trackFallbackPathFromPreview(preview: Record<string, unknown>): string {
+  const coordinates = trackPreviewCoordinates(preview);
+  if (coordinates.length === 0) return "";
+  const lons = coordinates.map((point) => point[0]);
+  const lats = coordinates.map((point) => point[1]);
+  const minLon = Math.min(...lons);
+  const maxLon = Math.max(...lons);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const width = 1000;
+  const height = 420;
+  const pad = 26;
+  const lonRange = Math.max(0.000001, maxLon - minLon);
+  const latRange = Math.max(0.000001, maxLat - minLat);
+  return coordinates
+    .map(([lon, lat], index) => {
+      const x = pad + ((lon - minLon) / lonRange) * (width - pad * 2);
+      const y = height - pad - ((lat - minLat) / latRange) * (height - pad * 2);
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
+function trackPreviewCoordinates(preview: Record<string, unknown>): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const features = asArray(preview.features as unknown[]);
+  for (const feature of features) {
+    const geometry = ((feature as Record<string, unknown>).geometry ?? {}) as Record<string, unknown>;
+    collectGeometryCoordinates(String(geometry.type ?? ""), geometry.coordinates, out);
+  }
+  return out;
+}
+
+function collectGeometryCoordinates(type: string, coordinates: unknown, out: Array<[number, number]>) {
+  if (type === "Point" && Array.isArray(coordinates) && coordinates.length >= 2) {
+    out.push([Number(coordinates[0]), Number(coordinates[1])]);
+    return;
+  }
+  if (type === "LineString" && Array.isArray(coordinates)) {
+    for (const point of coordinates) {
+      if (Array.isArray(point) && point.length >= 2) out.push([Number(point[0]), Number(point[1])]);
+    }
+    return;
+  }
+  if ((type === "MultiLineString" || type === "Polygon") && Array.isArray(coordinates)) {
+    for (const line of coordinates) collectGeometryCoordinates("LineString", line, out);
+  }
+}
+
+function ensureGeoAlignMap() {
+  if (!geoAlignMapElement.value) return;
+  if (!geoAlignMap) {
+    geoAlignTileLayer = createLocalOSMLayer(() => {
+      tileStatus.value = "Geo Align OSM tiles are unavailable; vector markers remain active.";
+    });
+    geoAlignTileLayer.setVisible(geoAlignTilesVisible.value);
+    geoAlignTrackLayer = new VectorLayer({
+      source: geoAlignTrackSource,
+      style: trackPreviewStyle
+    });
+    geoAlignMarkerLayer = new VectorLayer({
+      source: geoAlignMarkerSource,
+      style: (feature) => {
+        const status = String(feature.get("status") ?? "");
+        const modified = Boolean(feature.get("modified"));
+        const thumbnail = String(feature.get("thumbnail_url") ?? "");
+        const colors: Record<string, string> = {
+          own_geotag: "#1a7f37",
+          track_candidate: "#bf8700",
+          ungeotagged: "#cf222e"
+        };
+        const ring = new Style({
+          image: new CircleStyle({
+            radius: thumbnail ? (modified ? 18 : 15) : (modified ? 12 : 9),
+            fill: new Fill({ color: colors[status] ?? "#0969da" }),
+            stroke: new Stroke({ color: modified ? "#ffd33d" : "#ffffff", width: modified ? 4 : 2 })
+          })
+        });
+        if (!thumbnail) return ring;
+        return [
+          ring,
+          new Style({
+            image: new Icon({
+              src: thumbnail,
+              crossOrigin: "anonymous",
+              scale: 0.18
+            })
+          })
+        ];
+      }
+    });
+    geoAlignMap = new OLMap({
+      target: geoAlignMapElement.value,
+      layers: [geoAlignTileLayer, geoAlignTrackLayer, geoAlignMarkerLayer],
+      view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
+    });
+    geoAlignMap.on("singleclick", (event) => {
+      if (!geoAlignMap) return;
+      geoAlignMap.forEachFeatureAtPixel(
+        event.pixel,
+        (feature) => {
+          const assetID = String(feature.get("asset_id") ?? "");
+          if (assetID) void openAsset(assetID);
+          return true;
+        },
+        { layerFilter: (layer) => layer === geoAlignMarkerLayer }
+      );
+    });
+  } else {
+    geoAlignMap.setTarget(geoAlignMapElement.value);
+  }
+}
+
+async function refreshGeoAlignMap() {
+  await nextTick();
+  if (!geoAlignSession.value || !geoAlignMapElement.value) return;
+  ensureGeoAlignMap();
+  if (!geoAlignMap) return;
+  geoAlignTileLayer?.setVisible(geoAlignTilesVisible.value);
+  geoAlignTrackLayer?.setVisible(geoAlignTrackLayerVisible.value);
+  geoAlignMarkerLayer?.setVisible(geoAlignMarkerLayerVisible.value);
+  geoAlignMarkerSource.clear();
+  for (const marker of geoAlignSession.value.markers) {
+    geoAlignMarkerSource.addFeature(new Feature({
+      geometry: new Point(fromLonLat([marker.staged_lon, marker.staged_lat])),
+      asset_id: marker.asset_id,
+      name: marker.name,
+      status: marker.status,
+      modified: marker.modified,
+      thumbnail_url: marker.thumbnail_url ?? ""
+    }));
+  }
+  geoAlignTrackSource.clear();
+  for (const trackID of geoAlignSession.value.track_ids.slice(0, 6)) {
+    const preview = await api.trackPreview(trackID, 1200).catch(() => null);
+    if (!preview) continue;
+    geoAlignTrackSource.addFeatures(new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" }));
+  }
+  window.setTimeout(() => {
+    geoAlignMap?.updateSize();
+    const source = geoAlignTrackSource.getFeatures().length > 0 ? geoAlignTrackSource : geoAlignMarkerSource;
+    if (source.getFeatures().length > 0) {
+      const extent = source.getExtent();
+      if (extent) {
+        geoAlignMap?.getView().fit(extent, { padding: [34, 34, 34, 34], maxZoom: 16, duration: 140 });
+      }
+    }
+  }, 80);
 }
 
 function trackPreviewStatus(preview: Record<string, unknown>, renderedFeatures: number): string {
@@ -966,6 +1199,9 @@ function assetHasGeo(asset: AssetDetail["asset"]): boolean {
 }
 
 function videoSource(assetId: string, originalUrl?: string): string {
+  if (transcodeSession.value?.asset_id === assetId && transcodeSession.value.playlist_url && !transcodeSession.value.playlist_url.endsWith(".m3u8")) {
+    return transcodeSession.value.playlist_url;
+  }
   if (transcodeSession.value?.asset_id === assetId && transcodeSession.value.playlist_url && canPlayNativeHLS()) {
     return transcodeSession.value.playlist_url;
   }
@@ -1010,11 +1246,15 @@ async function selectTranscodeOption(assetId: string, event: Event) {
   transcodeMessage.value = "Starting cache-scoped transcode session...";
   try {
     transcodeSession.value = await api.startTranscodeSession(assetId, option.profile ?? option.id);
-    transcodeMessage.value = "Waiting for HLS playlist and first segment in the Cartolensia cache...";
+    transcodeMessage.value = option.codec === "av1"
+      ? "Encoding a cache-scoped AV1/WebM preview. This can take longer on CPU."
+      : "Waiting for HLS playlist and first segment in the Cartolensia cache...";
     transcodeSession.value = await waitForTranscodeReady(transcodeSession.value.id);
     await nextTick();
     await attachHLSPlayback();
-    transcodeMessage.value = "Streaming HLS from the Cartolensia cache. Originals remain immutable.";
+    transcodeMessage.value = transcodeSession.value.playlist_url.endsWith(".webm")
+      ? "Playing AV1/WebM from the Cartolensia transcode cache. Originals remain immutable."
+      : "Streaming HLS from the Cartolensia cache. Originals remain immutable.";
   } catch (err) {
     transcodeMessage.value = err instanceof Error ? err.message : String(err);
     await stopActiveTranscode();
@@ -1086,7 +1326,7 @@ function currentCustomTranscodePreset(): Partial<TranscodingPreset> {
 		ffmpeg_encoder: customPresetEncoder.value || availableEncodersForCustom.value[0]?.name || "",
 		mode: customPresetMode.value,
 		parameter_value: customPresetParameter.value,
-		container: "hls"
+		container: customPresetCodec.value === "av1" ? "webm" : "hls"
 	};
 }
 
@@ -1224,6 +1464,15 @@ async function attachHLSPlayback() {
   if (!session?.playlist_url) return;
   const video = galleryCurrent.value?.id === session.asset_id ? galleryVideoElement.value : assetVideoElement.value;
   if (!video) return;
+  if (!session.playlist_url.endsWith(".m3u8")) {
+    if (activeHls) {
+      activeHls.destroy();
+      activeHls = null;
+    }
+    video.src = session.playlist_url;
+    await video.play().catch(() => undefined);
+    return;
+  }
   if (canPlayNativeHLS()) {
     video.src = session.playlist_url;
     await video.play().catch(() => undefined);
@@ -1685,6 +1934,22 @@ async function runAIVectorSearch() {
   aiVectorResults.value = asArray((response as Record<string, unknown>).results as Record<string, unknown>[]);
 }
 
+async function runUniversalSearch() {
+  const query = universalSearchQ.value.trim();
+  if (!query) {
+    universalSearchMessage.value = "Enter a word, filename, date, camera, category, caption, tag, hash prefix, album, or track name.";
+    universalSearchResults.value = [];
+    universalSearchTrackResults.value = [];
+    return;
+  }
+  universalSearchMessage.value = "Searching indexed media and tracks...";
+  const response = await api.search(query, 200);
+  universalSearchResults.value = asArray(response.results);
+  universalSearchTrackResults.value = asArray(response.tracks);
+  universalSearchWarnings.value = asArray(response.warnings);
+  universalSearchMessage.value = `${universalSearchResults.value.length} media results · ${universalSearchTrackResults.value.length} track results`;
+}
+
 async function refreshFaceClusters() {
   faceClustersPayload.value = await api.faceClusters();
 }
@@ -1735,6 +2000,7 @@ async function startGeoAlignSession() {
     limit: 54
   });
   geoAlignMessage.value = `${geoAlignSession.value.markers.length} media markers loaded. Write EXIF is disabled for strict read-only storage.`;
+  await refreshGeoAlignMap();
 }
 
 async function nudgeGeoAlignMarker(assetId: string, dLat: number, dLon: number) {
@@ -1753,12 +2019,14 @@ async function nudgeGeoAlignMarker(assetId: string, dLat: number, dLon: number) 
   marker.manual_lon = updated.manual_lon;
   marker.modified = updated.modified;
   geoAlignMessage.value = `${marker.name} moved locally. Apply saves the override to Cartolensia metadata only.`;
+  await refreshGeoAlignMap();
 }
 
 async function resetGeoAlign() {
   if (!geoAlignSession.value) return;
   geoAlignSession.value = await api.resetGeoAlignSession(geoAlignSession.value.id);
   geoAlignMessage.value = "Manual marker moves were reset.";
+  await refreshGeoAlignMap();
 }
 
 async function applyGeoAlign() {
@@ -2401,6 +2669,140 @@ function faceIgnored(face: FaceDetection | Record<string, unknown>): boolean {
   return Boolean(faceMetadata(face).ignored);
 }
 
+function faceDeleted(face: FaceDetection | Record<string, unknown>): boolean {
+  return Boolean(faceMetadata(face).deleted);
+}
+
+function faceDisplayName(face: FaceDetection | Record<string, unknown>): string {
+  const metadata = faceMetadata(face);
+  return String(metadata.label ?? metadata.name ?? (face as Record<string, unknown>).cluster_id ?? "Unassigned face");
+}
+
+function assetImageDimensions(detail: AssetDetail): { width: number; height: number } {
+  const metadata = detail.asset.metadata ?? {};
+  const faces = asArray(detail.face_detections as unknown[]) as Array<Record<string, unknown>>;
+  const width = Number(
+    metadata.width ??
+      metadata.image_width ??
+      metadata.ImageWidth ??
+      metadata.ExifImageWidth ??
+      Math.max(...faces.map((item) => Number(item.x ?? 0) + Number(item.width ?? 0)), 1)
+  );
+  const height = Number(
+    metadata.height ??
+      metadata.image_height ??
+      metadata.ImageHeight ??
+      metadata.ExifImageHeight ??
+      Math.max(...faces.map((item) => Number(item.y ?? 0) + Number(item.height ?? 0)), 1)
+  );
+  return { width: Math.max(1, width), height: Math.max(1, height) };
+}
+
+function faceDraftBoxStyle(detail: AssetDetail): Record<string, string> {
+  if (!newFaceDraftBox.value) return {};
+  const dimensions = assetImageDimensions(detail);
+  return {
+    left: `${(newFaceDraftBox.value.x / dimensions.width) * 100}%`,
+    top: `${(newFaceDraftBox.value.y / dimensions.height) * 100}%`,
+    width: `${(newFaceDraftBox.value.width / dimensions.width) * 100}%`,
+    height: `${(newFaceDraftBox.value.height / dimensions.height) * 100}%`
+  };
+}
+
+function faceClusterPreviewURL(cluster: FaceCluster): string {
+  const assetID = String(cluster.metadata?.representative_asset_id ?? "");
+  return assetID ? `/api/v1/media/${assetID}/preview` : "";
+}
+
+function faceClusterPreviewTitle(cluster: FaceCluster): string {
+  return String(cluster.metadata?.representative_asset_name ?? cluster.label ?? "Face folder preview");
+}
+
+function faceCardPreviewURL(face: FaceDetection): string {
+  return `/api/v1/media/${face.asset_id}/preview`;
+}
+
+async function openFaceFromDetection(face: FaceDetection | Record<string, unknown>) {
+  const faceRecord = face as FaceDetection;
+  const clusterID = String(faceRecord.cluster_id || `asset:${faceRecord.asset_id}`);
+  setActive("Face Gallery");
+  await refreshFaceClusters();
+  const cluster = faceClusters.value.find((candidate) => candidate.id === clusterID) ?? {
+    id: clusterID,
+    label: faceDisplayName(faceRecord),
+    face_count: 0,
+    asset_count: 0,
+    ignored_count: 0,
+    metadata: { provisional: true }
+  };
+  await openFaceCluster(cluster);
+}
+
+function assetImagePoint(event: PointerEvent, detail: AssetDetail): { x: number; y: number } {
+  const target = event.currentTarget as HTMLElement;
+  const rect = target.getBoundingClientRect();
+  const dimensions = assetImageDimensions(detail);
+  const x = Math.max(0, Math.min(dimensions.width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * dimensions.width));
+  const y = Math.max(0, Math.min(dimensions.height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * dimensions.height));
+  return { x, y };
+}
+
+function startFaceDraft(event: PointerEvent) {
+  if (!faceAddMode.value || !assetDetail.value || assetDetail.value.asset.media_kind !== "photo") return;
+  event.preventDefault();
+  const point = assetImagePoint(event, assetDetail.value);
+  faceDraftStart = point;
+  newFaceDraftBox.value = { x: point.x, y: point.y, width: 1, height: 1 };
+}
+
+function updateFaceDraft(event: PointerEvent) {
+  if (!faceAddMode.value || !assetDetail.value || !faceDraftStart || !newFaceDraftBox.value) return;
+  const point = assetImagePoint(event, assetDetail.value);
+  newFaceDraftBox.value = {
+    x: Math.min(faceDraftStart.x, point.x),
+    y: Math.min(faceDraftStart.y, point.y),
+    width: Math.max(1, Math.abs(point.x - faceDraftStart.x)),
+    height: Math.max(1, Math.abs(point.y - faceDraftStart.y))
+  };
+}
+
+function finishFaceDraft() {
+  faceDraftStart = null;
+}
+
+async function saveManualFace() {
+  if (!assetDetail.value || !newFaceDraftBox.value) return;
+  const box = newFaceDraftBox.value;
+  if (box.width < 3 || box.height < 3) {
+    error.value = "Draw a larger face rectangle before saving.";
+    return;
+  }
+  const face = await api.createFaceDetection({
+    asset_id: assetDetail.value.asset.id,
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
+    confidence: newFaceConfidence.value,
+    label: newFaceName.value.trim() || "Manual face"
+  });
+  selectedAssetFaceId.value = face.id;
+  faceAddMode.value = false;
+  newFaceDraftBox.value = null;
+  newFaceName.value = "";
+  assetDetail.value = await api.asset(assetDetail.value.asset.id);
+  await refreshFaceClusters();
+}
+
+async function deleteFaceDetection(face: FaceDetection) {
+  await api.deleteFaceDetection(face.id);
+  if (selectedAssetFaceId.value === face.id) selectedAssetFaceId.value = "";
+  if (assetDetail.value) {
+    assetDetail.value = await api.asset(assetDetail.value.asset.id);
+  }
+  await refreshFaceClusters();
+}
+
 async function mapLoadTrackTimeAssets() {
   const popup = mapPopup.value;
   if (!popup?.track_id) return;
@@ -2656,6 +3058,14 @@ watch([active, mapData], async () => {
     await nextTick();
     renderOpenLayers();
   }
+  if (active.value === "GPS/KML Tracks" && selectedTrack.value) {
+    await nextTick();
+    await refreshSelectedTrackMap();
+  }
+  if (active.value === "Geo Align" && geoAlignSession.value) {
+    await nextTick();
+    await refreshGeoAlignMap();
+  }
 });
 
 watch([mapMediaKind, mapAlbumId, mapTrackId, mapCluster], () => {
@@ -2691,6 +3101,17 @@ watch([trackPreviewTilesEnabled, selectedTrackLayerVisible, galleryTrackLayerVis
   persistLayerPreference("cartolensia.trackPreview.tilesVisible", trackPreviewTilesEnabled.value);
 });
 
+watch([geoAlignTilesVisible, geoAlignTrackLayerVisible, geoAlignMarkerLayerVisible], () => {
+  geoAlignTileLayer?.setVisible(geoAlignTilesVisible.value);
+  geoAlignTrackLayer?.setVisible(geoAlignTrackLayerVisible.value);
+  geoAlignMarkerLayer?.setVisible(geoAlignMarkerLayerVisible.value);
+  persistLayerPreference("cartolensia.geoAlign.tilesVisible", geoAlignTilesVisible.value);
+});
+
+watch(showAssetFaceBoxes, () => {
+  localStorage.setItem("cartolensia.asset.showFaceBoxes", showAssetFaceBoxes.value ? "true" : "false");
+});
+
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -2717,6 +3138,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeydown);
   galleryTrackMap?.setTarget(undefined);
+  selectedTrackMap?.setTarget(undefined);
+  geoAlignMap?.setTarget(undefined);
   olMap?.setTarget(undefined);
 });
 </script>
@@ -3175,19 +3598,60 @@ onBeforeUnmount(() => {
             </div>
           </header>
           <div v-if="assetDetail" class="media-panel">
-            <div v-if="assetDetail.asset.media_kind === 'photo'" class="asset-photo-frame">
+            <div v-if="assetDetail.asset.media_kind === 'photo'" class="asset-photo-workbench">
+              <div class="face-toolbar">
+                <label class="form-check form-switch">
+                  <input v-model="showAssetFaceBoxes" class="form-check-input" type="checkbox" />
+                  <span>Show face rectangles</span>
+                </label>
+                <button type="button" class="btn btn-sm btn-outline-primary" @click="faceAddMode = !faceAddMode; newFaceDraftBox = null">
+                  <i class="bi bi-plus-square" aria-hidden="true"></i>
+                  {{ faceAddMode ? "Cancel add face" : "Add face" }}
+                </button>
+                <span v-if="faceAddMode" class="muted">Drag a rectangle on the image, enter a name, then save.</span>
+              </div>
+              <div
+                class="asset-photo-frame"
+                :class="{ drawing: faceAddMode }"
+                @pointerdown="startFaceDraft"
+                @pointermove="updateFaceDraft"
+                @pointerup="finishFaceDraft"
+                @pointerleave="finishFaceDraft"
+              >
               <img
                 :src="assetDetail.original_url || assetDetail.preview_url"
                 alt=""
                 @error="markPreviewFailed(assetDetail.asset.id)"
               />
               <span
-                v-for="face in assetDetail.face_detections ?? []"
+                v-for="face in visibleAssetFaces"
+                v-show="showAssetFaceBoxes"
                 :key="String(face.id)"
-                :class="['face-box', { ignored: faceIgnored(face) }]"
+                :class="['face-box', { ignored: faceIgnored(face), selected: selectedAssetFaceId === face.id }]"
                 :style="faceBoxStyle(face, assetDetail)"
                 :title="`Face ${typeof face.confidence === 'number' ? face.confidence.toFixed(3) : ''}`"
               ></span>
+              <span
+                v-if="faceAddMode && newFaceDraftBox"
+                class="face-box draft"
+                :style="faceDraftBoxStyle(assetDetail)"
+                aria-hidden="true"
+              ></span>
+              </div>
+              <div v-if="faceAddMode" class="face-add-panel">
+                <label>
+                  <span>Face name</span>
+                  <input v-model="newFaceName" type="text" placeholder="Local label, e.g. Alice" />
+                </label>
+                <label>
+                  <span>Confidence</span>
+                  <input v-model.number="newFaceConfidence" type="number" min="0" max="1" step="0.01" />
+                </label>
+                <button type="button" class="btn btn-success" :disabled="!newFaceDraftBox" @click="saveManualFace">
+                  <i class="bi bi-check2-circle" aria-hidden="true"></i>
+                  Save new face
+                </button>
+              </div>
             </div>
             <div v-else-if="assetDetail.asset.media_kind === 'video'" class="video-panel">
               <video
@@ -3276,7 +3740,29 @@ onBeforeUnmount(() => {
                 </tr>
               </tbody>
             </table>
-            <p v-if="assetDetail.face_detections?.length">Faces detected: {{ assetDetail.face_detections.length }} local detections. No real-world identity is inferred.</p>
+            <section v-if="assetDetail.face_detections?.length" class="face-record-list">
+              <h4>Faces</h4>
+              <p class="muted">Click a record to highlight it. Click the face name/photo to open all photos in that local face folder.</p>
+              <article
+                v-for="face in visibleAssetFaces"
+                :key="face.id"
+                :class="['face-record-card', { selected: selectedAssetFaceId === face.id }]"
+                @click="selectedAssetFaceId = face.id"
+              >
+                <button type="button" class="face-record-preview" @click.stop="openFaceFromDetection(face)">
+                  <img :src="faceCardPreviewURL(face)" alt="" loading="lazy" />
+                </button>
+                <button type="button" class="link-button face-record-name" @click.stop="openFaceFromDetection(face)">
+                  {{ faceDisplayName(face) }}
+                </button>
+                <span>Confidence {{ typeof face.confidence === 'number' ? face.confidence.toFixed(3) : 'n/a' }}</span>
+                <span>{{ Math.round(face.width) }} × {{ Math.round(face.height) }} px</span>
+                <button type="button" class="btn btn-sm btn-outline-danger" @click.stop="deleteFaceDetection(face)">
+                  <i class="bi bi-trash" aria-hidden="true"></i>
+                  Delete
+                </button>
+              </article>
+            </section>
             <p v-if="assetDetail.embeddings?.length">Embeddings stored: {{ assetDetail.embeddings.length }} vector record(s).</p>
           </section>
           <table v-if="assetDetail">
@@ -3491,9 +3977,29 @@ onBeforeUnmount(() => {
             <div class="track-detail-grid">
               <div class="map-shell">
                 <div ref="selectedTrackMapElement" class="track-detail-map"></div>
+                <svg v-if="selectedTrackFallbackPath" class="track-vector-fallback" viewBox="0 0 1000 420" aria-hidden="true">
+                  <path :d="selectedTrackFallbackPath" />
+                </svg>
                 <div class="map-status-overlay">
                   <i class="bi bi-signpost-split" aria-hidden="true"></i>
                   {{ selectedTrackPreviewStatus || "Loading track geometry..." }}
+                </div>
+                <div v-if="showSelectedTrackPointPopup" class="track-point-popup">
+                  <button type="button" class="btn btn-sm btn-outline-secondary danger-close" @click="showSelectedTrackPointPopup = false">
+                    <i class="bi bi-x-lg" aria-hidden="true"></i>
+                    Close
+                  </button>
+                  <strong>Track point</strong>
+                  <p v-if="selectedTrackPointMessage" class="muted">{{ selectedTrackPointMessage }}</p>
+                  <template v-if="selectedTrackPointInfo">
+                    <span>Clicked: {{ selectedTrackPointInfo.clicked.lat.toFixed(6) }}, {{ selectedTrackPointInfo.clicked.lon.toFixed(6) }}</span>
+                    <span>Nearest: {{ selectedTrackPointInfo.nearest.lat.toFixed(6) }}, {{ selectedTrackPointInfo.nearest.lon.toFixed(6) }}</span>
+                    <span>Distance: {{ selectedTrackPointInfo.distance_m.toFixed(1) }} m</span>
+                    <span v-if="selectedTrackPointInfo.timestamp">Time: {{ selectedTrackPointInfo.timestamp }}</span>
+                    <span v-if="selectedTrackPointInfo.relative_time_seconds !== undefined">Relative: {{ selectedTrackPointInfo.relative_time_seconds.toFixed(1) }} s</span>
+                    <span v-if="selectedTrackPointInfo.speed_mps !== undefined">Speed: {{ selectedTrackPointInfo.speed_mps.toFixed(2) }} m/s</span>
+                    <span v-if="selectedTrackPointInfo.elevation_m !== undefined">Elevation: {{ selectedTrackPointInfo.elevation_m.toFixed(1) }} m</span>
+                  </template>
                 </div>
                 <div class="map-layer-control">
                   <button type="button" class="icon-button" @click="showSelectedTrackLayerMenu = !showSelectedTrackLayerMenu">
@@ -4152,6 +4658,65 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
+        <section v-else-if="active === 'Search'" class="panel universal-search-page">
+          <header class="panel-head">
+            <div>
+              <h2>Universal Search</h2>
+              <span>Search media and GPS/KML tracks by names, paths, dates, hashes, metadata, EXIF, AI tags, classes, captions, albums, or tracks.</span>
+            </div>
+          </header>
+          <form class="search-hero" @submit.prevent="runUniversalSearch">
+            <label>
+              <span>Search query</span>
+              <input v-model="universalSearchQ" type="search" placeholder="jpg, 2026-05, PXL, camera, safety, mountain, track name..." />
+            </label>
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-search" aria-hidden="true"></i>
+              Search
+            </button>
+          </form>
+          <p v-if="universalSearchMessage" class="alert">{{ universalSearchMessage }}</p>
+          <div v-if="universalSearchWarnings.length" class="chip-row">
+            <span v-for="warning in universalSearchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
+          </div>
+          <div class="search-results-grid">
+            <article class="settings-form">
+              <h3><i class="bi bi-images" aria-hidden="true"></i> Multimedia</h3>
+              <div v-if="universalSearchResults.length === 0" class="empty-state">No media results yet.</div>
+              <div v-else class="tile-grid search-result-tiles">
+                <article v-for="result in universalSearchResults" :key="result.asset.id" class="asset-tile">
+                  <button type="button" class="tile-media" @click="openGallery([assetToGallery(result.asset)], 0)">
+                    <img v-if="result.asset.media_kind === 'photo'" :src="`/api/v1/media/${result.asset.id}/preview`" :alt="result.asset.display_name" loading="lazy" />
+                    <video v-else-if="result.asset.media_kind === 'video'" :src="`/api/v1/media/${result.asset.id}/original`" preload="metadata" muted></video>
+                    <img v-else-if="result.asset.media_kind === 'track'" :src="`/api/v1/media/${result.asset.id}/track-thumbnail`" :alt="result.asset.display_name" loading="lazy" />
+                    <span v-else class="media-fallback">{{ result.asset.media_kind }}</span>
+                  </button>
+                  <strong class="tile-title">{{ result.asset.display_name }}</strong>
+                  <small>{{ result.asset.media_kind }} · {{ result.asset.taken_at ?? "" }}</small>
+                  <small class="search-match">{{ result.explanation }}</small>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(result.asset.id)">Asset detail</button>
+                </article>
+              </div>
+            </article>
+            <article class="settings-form">
+              <h3><i class="bi bi-signpost-split" aria-hidden="true"></i> GPS/KML Tracks</h3>
+              <div v-if="universalSearchTrackResults.length === 0" class="empty-state">No track results yet.</div>
+              <table v-else>
+                <thead><tr><th>Name</th><th>Format</th><th>Points</th><th>Matched</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-for="result in universalSearchTrackResults" :key="result.track.track_asset_id">
+                    <td><button type="button" class="link-button" @click="openTrack(result.track.track_asset_id)">{{ result.track.name }}</button></td>
+                    <td>{{ result.track.source_format }}</td>
+                    <td>{{ result.track.point_count }}</td>
+                    <td>{{ result.explanation }}</td>
+                    <td><button type="button" class="btn btn-sm btn-outline-secondary" @click="openTrack(result.track.track_asset_id)">Open</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+          </div>
+        </section>
+
         <section v-else-if="active === 'Face Gallery'" class="panel face-gallery-page">
           <header class="panel-head">
             <div>
@@ -4165,17 +4730,26 @@ onBeforeUnmount(() => {
           </header>
           <p v-if="faceGalleryMessage" class="alert">{{ faceGalleryMessage }}</p>
           <p v-if="faceClustersPayload?.provisional_note" class="muted">{{ faceClustersPayload.provisional_note }}</p>
+          <div class="search-hero compact-search">
+            <label>
+              <span>Search faces</span>
+              <input v-model="faceSearchQ" type="search" placeholder="name, asset, provisional, unassigned..." />
+            </label>
+          </div>
           <div class="face-gallery-layout">
             <aside class="face-cluster-list">
-              <div v-if="faceClusters.length === 0" class="empty-state">No face detections are available yet.</div>
+              <div v-if="filteredFaceClusters.length === 0" class="empty-state">No face detections match this search.</div>
               <button
-                v-for="cluster in faceClusters"
+                v-for="cluster in filteredFaceClusters"
                 :key="cluster.id"
                 type="button"
                 :class="['face-cluster-card', { active: selectedFaceCluster?.id === cluster.id }]"
                 @click="openFaceCluster(cluster)"
               >
-                <span class="face-cluster-icon"><i class="bi bi-person-bounding-box" aria-hidden="true"></i></span>
+                <span class="face-cluster-preview">
+                  <img v-if="faceClusterPreviewURL(cluster)" :src="faceClusterPreviewURL(cluster)" :alt="faceClusterPreviewTitle(cluster)" loading="lazy" />
+                  <i v-else class="bi bi-person-bounding-box" aria-hidden="true"></i>
+                </span>
                 <strong>{{ cluster.label || 'Unassigned faces' }}</strong>
                 <small>{{ cluster.face_count }} faces · {{ cluster.asset_count }} photos · {{ cluster.ignored_count }} ignored</small>
                 <span v-if="(cluster.metadata?.provisional as boolean | undefined)" class="status-badge warn">provisional</span>
@@ -4199,32 +4773,34 @@ onBeforeUnmount(() => {
                     </button>
                   </div>
                 </div>
-                <div class="tile-grid">
-                  <article v-for="asset in faceClusterAssets" :key="asset.id" class="asset-tile">
+                <div class="tile-grid face-asset-grid">
+                  <article v-for="asset in faceClusterAssets" :key="asset.id" class="asset-tile face-asset-tile">
                     <button type="button" class="tile-media" @click="openAsset(asset.id)">
                       <img v-if="asset.media_kind === 'photo'" :src="`/api/v1/media/${asset.id}/preview`" :alt="asset.display_name" loading="lazy" />
                       <span v-else class="media-fallback">{{ asset.media_kind }}</span>
                     </button>
                     <div class="tile-meta">
-                      <strong>{{ asset.display_name }}</strong>
+                      <strong class="tile-title">{{ asset.display_name }}</strong>
                       <span>{{ faceClusterDetections.filter((face) => face.asset_id === asset.id && !faceIgnored(face)).length }} faces in this folder</span>
                     </div>
                     <button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(asset.id)">Asset detail</button>
                   </article>
                 </div>
-                <details class="mt-3">
+                <details class="mt-3 face-detection-details">
                   <summary>Detections in this folder</summary>
                   <table>
-                    <thead><tr><th>Asset</th><th>Confidence</th><th>Box</th><th>Status</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Preview</th><th>Asset</th><th>Confidence</th><th>Box</th><th>Status</th><th>Action</th></tr></thead>
                     <tbody>
                       <tr v-for="face in faceClusterDetections" :key="face.id">
+                        <td><img class="face-table-thumb" :src="faceCardPreviewURL(face)" alt="" loading="lazy" /></td>
                         <td><button type="button" class="link-button" @click="openAsset(face.asset_id)">{{ face.asset_id.slice(0, 8) }}</button></td>
                         <td>{{ typeof face.confidence === 'number' ? face.confidence.toFixed(3) : '' }}</td>
                         <td>{{ Math.round(face.x) }}, {{ Math.round(face.y) }} · {{ Math.round(face.width) }} × {{ Math.round(face.height) }}</td>
                         <td>{{ faceIgnored(face) ? 'ignored' : (faceMetadata(face).review_status ?? 'active') }}</td>
                         <td>
-                          <button type="button" class="btn btn-sm btn-outline-danger" :disabled="faceIgnored(face)" @click="ignoreFaceDetection(face)">
-                            Ignore
+                          <button type="button" class="btn btn-sm btn-outline-danger" :disabled="faceIgnored(face)" @click="deleteFaceDetection(face)">
+                            <i class="bi bi-trash" aria-hidden="true"></i>
+                            Delete
                           </button>
                         </td>
                       </tr>
@@ -4248,8 +4824,8 @@ onBeforeUnmount(() => {
             </button>
           </header>
           <p v-if="geoAlignMessage" class="alert">{{ geoAlignMessage }}</p>
-          <div class="settings-grid">
-            <article class="settings-form">
+          <div class="geo-align-layout">
+            <aside class="geo-align-sidebar settings-form">
               <h3>Scope</h3>
               <p>{{ selectedAssets.size > 0 ? `${selectedAssets.size} selected media assets` : 'Current indexed photo/video scope, bounded to 54 assets' }}</p>
               <label class="form-label">
@@ -4257,26 +4833,72 @@ onBeforeUnmount(() => {
                 <textarea v-model="geoAlignTrackIds" class="form-control" rows="3" placeholder="Blank uses current parsed GPS/KML tracks"></textarea>
               </label>
               <p class="muted">Green = own geotag. Orange = track candidate. Red = no geotag. Moved markers get a glow.</p>
+              <div v-if="geoAlignSession" class="metrics compact-metrics">
+                <article><strong>{{ geoAlignSession.markers.length }}</strong><span>Media</span></article>
+                <article><strong>{{ geoAlignSession.track_ids.length }}</strong><span>Tracks</span></article>
+                <article><strong>{{ geoAlignSession.markers.filter((marker) => marker.modified).length }}</strong><span>Modified</span></article>
+              </div>
+              <label class="form-check form-switch">
+                <input v-model="geoAlignTilesVisible" class="form-check-input" type="checkbox" />
+                <span>OSM tiles</span>
+              </label>
+              <label class="form-check form-switch">
+                <input v-model="geoAlignTrackLayerVisible" class="form-check-input" type="checkbox" />
+                <span>Track layer</span>
+              </label>
+              <label class="form-check form-switch">
+                <input v-model="geoAlignMarkerLayerVisible" class="form-check-input" type="checkbox" />
+                <span>Marker layer</span>
+              </label>
               <div class="actions">
                 <button type="button" class="btn btn-outline-secondary" :disabled="!geoAlignSession" @click="resetGeoAlign">Reset</button>
                 <button type="button" class="btn btn-success" :disabled="!geoAlignSession" @click="applyGeoAlign">Apply DB overrides</button>
                 <button type="button" class="btn btn-outline-danger" disabled title="Disabled because rclone_peek is strict_read_only">Write EXIF disabled</button>
               </div>
-            </article>
-            <article class="settings-form settings-wide">
+              <div v-if="geoAlignSession" class="modified-list">
+                <h4>Modified media</h4>
+                <p v-if="geoAlignSession.markers.filter((marker) => marker.modified).length === 0" class="muted">No manual changes yet.</p>
+                <button
+                  v-for="marker in geoAlignSession.markers.filter((item) => item.modified)"
+                  :key="marker.asset_id"
+                  type="button"
+                  class="link-button"
+                  @click="openAsset(marker.asset_id)"
+                >
+                  {{ marker.name }}
+                </button>
+              </div>
+            </aside>
+            <article class="settings-form geo-align-main">
               <h3>Alignment Map Preview</h3>
               <div v-if="!geoAlignSession" class="empty-state">Start a session to preview markers.</div>
-              <div v-else class="alignment-map-preview">
-                <span
-                  v-for="marker in geoAlignSession.markers"
-                  :key="marker.asset_id"
-                  :class="['alignment-marker', marker.status, { modified: marker.modified }]"
-                  :style="{ left: `${20 + ((marker.staged_lon - geoAlignSession.bbox.min_lon) / Math.max(0.000001, geoAlignSession.bbox.max_lon - geoAlignSession.bbox.min_lon)) * 60}%`, top: `${80 - ((marker.staged_lat - geoAlignSession.bbox.min_lat) / Math.max(0.000001, geoAlignSession.bbox.max_lat - geoAlignSession.bbox.min_lat)) * 60}%` }"
-                  :title="marker.name"
-                >
-                  <img v-if="marker.media_kind === 'photo'" :src="marker.thumbnail_url" :alt="marker.name" loading="lazy" />
-                  <i v-else class="bi bi-camera-video" aria-hidden="true"></i>
-                </span>
+              <div v-else class="map-shell alignment-map-shell">
+                <div ref="geoAlignMapElement" class="alignment-ol-map"></div>
+                <div class="map-layer-control">
+                  <button type="button" class="icon-button" @click="showGeoAlignLayerMenu = !showGeoAlignLayerMenu">
+                    <i class="bi bi-layers" aria-hidden="true"></i>
+                    Layers
+                  </button>
+                  <div v-if="showGeoAlignLayerMenu" class="layer-menu">
+                    <label class="form-check form-switch">
+                      <input v-model="geoAlignTilesVisible" class="form-check-input" type="checkbox" />
+                      <span>OSM tiles</span>
+                    </label>
+                    <label class="form-check form-switch">
+                      <input v-model="geoAlignTrackLayerVisible" class="form-check-input" type="checkbox" />
+                      <span>Tracks</span>
+                    </label>
+                    <label class="form-check form-switch">
+                      <input v-model="geoAlignMarkerLayerVisible" class="form-check-input" type="checkbox" />
+                      <span>Markers</span>
+                    </label>
+                    <button type="button" class="btn btn-sm btn-outline-primary" @click="refreshGeoAlignMap">
+                      <i class="bi bi-aspect-ratio" aria-hidden="true"></i>
+                      Fit
+                    </button>
+                    <small>Tiles load on demand through Cartolensia; no bulk prefetch.</small>
+                  </div>
+                </div>
               </div>
             </article>
           </div>
@@ -4857,6 +5479,9 @@ onBeforeUnmount(() => {
             role="img"
             aria-label="Interactive track preview"
           ></div>
+          <svg v-if="galleryTrackFallbackPath" class="track-vector-fallback" viewBox="0 0 1000 420" aria-hidden="true">
+            <path :d="galleryTrackFallbackPath" />
+          </svg>
           <div class="map-status-overlay">
             <i class="bi bi-signpost-split" aria-hidden="true"></i>
             {{ galleryTrackPreviewStatus || "Loading track geometry..." }}
