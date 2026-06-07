@@ -128,3 +128,24 @@ Still future:
 - Durable AI worker leases for long jobs.
 - Full transcode job execution/planning with persistent outputs outside originals.
 - Browser automation coverage for the new file picker, AI pages, track previews, and transcoding settings.
+
+## 2026-06-07 Workflow Stabilization Progress
+
+Completed:
+
+- File picker modal layering was fixed so the dialog remains above the backdrop and usable.
+- Track overlay sizing/refit behavior was improved for gallery/detail contexts.
+- Map cluster single-click behavior was stabilized; zooming into a cluster is now explicit.
+- Face Gallery MVP was added with provisional face folders, naming, cluster asset lists, ignored detections, and asset-detail face boxes.
+- Large AI job payloads are summarized in job lists to avoid UI stalls.
+- Transcoding metrics availability is visible for `libvmaf`, `ssim`, and `psnr`.
+- AV1 live HLS is disabled with a clear reason instead of failing after expensive startup attempts.
+- Geo Align and Video Track Player MVP APIs/pages were added with safe scoped behavior.
+
+Next:
+
+- Replace provisional face grouping with embedding-based local clustering and merge/split review workflows.
+- Make Geo Align sessions durable and add the full OpenLayers shift-drag marker editor.
+- Add user-provided video start/end timestamp controls for reliable video-track synchronization.
+- Implement a verified AV1 browser playback route with WebM or fragmented MP4 when encoders and browser support are confirmed.
+- Add browser automation for gallery track previews, map cluster popups, modal focus/backdrop behavior, and face review.

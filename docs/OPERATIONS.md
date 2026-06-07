@@ -346,3 +346,11 @@ This probe may pull the CUDA base image if it is not local. Do not pull heavy Py
 ## Settings File Picker
 
 Settings path fields can use the server-side file/folder picker. The picker is read-only and allowlist based. It can browse configured storage roots, `.cartolensia`, `/tmp`, `/mnt`, `/media`, `/srv`, and home where available, but it never writes files and it does not start discovery. Selecting a real archive path does not change storage mode or safety guards.
+
+## Workflow Operation Notes
+
+- Face Gallery reviews local face detections and provisional/local clusters only. Naming or ignoring a detection updates Cartolensia metadata and does not identify a person or modify media originals.
+- Geo Align sessions are scoped to selected/current assets and optional selected tracks. Applying a session writes a Cartolensia DB geotag override only. `write-exif` is disabled for `strict_read_only` storage and should remain disabled for real-peek.
+- Video Track Player sessions require a reliable media timestamp plus selected track timestamps. If a video lacks `taken_at`, the UI should report that synchronization needs a user-provided start/end time or offset.
+- AV1 live playback is currently disabled for HLS sessions unless a verified browser-compatible encoder/container path exists. Prefer H.264/NVENC for interactive streaming.
+- Transcoding metrics can report `ssim` and `psnr` with the current ffmpeg build. `libvmaf` requires an ffmpeg build with the `libvmaf` filter.

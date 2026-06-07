@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/auth"
@@ -47,8 +48,11 @@ type Dependencies struct {
 }
 
 type Server struct {
-	deps Dependencies
-	mux  *http.ServeMux
+	deps               Dependencies
+	mux                *http.ServeMux
+	sessionMu          sync.RWMutex
+	geoAlignSessions   map[string]*geoAlignSession
+	videoTrackSessions map[string]*videoTrackPlayerSession
 }
 
 type explorerRow struct {
@@ -74,6 +78,45 @@ type monthBucket struct {
 	LastAt     *time.Time `json:"last_at,omitempty"`
 }
 
+type geoAlignMarker struct {
+	AssetID         string           `json:"asset_id"`
+	Name            string           `json:"name"`
+	MediaKind       string           `json:"media_kind"`
+	ThumbnailURL    string           `json:"thumbnail_url,omitempty"`
+	OriginalLat     *float64         `json:"original_lat,omitempty"`
+	OriginalLon     *float64         `json:"original_lon,omitempty"`
+	ManualLat       *float64         `json:"manual_lat,omitempty"`
+	ManualLon       *float64         `json:"manual_lon,omitempty"`
+	StagedLat       float64          `json:"staged_lat"`
+	StagedLon       float64          `json:"staged_lon"`
+	Status          string           `json:"status"`
+	TrackCandidates []map[string]any `json:"track_candidates"`
+	Modified        bool             `json:"modified"`
+	Metadata        map[string]any   `json:"metadata,omitempty"`
+}
+
+type geoAlignSession struct {
+	ID        string           `json:"id"`
+	AssetIDs  []string         `json:"asset_ids"`
+	TrackIDs  []string         `json:"track_ids"`
+	Markers   []geoAlignMarker `json:"markers"`
+	BBox      catalog.BBox     `json:"bbox"`
+	ReadOnly  bool             `json:"read_only"`
+	CreatedAt time.Time        `json:"created_at"`
+	UpdatedAt time.Time        `json:"updated_at"`
+}
+
+type videoTrackPlayerSession struct {
+	ID            string         `json:"id"`
+	VideoAssetID  string         `json:"video_asset_id"`
+	TrackIDs      []string       `json:"track_ids"`
+	TimestampMode string         `json:"timestamp_mode"`
+	OffsetSeconds float64        `json:"offset_seconds"`
+	Warnings      []string       `json:"warnings,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
 func New(deps Dependencies) *Server {
 	if deps.Authenticator == nil {
 		deps.Authenticator = auth.DevNoAuth{}
@@ -81,7 +124,12 @@ func New(deps Dependencies) *Server {
 	if deps.Authorizer == nil {
 		deps.Authorizer = auth.DevNoAuth{}
 	}
-	s := &Server{deps: deps, mux: http.NewServeMux()}
+	s := &Server{
+		deps:               deps,
+		mux:                http.NewServeMux(),
+		geoAlignSessions:   map[string]*geoAlignSession{},
+		videoTrackSessions: map[string]*videoTrackPlayerSession{},
+	}
 	s.routes()
 	return s
 }
@@ -149,10 +197,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/sync/links", s.handleSyncLinks)
 	s.mux.HandleFunc("/api/v1/sync/links/", s.handleSyncLinkByID)
 	s.mux.HandleFunc("/api/v1/videos/", s.handleVideoByID)
+	s.mux.HandleFunc("/api/v1/geo-align/session", s.handleGeoAlignSessionCreate)
+	s.mux.HandleFunc("/api/v1/geo-align/sessions/", s.handleGeoAlignSessionByID)
+	s.mux.HandleFunc("/api/v1/video-track-player/session", s.handleVideoTrackPlayerSessionCreate)
+	s.mux.HandleFunc("/api/v1/video-track-player/sessions/", s.handleVideoTrackPlayerSessionByID)
 	s.mux.HandleFunc("/api/v1/map", s.handleMap)
 	s.mux.HandleFunc("/api/v1/map/", s.handleMapSubroute)
 	s.mux.HandleFunc("/api/v1/transcoding/status", s.handleTranscodingStatus)
 	s.mux.HandleFunc("/api/v1/transcoding/capabilities", s.handleTranscodingCapabilities)
+	s.mux.HandleFunc("/api/v1/transcoding/metrics/status", s.handleTranscodingMetricsStatus)
 	s.mux.HandleFunc("/api/v1/transcoding/hardware-test", s.handleTranscodingHardwareTest)
 	s.mux.HandleFunc("/api/v1/transcoding/presets", s.handleTranscodingPresets)
 	s.mux.HandleFunc("/api/v1/transcoding/presets/", s.handleTranscodingPresetByID)
@@ -171,6 +224,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/jobs/describe", s.handleAIJobRequest("describe_image"))
 	s.mux.HandleFunc("/api/v1/ai/predictions", s.handleAIPredictions)
 	s.mux.HandleFunc("/api/v1/ai/safety/", s.handleAISafetyByAsset)
+	s.mux.HandleFunc("/api/v1/faces/clusters", s.handleFaceClusters)
+	s.mux.HandleFunc("/api/v1/faces/clusters/", s.handleFaceClusterByID)
+	s.mux.HandleFunc("/api/v1/faces/detections/", s.handleFaceDetectionByID)
 	s.mux.HandleFunc("/api/v1/vector/status", s.handleVectorStatus)
 	s.mux.HandleFunc("/api/v1/search/vector", s.handleVectorSearch)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
@@ -661,6 +717,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobsList = filterJobs(jobsList, r)
+	if !truthyQuery(r.URL.Query().Get("full_payload")) {
+		jobsList = summarizeJobsForList(jobsList)
+	}
 	writeJSON(w, http.StatusOK, jobsList)
 }
 
@@ -1817,6 +1876,14 @@ func (s *Server) handleTranscodingCapabilities(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, transcoding.Detect(r.Context()))
 }
 
+func (s *Server) handleTranscodingMetricsStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, transcoding.DetectMetrics(r.Context()))
+}
+
 func (s *Server) handleTranscodingPresets(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -2523,6 +2590,150 @@ func (s *Server) handleAIFaces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"faces": faces, "total": s.aiDataCounts(r.Context())["face_detections"]})
 }
 
+func (s *Server) handleFaceClusters(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	clusters, assetsByCluster, err := s.faceClusterSummaries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"clusters":          clusters,
+		"total":             len(clusters),
+		"assets_by_cluster": assetsByCluster,
+		"provisional_note":  "Unassigned detections are grouped provisionally by source asset until reviewed or named.",
+	})
+}
+
+func (s *Server) handleFaceClusterByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/faces/clusters/"), "/")
+	if path == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.Split(path, "/")
+	clusterID := parts[0]
+	if len(parts) == 2 && parts[1] == "assets" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		s.handleFaceClusterAssets(w, r, clusterID)
+		return
+	}
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPatch {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "faces.cluster.write") {
+		return
+	}
+	var req struct {
+		Label string         `json:"label"`
+		Note  string         `json:"note"`
+		Meta  map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cluster, err := s.materializeFaceCluster(r.Context(), clusterID, strings.TrimSpace(req.Label), req.Meta)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, catalog.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cluster)
+}
+
+func (s *Server) handleFaceDetectionByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/faces/detections/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "faces.detection.write") {
+		return
+	}
+	switch parts[1] {
+	case "ignore":
+		face, err := s.updateFaceDetectionMetadata(r.Context(), parts[0], map[string]any{"ignored": true, "review_status": "ignored"})
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, catalog.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, face)
+	case "assign":
+		var req struct {
+			ClusterID string `json:"cluster_id"`
+			Label     string `json:"label"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		face, err := s.assignFaceDetection(r.Context(), parts[0], req.ClusterID, req.Label)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, catalog.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, face)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleFaceClusterAssets(w http.ResponseWriter, r *http.Request, clusterID string) {
+	faces, err := s.faceDetectionsForCluster(r.Context(), clusterID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, catalog.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	assetIDs := map[string]struct{}{}
+	for _, face := range faces {
+		if metadataBool(face.Metadata, "ignored") {
+			continue
+		}
+		assetIDs[face.AssetID] = struct{}{}
+	}
+	assets := make([]catalog.Asset, 0, len(assetIDs))
+	for assetID := range assetIDs {
+		asset, err := s.deps.Store.GetAsset(r.Context(), assetID)
+		if err == nil {
+			assets = append(assets, asset)
+		}
+	}
+	sort.Slice(assets, func(i, j int) bool { return assets[i].DisplayName < assets[j].DisplayName })
+	writeJSON(w, http.StatusOK, map[string]any{"cluster_id": clusterID, "faces": faces, "assets": assets, "total": len(assets)})
+}
+
 func (s *Server) handleAISafety(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -2545,6 +2756,570 @@ func (s *Server) handleAISafety(w http.ResponseWriter, r *http.Request) {
 		"total":        len(out),
 		"review_album": s.potentiallyUnsafeAlbumSummary(r.Context()),
 	})
+}
+
+func (s *Server) faceClusterSummaries(ctx context.Context) ([]catalog.FaceCluster, map[string]int, error) {
+	faces, err := s.deps.Store.ListFaceDetections(ctx, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	stored, err := s.deps.Store.ListFaceClusters(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	storedByID := make(map[string]catalog.FaceCluster, len(stored))
+	for _, cluster := range stored {
+		if cluster.Metadata == nil {
+			cluster.Metadata = map[string]any{}
+		}
+		storedByID[cluster.ID] = cluster
+	}
+	type aggregate struct {
+		cluster   catalog.FaceCluster
+		assetIDs  map[string]struct{}
+		faceIDs   []string
+		createdAt time.Time
+	}
+	groups := map[string]*aggregate{}
+	for _, face := range faces {
+		key := strings.TrimSpace(face.ClusterID)
+		if key == "" {
+			key = "asset:" + face.AssetID
+		}
+		group := groups[key]
+		if group == nil {
+			cluster := storedByID[key]
+			if cluster.ID == "" {
+				cluster.ID = key
+				cluster.Metadata = map[string]any{"provisional": strings.HasPrefix(key, "asset:")}
+				if strings.HasPrefix(key, "asset:") {
+					cluster.Label = "Unassigned faces"
+				}
+			}
+			group = &aggregate{cluster: cluster, assetIDs: map[string]struct{}{}, createdAt: face.CreatedAt}
+			groups[key] = group
+		}
+		group.cluster.FaceCount++
+		group.faceIDs = append(group.faceIDs, face.ID)
+		group.assetIDs[face.AssetID] = struct{}{}
+		if metadataBool(face.Metadata, "ignored") {
+			group.cluster.IgnoredCount++
+		}
+		if group.cluster.RepresentativeFaceID == "" {
+			group.cluster.RepresentativeFaceID = face.ID
+		}
+		if group.createdAt.IsZero() || face.CreatedAt.Before(group.createdAt) {
+			group.createdAt = face.CreatedAt
+		}
+		if group.cluster.CreatedAt.IsZero() {
+			group.cluster.CreatedAt = group.createdAt
+		}
+		if group.cluster.UpdatedAt.IsZero() || face.CreatedAt.After(group.cluster.UpdatedAt) {
+			group.cluster.UpdatedAt = face.CreatedAt
+		}
+	}
+	clusters := make([]catalog.FaceCluster, 0, len(groups))
+	assetsByCluster := make(map[string]int, len(groups))
+	for id, group := range groups {
+		group.cluster.AssetCount = len(group.assetIDs)
+		if group.cluster.Metadata == nil {
+			group.cluster.Metadata = map[string]any{}
+		}
+		group.cluster.Metadata["face_ids"] = group.faceIDs
+		group.cluster.Metadata["provisional"] = strings.HasPrefix(id, "asset:")
+		assetsByCluster[id] = len(group.assetIDs)
+		clusters = append(clusters, group.cluster)
+	}
+	sort.Slice(clusters, func(i, j int) bool {
+		if clusters[i].FaceCount == clusters[j].FaceCount {
+			return clusters[i].UpdatedAt.After(clusters[j].UpdatedAt)
+		}
+		return clusters[i].FaceCount > clusters[j].FaceCount
+	})
+	return clusters, assetsByCluster, nil
+}
+
+func (s *Server) faceDetectionsForCluster(ctx context.Context, clusterID string) ([]catalog.FaceDetection, error) {
+	faces, err := s.deps.Store.ListFaceDetections(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := []catalog.FaceDetection{}
+	for _, face := range faces {
+		if face.ClusterID == clusterID || (face.ClusterID == "" && clusterID == "asset:"+face.AssetID) {
+			out = append(out, face)
+		}
+	}
+	if len(out) == 0 {
+		return nil, catalog.ErrNotFound
+	}
+	return out, nil
+}
+
+func (s *Server) materializeFaceCluster(ctx context.Context, clusterID, label string, metadata map[string]any) (catalog.FaceCluster, error) {
+	faces, err := s.faceDetectionsForCluster(ctx, clusterID)
+	if err != nil {
+		return catalog.FaceCluster{}, err
+	}
+	if strings.HasPrefix(clusterID, "asset:") {
+		clusterID = id.NewUUID()
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["local_only"] = true
+	metadata["reviewed_by_user"] = label != ""
+	cluster, err := s.deps.Store.UpsertFaceCluster(ctx, catalog.FaceCluster{
+		ID:                   clusterID,
+		Label:                label,
+		RepresentativeFaceID: faces[0].ID,
+		Metadata:             metadata,
+	})
+	if err != nil {
+		return catalog.FaceCluster{}, err
+	}
+	for _, face := range faces {
+		face.ClusterID = cluster.ID
+		if face.Metadata == nil {
+			face.Metadata = map[string]any{}
+		}
+		face.Metadata["review_status"] = "clustered"
+		_, _ = s.deps.Store.UpdateFaceDetection(ctx, face)
+	}
+	return cluster, nil
+}
+
+func (s *Server) updateFaceDetectionMetadata(ctx context.Context, detectionID string, patch map[string]any) (catalog.FaceDetection, error) {
+	faces, err := s.deps.Store.ListFaceDetections(ctx, "")
+	if err != nil {
+		return catalog.FaceDetection{}, err
+	}
+	for _, face := range faces {
+		if face.ID != detectionID {
+			continue
+		}
+		if face.Metadata == nil {
+			face.Metadata = map[string]any{}
+		}
+		for key, value := range patch {
+			face.Metadata[key] = value
+		}
+		return s.deps.Store.UpdateFaceDetection(ctx, face)
+	}
+	return catalog.FaceDetection{}, catalog.ErrNotFound
+}
+
+func (s *Server) assignFaceDetection(ctx context.Context, detectionID, clusterID, label string) (catalog.FaceDetection, error) {
+	faces, err := s.deps.Store.ListFaceDetections(ctx, "")
+	if err != nil {
+		return catalog.FaceDetection{}, err
+	}
+	for _, face := range faces {
+		if face.ID != detectionID {
+			continue
+		}
+		if clusterID == "" {
+			cluster, err := s.deps.Store.UpsertFaceCluster(ctx, catalog.FaceCluster{
+				Label:                label,
+				RepresentativeFaceID: face.ID,
+				Metadata:             map[string]any{"local_only": true},
+			})
+			if err != nil {
+				return catalog.FaceDetection{}, err
+			}
+			clusterID = cluster.ID
+		}
+		face.ClusterID = clusterID
+		if face.Metadata == nil {
+			face.Metadata = map[string]any{}
+		}
+		face.Metadata["review_status"] = "assigned"
+		return s.deps.Store.UpdateFaceDetection(ctx, face)
+	}
+	return catalog.FaceDetection{}, catalog.ErrNotFound
+}
+
+func metadataBool(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	switch value := metadata[key].(type) {
+	case bool:
+		return value
+	case string:
+		parsed, _ := strconv.ParseBool(value)
+		return parsed
+	default:
+		return false
+	}
+}
+
+func (s *Server) handleGeoAlignSessionCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "geo_align.session") {
+		return
+	}
+	var req struct {
+		AssetIDs []string `json:"asset_ids"`
+		TrackIDs []string `json:"track_ids"`
+		Limit    int      `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 54
+	}
+	assets := []catalog.Asset{}
+	if len(req.AssetIDs) > 0 {
+		for _, assetID := range req.AssetIDs {
+			asset, err := s.deps.Store.GetAsset(r.Context(), strings.TrimSpace(assetID))
+			if err == nil && (asset.MediaKind == "photo" || asset.MediaKind == "video") {
+				assets = append(assets, asset)
+			}
+			if len(assets) >= limit {
+				break
+			}
+		}
+	} else {
+		page, err := s.deps.Store.QueryAssets(r.Context(), catalog.AssetQuery{Limit: limit, Sort: "taken_at"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, asset := range page.Assets {
+			if asset.MediaKind == "photo" || asset.MediaKind == "video" {
+				assets = append(assets, asset)
+			}
+		}
+	}
+	session, err := s.buildGeoAlignSession(r.Context(), assets, req.TrackIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.sessionMu.Lock()
+	s.geoAlignSessions[session.ID] = &session
+	s.sessionMu.Unlock()
+	writeJSON(w, http.StatusCreated, session)
+}
+
+func (s *Server) handleGeoAlignSessionByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/geo-align/sessions/"), "/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.Split(rest, "/")
+	sessionID := parts[0]
+	s.sessionMu.RLock()
+	session := s.geoAlignSessions[sessionID]
+	s.sessionMu.RUnlock()
+	if session == nil {
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, session)
+		return
+	}
+	if !s.requireWrite(w, r, "geo_align.session.write") {
+		return
+	}
+	if len(parts) == 2 && parts[1] == "reset" && r.Method == http.MethodPost {
+		for i := range session.Markers {
+			session.Markers[i].ManualLat = nil
+			session.Markers[i].ManualLon = nil
+			session.Markers[i].Modified = false
+		}
+		session.UpdatedAt = time.Now().UTC()
+		writeJSON(w, http.StatusOK, session)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "apply" && r.Method == http.MethodPost {
+		updated := 0
+		for _, marker := range session.Markers {
+			if !marker.Modified || marker.ManualLat == nil || marker.ManualLon == nil {
+				continue
+			}
+			geo := catalog.AssetGeo{
+				AssetID: marker.AssetID,
+				Lat:     *marker.ManualLat,
+				Lon:     *marker.ManualLon,
+				Source:  "manual_user",
+				Metadata: map[string]any{
+					"geo_align_session_id": session.ID,
+					"note":                 "DB-only user clarified geotag; originals were not modified",
+				},
+			}
+			if _, err := s.deps.Store.UpsertAssetGeo(r.Context(), geo, true); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			updated++
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "applied", "updated": updated, "write_exif_enabled": false})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "write-exif" && r.Method == http.MethodPost {
+		writeError(w, http.StatusConflict, errors.New("EXIF writeback is disabled for strict read-only storage; DB-only overrides remain available"))
+		return
+	}
+	if len(parts) == 3 && parts[1] == "marker" && r.Method == http.MethodPatch {
+		var req struct {
+			Lat float64 `json:"lat"`
+			Lon float64 `json:"lon"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		for i := range session.Markers {
+			if session.Markers[i].AssetID == parts[2] {
+				session.Markers[i].ManualLat = &req.Lat
+				session.Markers[i].ManualLon = &req.Lon
+				session.Markers[i].StagedLat = req.Lat
+				session.Markers[i].StagedLon = req.Lon
+				session.Markers[i].Modified = true
+				session.UpdatedAt = time.Now().UTC()
+				writeJSON(w, http.StatusOK, session.Markers[i])
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) buildGeoAlignSession(ctx context.Context, assets []catalog.Asset, trackIDs []string) (geoAlignSession, error) {
+	now := time.Now().UTC()
+	session := geoAlignSession{
+		ID:        id.NewUUID(),
+		AssetIDs:  []string{},
+		TrackIDs:  trackIDs,
+		Markers:   []geoAlignMarker{},
+		ReadOnly:  true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	minLat, minLon, maxLat, maxLon := math.MaxFloat64, math.MaxFloat64, -math.MaxFloat64, -math.MaxFloat64
+	trackDetails := map[string]catalog.TrackDetail{}
+	for _, trackID := range trackIDs {
+		detail, err := s.deps.Store.GetTrack(ctx, trackID)
+		if err == nil {
+			trackDetails[trackID] = detail
+			for _, point := range detail.Points {
+				minLat = math.Min(minLat, point.Lat)
+				minLon = math.Min(minLon, point.Lon)
+				maxLat = math.Max(maxLat, point.Lat)
+				maxLon = math.Max(maxLon, point.Lon)
+			}
+		}
+	}
+	stagingLat := 40.05
+	stagingLon := 44.05
+	if minLat != math.MaxFloat64 {
+		stagingLat = minLat - math.Max(0.005, (maxLat-minLat)*0.15)
+		stagingLon = minLon - math.Max(0.005, (maxLon-minLon)*0.15)
+	}
+	for index, asset := range assets {
+		marker := geoAlignMarker{
+			AssetID:         asset.ID,
+			Name:            asset.DisplayName,
+			MediaKind:       asset.MediaKind,
+			ThumbnailURL:    fmt.Sprintf("/api/v1/media/%s/preview", asset.ID),
+			Status:          "ungeotagged",
+			TrackCandidates: []map[string]any{},
+			Metadata:        map[string]any{},
+		}
+		if geo, err := s.deps.Store.GetAssetGeo(ctx, asset.ID); err == nil {
+			marker.OriginalLat = &geo.Lat
+			marker.OriginalLon = &geo.Lon
+			marker.StagedLat = geo.Lat
+			marker.StagedLon = geo.Lon
+			marker.Status = "own_geotag"
+			minLat = math.Min(minLat, geo.Lat)
+			minLon = math.Min(minLon, geo.Lon)
+			maxLat = math.Max(maxLat, geo.Lat)
+			maxLon = math.Max(maxLon, geo.Lon)
+		} else {
+			marker.StagedLat = stagingLat
+			marker.StagedLon = stagingLon + float64(index)*0.00015
+		}
+		if asset.TakenAt != nil {
+			for trackID, detail := range trackDetails {
+				if point, mode, err := interpolateTrackPoint(detail.Points, *asset.TakenAt); err == nil {
+					marker.TrackCandidates = append(marker.TrackCandidates, map[string]any{
+						"track_id": trackID,
+						"lat":      point.Lat,
+						"lon":      point.Lon,
+						"mode":     mode,
+						"time":     point.RecordedAt,
+					})
+					marker.Status = "track_candidate"
+				}
+			}
+		}
+		session.AssetIDs = append(session.AssetIDs, asset.ID)
+		session.Markers = append(session.Markers, marker)
+	}
+	if minLat == math.MaxFloat64 {
+		minLat, minLon, maxLat, maxLon = stagingLat, stagingLon, stagingLat+0.01, stagingLon+0.01
+	}
+	session.BBox = catalog.BBox{MinLat: minLat, MinLon: minLon, MaxLat: maxLat, MaxLon: maxLon}
+	return session, nil
+}
+
+func (s *Server) handleVideoTrackPlayerSessionCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct {
+		VideoAssetID  string   `json:"video_asset_id"`
+		TrackIDs      []string `json:"track_ids"`
+		TimestampMode string   `json:"timestamp_mode"`
+		OffsetSeconds float64  `json:"offset_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), strings.TrimSpace(req.VideoAssetID))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if asset.MediaKind != "video" {
+		writeError(w, http.StatusBadRequest, errors.New("video-track player requires a video asset"))
+		return
+	}
+	if len(req.TrackIDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("select at least one GPS/KML track"))
+		return
+	}
+	mode := req.TimestampMode
+	if mode != "video_end_time" {
+		mode = "video_start_time"
+	}
+	session := &videoTrackPlayerSession{
+		ID:            id.NewUUID(),
+		VideoAssetID:  asset.ID,
+		TrackIDs:      req.TrackIDs,
+		TimestampMode: mode,
+		OffsetSeconds: req.OffsetSeconds,
+		CreatedAt:     time.Now().UTC(),
+		Metadata:      map[string]any{"video_name": asset.DisplayName},
+	}
+	if asset.TakenAt == nil {
+		session.Warnings = append(session.Warnings, "Video has no taken_at timestamp; map synchronization cannot compute absolute positions.")
+	}
+	s.sessionMu.Lock()
+	s.videoTrackSessions[session.ID] = session
+	s.sessionMu.Unlock()
+	writeJSON(w, http.StatusCreated, session)
+}
+
+func (s *Server) handleVideoTrackPlayerSessionByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/video-track-player/sessions/"), "/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.Split(rest, "/")
+	sessionID := parts[0]
+	s.sessionMu.RLock()
+	session := s.videoTrackSessions[sessionID]
+	s.sessionMu.RUnlock()
+	if session == nil {
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, session)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "position" && r.Method == http.MethodGet {
+		timeMS, _ := strconv.ParseInt(r.URL.Query().Get("time_ms"), 10, 64)
+		payload, err := s.videoTrackPosition(r.Context(), session, timeMS)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) videoTrackPosition(ctx context.Context, session *videoTrackPlayerSession, timeMS int64) (map[string]any, error) {
+	asset, err := s.deps.Store.GetAsset(ctx, session.VideoAssetID)
+	if err != nil {
+		return nil, err
+	}
+	if asset.TakenAt == nil {
+		return map[string]any{"session_id": session.ID, "positions": []map[string]any{}, "warning": "video timestamp unavailable"}, nil
+	}
+	target := asset.TakenAt.Add(time.Duration(timeMS)*time.Millisecond + time.Duration(session.OffsetSeconds*float64(time.Second)))
+	if session.TimestampMode == "video_end_time" {
+		duration := mediaDuration(asset.Metadata)
+		if duration > 0 {
+			target = asset.TakenAt.Add(-duration).Add(time.Duration(timeMS)*time.Millisecond + time.Duration(session.OffsetSeconds*float64(time.Second)))
+		}
+	}
+	positions := []map[string]any{}
+	warnings := []string{}
+	for _, trackID := range session.TrackIDs {
+		detail, err := s.deps.Store.GetTrack(ctx, trackID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", trackID, err))
+			continue
+		}
+		point, mode, err := interpolateTrackPoint(detail.Points, target)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: no point at %s", trackID, target.Format(time.RFC3339)))
+			continue
+		}
+		positions = append(positions, map[string]any{
+			"track_id": trackID,
+			"name":     detail.Summary.Name,
+			"lat":      point.Lat,
+			"lon":      point.Lon,
+			"time":     point.RecordedAt,
+			"mode":     mode,
+		})
+	}
+	return map[string]any{"session_id": session.ID, "target_time": target, "positions": positions, "warnings": warnings}, nil
+}
+
+func mediaDuration(metadata map[string]any) time.Duration {
+	if metadata == nil {
+		return 0
+	}
+	for _, key := range []string{"duration_seconds", "duration_sec", "duration"} {
+		switch value := metadata[key].(type) {
+		case float64:
+			if value > 0 {
+				return time.Duration(value * float64(time.Second))
+			}
+		case int:
+			if value > 0 {
+				return time.Duration(value) * time.Second
+			}
+		case string:
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err == nil && parsed > 0 {
+				return time.Duration(parsed * float64(time.Second))
+			}
+		}
+	}
+	return 0
 }
 
 func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
@@ -3484,6 +4259,50 @@ func filterJobs(input []jobs.Job, r *http.Request) []jobs.Job {
 		end = len(out)
 	}
 	return out[offset:end]
+}
+
+func truthyQuery(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func summarizeJobsForList(input []jobs.Job) []jobs.Job {
+	out := make([]jobs.Job, len(input))
+	for i, job := range input {
+		out[i] = job
+		out[i].Payload = summarizeJobPayload(job.Payload)
+	}
+	return out
+}
+
+func summarizeJobPayload(payload any) any {
+	bytes, err := json.Marshal(payload)
+	if err != nil || len(bytes) <= 16*1024 {
+		return payload
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(bytes, &decoded); err != nil {
+		return map[string]any{"summary": "large payload omitted from list response", "bytes": len(bytes)}
+	}
+	result, _ := decoded["result"].(map[string]any)
+	scope := decoded["scope"]
+	summary := map[string]any{
+		"summary":       "large payload summarized for jobs list; request the job by id for full payload",
+		"kind":          decoded["kind"],
+		"scope":         scope,
+		"result_status": result["status"],
+		"processed":     result["processed"],
+		"targets":       result["targets"],
+		"skipped":       result["skipped"],
+		"stored":        result["stored"],
+		"worker_id":     result["worker_id"],
+		"endpoint":      result["endpoint"],
+		"bytes":         len(bytes),
+	}
+	if skippedKinds, ok := result["skipped_kinds"]; ok {
+		summary["skipped_kinds"] = skippedKinds
+	}
+	return summary
 }
 
 func paginateLogs(logs []jobs.LogLine, r *http.Request) map[string]any {

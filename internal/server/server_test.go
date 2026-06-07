@@ -223,6 +223,139 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	}
 }
 
+func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{Version: "test", Config: cfg, Plugins: plugins.BuiltIns(), Registry: registry, Store: store, StoreBackend: "memory"})
+	now := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	photo, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fixture://photos/photo.jpg",
+		RelativePath: "photos/photo.jpg",
+		Name:         "photo.jpg",
+		Extension:    ".jpg",
+		MIME:         "image/jpeg",
+		MediaKind:    "photo",
+		SizeBytes:    12,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	video, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fixture://videos/video.mp4",
+		RelativePath: "videos/video.mp4",
+		Name:         "video.mp4",
+		Extension:    ".mp4",
+		MIME:         "video/mp4",
+		MediaKind:    "video",
+		SizeBytes:    24,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAssetMetadata(ctx, photo.Asset.ID, &now, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAssetMetadata(ctx, video.Asset.ID, &now, map[string]any{"duration_seconds": 7}); err != nil {
+		t.Fatal(err)
+	}
+	confidence := 0.9
+	face, err := store.CreateFaceDetection(ctx, catalog.FaceDetection{
+		AssetID:    photo.Asset.ID,
+		X:          10,
+		Y:          20,
+		Width:      30,
+		Height:     40,
+		Confidence: &confidence,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/faces/clusters", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"face_count":1`) {
+		t.Fatalf("clusters status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/faces/detections/"+face.ID+"/ignore", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ignored":true`) {
+		t.Fatalf("ignore status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := store.UpsertAssetGeo(ctx, catalog.AssetGeo{AssetID: photo.Asset.ID, Lat: 40.1, Lon: 44.1, Source: "exif"}, true); err != nil {
+		t.Fatal(err)
+	}
+	trackAsset, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fixture://tracks/test.gpx",
+		RelativePath: "tracks/test.gpx",
+		Name:         "test.gpx",
+		Extension:    ".gpx",
+		MIME:         "application/gpx+xml",
+		MediaKind:    "track",
+		SizeBytes:    32,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackID := trackAsset.Asset.ID
+	points := []catalog.TrackPoint{
+		{TrackAssetID: trackID, RecordedAt: now.Add(-time.Second), Lat: 40.0, Lon: 44.0, Source: "test"},
+		{TrackAssetID: trackID, RecordedAt: now.Add(time.Second), Lat: 40.2, Lon: 44.2, Source: "test"},
+	}
+	if err := store.UpsertTrackPoints(ctx, trackID, points); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertGPSTrackSummary(ctx, catalog.TrackSummary{TrackAssetID: trackID, Name: "test track", PointCount: len(points), SourceFormat: "gpx"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/geo-align/session", strings.NewReader(`{"limit":10,"track_ids":["`+trackID+`"]}`)))
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"markers"`) {
+		t.Fatalf("geo session status %d body %s", rec.Code, rec.Body.String())
+	}
+	var geoSession geoAlignSession
+	if err := json.Unmarshal(rec.Body.Bytes(), &geoSession); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/geo-align/sessions/"+geoSession.ID+"/marker/"+photo.Asset.ID, strings.NewReader(`{"lat":40.3,"lon":44.3}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"modified":true`) {
+		t.Fatalf("geo marker status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/geo-align/sessions/"+geoSession.ID+"/apply", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"updated":1`) {
+		t.Fatalf("geo apply status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/video-track-player/session", strings.NewReader(`{"video_asset_id":"`+video.Asset.ID+`","track_ids":["`+trackID+`"]}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("video session status %d body %s", rec.Code, rec.Body.String())
+	}
+	var videoSession videoTrackPlayerSession
+	if err := json.Unmarshal(rec.Body.Bytes(), &videoSession); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/video-track-player/sessions/"+videoSession.ID+"/position?time_ms=500", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"positions"`) {
+		t.Fatalf("video position status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestScreenDistanceClusteringSplitsWithZoom(t *testing.T) {
 	features := []map[string]any{
 		testPointFeature("a", 44.10000, 40.10000),

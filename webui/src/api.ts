@@ -76,6 +76,71 @@ export type Asset = {
   }>;
 };
 
+export type FaceDetection = {
+  id: string;
+  asset_id: string;
+  plugin_id?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence?: number;
+  cluster_id?: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+};
+
+export type FaceCluster = {
+  id: string;
+  label: string;
+  representative_face_id?: string;
+  face_count: number;
+  asset_count: number;
+  ignored_count: number;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type GeoAlignMarker = {
+  asset_id: string;
+  name: string;
+  media_kind: string;
+  thumbnail_url?: string;
+  original_lat?: number;
+  original_lon?: number;
+  manual_lat?: number;
+  manual_lon?: number;
+  staged_lat: number;
+  staged_lon: number;
+  status: string;
+  track_candidates: Array<Record<string, unknown>>;
+  modified: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+export type GeoAlignSession = {
+  id: string;
+  asset_ids: string[];
+  track_ids: string[];
+  markers: GeoAlignMarker[];
+  bbox: { min_lon: number; min_lat: number; max_lon: number; max_lat: number };
+  read_only: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VideoTrackPlayerSession = {
+  id: string;
+  video_asset_id: string;
+  track_ids: string[];
+  timestamp_mode: string;
+  offset_seconds: number;
+  warnings?: string[];
+  created_at: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type PreviewInfo = {
   status: string;
   url?: string;
@@ -879,6 +944,7 @@ export const api = {
   stopTranscodeSession: (sessionId: string) =>
     request<{ status: string }>(`/api/v1/media/transcode-sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   transcodingStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/status"),
+  transcodingMetricsStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/metrics/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
   aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed", payload: Record<string, unknown>) =>
@@ -888,6 +954,44 @@ export const api = {
   aiPredictions: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/predictions?limit=${limit}`),
   aiFaces: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/faces?limit=${limit}`),
   aiSafety: () => request<Record<string, unknown>>("/api/v1/ai/safety"),
+  faceClusters: () => request<{ clusters: FaceCluster[]; total: number; provisional_note?: string }>("/api/v1/faces/clusters"),
+  faceClusterAssets: (clusterId: string) =>
+    request<{ cluster_id: string; faces: FaceDetection[]; assets: Asset[]; total: number }>(
+      `/api/v1/faces/clusters/${encodeURIComponent(clusterId)}/assets`
+    ).then((response) => ({
+      ...response,
+      faces: asArray(response.faces),
+      assets: asArray(response.assets).map(normalizeAsset)
+    })),
+  updateFaceCluster: (clusterId: string, payload: { label?: string; metadata?: Record<string, unknown> }) =>
+    request<FaceCluster>(`/api/v1/faces/clusters/${encodeURIComponent(clusterId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  ignoreFaceDetection: (detectionId: string) =>
+    request<FaceDetection>(`/api/v1/faces/detections/${encodeURIComponent(detectionId)}/ignore`, { method: "POST" }),
+  createGeoAlignSession: (payload: { asset_ids?: string[]; track_ids?: string[]; limit?: number }) =>
+    request<GeoAlignSession>("/api/v1/geo-align/session", { method: "POST", body: JSON.stringify(payload) }),
+  getGeoAlignSession: (id: string) => request<GeoAlignSession>(`/api/v1/geo-align/sessions/${encodeURIComponent(id)}`),
+  moveGeoAlignMarker: (sessionId: string, assetId: string, lat: number, lon: number) =>
+    request<GeoAlignMarker>(
+      `/api/v1/geo-align/sessions/${encodeURIComponent(sessionId)}/marker/${encodeURIComponent(assetId)}`,
+      { method: "PATCH", body: JSON.stringify({ lat, lon }) }
+    ),
+  resetGeoAlignSession: (id: string) =>
+    request<GeoAlignSession>(`/api/v1/geo-align/sessions/${encodeURIComponent(id)}/reset`, { method: "POST" }),
+  applyGeoAlignSession: (id: string) =>
+    request<Record<string, unknown>>(`/api/v1/geo-align/sessions/${encodeURIComponent(id)}/apply`, { method: "POST" }),
+  createVideoTrackPlayerSession: (payload: {
+    video_asset_id: string;
+    track_ids: string[];
+    timestamp_mode?: string;
+    offset_seconds?: number;
+  }) => request<VideoTrackPlayerSession>("/api/v1/video-track-player/session", { method: "POST", body: JSON.stringify(payload) }),
+  videoTrackPlayerPosition: (sessionId: string, timeMS: number) =>
+    request<Record<string, unknown>>(
+      `/api/v1/video-track-player/sessions/${encodeURIComponent(sessionId)}/position?time_ms=${encodeURIComponent(String(Math.round(timeMS)))}`
+    ),
   vectorStatus: () => request<Record<string, unknown>>("/api/v1/vector/status"),
   vectorSearch: (q: string, limit = 20) =>
     request<Record<string, unknown>>(

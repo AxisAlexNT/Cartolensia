@@ -39,6 +39,12 @@ type Capabilities struct {
 	Safety   string        `json:"safety"`
 }
 
+type MetricsStatus struct {
+	Available bool              `json:"available"`
+	Filters   map[string]bool   `json:"filters"`
+	Notes     map[string]string `json:"notes"`
+}
+
 func Detect(ctx context.Context) Capabilities {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -81,6 +87,9 @@ func ParseEncoders(output string) []Encoder {
 			continue
 		}
 		name := fields[1]
+		if name == "=" {
+			continue
+		}
 		desc := strings.TrimSpace(strings.TrimPrefix(line, flags+" "+name))
 		out = append(out, Encoder{Name: name, Description: desc, CodecFamily: codecFamily(name, desc), Hardware: hardwareKind(name)})
 	}
@@ -98,6 +107,35 @@ func Status(ctx context.Context) map[string]any {
 		"jobs_implemented": false,
 		"safety":           "transcoding outputs are future work and must never be written into original storage by default",
 	}
+}
+
+func DetectMetrics(ctx context.Context) MetricsStatus {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ffmpeg := detectTool(ctx, "ffmpeg")
+	status := MetricsStatus{
+		Available: ffmpeg.Available,
+		Filters:   map[string]bool{"libvmaf": false, "ssim": false, "psnr": false},
+		Notes: map[string]string{
+			"libvmaf": "requires ffmpeg built with libvmaf",
+			"ssim":    "ffmpeg ssim filter",
+			"psnr":    "ffmpeg psnr filter",
+		},
+	}
+	if !ffmpeg.Available {
+		status.Notes["ffmpeg"] = "ffmpeg is unavailable"
+		return status
+	}
+	output, err := exec.CommandContext(ctx, ffmpeg.Path, "-hide_banner", "-filters").CombinedOutput()
+	if err != nil {
+		status.Notes["ffmpeg"] = strings.TrimSpace(string(output))
+		return status
+	}
+	text := string(output)
+	for filter := range status.Filters {
+		status.Filters[filter] = strings.Contains(text, " "+filter+" ") || strings.Contains(text, " "+filter+"\n")
+	}
+	return status
 }
 
 func detectTool(ctx context.Context, name string) ToolInfo {

@@ -5,6 +5,7 @@ import "testing"
 func TestParseEncoders(t *testing.T) {
 	const sample = `
 Encoders:
+ V..... = Video
  V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10
  V....D h264_nvenc           NVIDIA NVENC H.264 encoder
  V....D hevc_vaapi           H.265/HEVC VAAPI encoder

@@ -1367,6 +1367,100 @@ func (db *DB) ListFaceDetections(ctx context.Context, assetID string) ([]catalog
 	return out, rows.Err()
 }
 
+func (db *DB) UpsertFaceCluster(ctx context.Context, cluster catalog.FaceCluster) (catalog.FaceCluster, error) {
+	if cluster.ID == "" {
+		cluster.ID = id.NewUUID()
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(cluster.Metadata))
+	if err != nil {
+		return catalog.FaceCluster{}, err
+	}
+	var representative *string
+	if strings.TrimSpace(cluster.RepresentativeFaceID) != "" {
+		value := strings.TrimSpace(cluster.RepresentativeFaceID)
+		representative = &value
+	}
+	err = db.pool.QueryRow(ctx, `
+		insert into face_clusters(id, label, representative_face_id, metadata_json)
+		values($1,$2,$3,$4::jsonb)
+		on conflict(id) do update set
+			label=excluded.label,
+			representative_face_id=coalesce(excluded.representative_face_id, face_clusters.representative_face_id),
+			metadata_json=excluded.metadata_json,
+			updated_at=now()
+		returning id, label, coalesce(representative_face_id::text,''), metadata_json, created_at, updated_at`,
+		cluster.ID, cluster.Label, representative, metadata,
+	).Scan(&cluster.ID, &cluster.Label, &cluster.RepresentativeFaceID, &metadata, &cluster.CreatedAt, &cluster.UpdatedAt)
+	if err != nil {
+		return catalog.FaceCluster{}, err
+	}
+	if err := json.Unmarshal(metadata, &cluster.Metadata); err != nil || cluster.Metadata == nil {
+		cluster.Metadata = map[string]any{}
+	}
+	return cluster, nil
+}
+
+func (db *DB) ListFaceClusters(ctx context.Context) ([]catalog.FaceCluster, error) {
+	rows, err := db.pool.Query(ctx, `
+		select c.id, c.label, coalesce(c.representative_face_id::text,''), c.metadata_json, c.created_at, c.updated_at,
+			count(d.id)::int as face_count,
+			count(distinct d.asset_id)::int as asset_count,
+			coalesce(sum(case when coalesce((d.metadata_json->>'ignored')::boolean, false) then 1 else 0 end), 0)::int as ignored_count
+		from face_clusters c
+		left join face_detections d on d.cluster_id=c.id
+		group by c.id, c.label, c.representative_face_id, c.metadata_json, c.created_at, c.updated_at
+		order by nullif(c.label,'') nulls last, c.updated_at desc
+		limit 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.FaceCluster{}
+	for rows.Next() {
+		var cluster catalog.FaceCluster
+		var metadata []byte
+		if err := rows.Scan(&cluster.ID, &cluster.Label, &cluster.RepresentativeFaceID, &metadata, &cluster.CreatedAt, &cluster.UpdatedAt, &cluster.FaceCount, &cluster.AssetCount, &cluster.IgnoredCount); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(metadata, &cluster.Metadata); err != nil || cluster.Metadata == nil {
+			cluster.Metadata = map[string]any{}
+		}
+		out = append(out, cluster)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) UpdateFaceDetection(ctx context.Context, face catalog.FaceDetection) (catalog.FaceDetection, error) {
+	metadata, err := json.Marshal(metadataOrEmpty(face.Metadata))
+	if err != nil {
+		return catalog.FaceDetection{}, err
+	}
+	err = db.pool.QueryRow(ctx, `
+		update face_detections
+		set plugin_id=nullif($2,''),
+			x=$3,
+			y=$4,
+			width=$5,
+			height=$6,
+			confidence=$7,
+			cluster_id=nullif($8,'')::uuid,
+			metadata_json=$9::jsonb
+		where id=$1
+		returning id, asset_id, coalesce(plugin_id,''), x, y, width, height, confidence, coalesce(cluster_id::text,''), metadata_json, created_at`,
+		face.ID, face.PluginID, face.X, face.Y, face.Width, face.Height, face.Confidence, face.ClusterID, metadata,
+	).Scan(&face.ID, &face.AssetID, &face.PluginID, &face.X, &face.Y, &face.Width, &face.Height, &face.Confidence, &face.ClusterID, &metadata, &face.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return catalog.FaceDetection{}, catalog.ErrNotFound
+		}
+		return catalog.FaceDetection{}, err
+	}
+	if err := json.Unmarshal(metadata, &face.Metadata); err != nil || face.Metadata == nil {
+		face.Metadata = map[string]any{}
+	}
+	return face, nil
+}
+
 func (db *DB) UpsertEmbeddingModel(ctx context.Context, model catalog.EmbeddingModel) (catalog.EmbeddingModel, error) {
 	if model.ID == "" {
 		model.ID = model.ModelName + ":" + model.Version + ":" + model.Modality

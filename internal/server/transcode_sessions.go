@@ -672,6 +672,9 @@ func validateTranscodingPreset(preset catalog.TranscodingPreset, caps transcodin
 	if !encoderAvailable(caps, preset.FFmpegEncoder) {
 		return fmt.Errorf("ffmpeg encoder %q is unavailable", preset.FFmpegEncoder)
 	}
+	if strings.EqualFold(preset.Codec, "av1") && strings.EqualFold(preset.Container, "hls") {
+		return fmt.Errorf("AV1 live HLS playback is disabled until a browser-safe fMP4/WebM route is validated; use H.264 for live streaming or configure AV1 as an offline/cache job")
+	}
 	if preset.Hardware != "" && preset.Hardware != "cpu" && !hardwareAvailable(caps, preset.Hardware) {
 		return fmt.Errorf("hardware %q is unavailable", preset.Hardware)
 	}
@@ -684,6 +687,9 @@ func validateTranscodingPreset(preset catalog.TranscodingPreset, caps transcodin
 }
 
 func hlsArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir string) ([]string, error) {
+	if strings.EqualFold(preset.Codec, "av1") || strings.Contains(strings.ToLower(preset.FFmpegEncoder), "av1") {
+		return nil, fmt.Errorf("AV1 live HLS playback is disabled until a browser-safe fMP4/WebM route is validated")
+	}
 	videoArgs, err := videoArgsForPreset(preset)
 	if err != nil {
 		return nil, err

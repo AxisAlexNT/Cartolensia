@@ -139,3 +139,11 @@ Current added dependency notes:
 - The approved NVENC validation used null-output ffmpeg dry-runs only. No transcoded file was written to the archive or cache during the validation command.
 - On-demand previews remain the preferred default to avoid write amplification; persistent preview generation is opt-in.
 - The server-side file/folder picker is read-only and allowlist based. It may expose configured storage roots for operator selection, but it does not write, scan, index, or change storage mode. Real archive roots are labeled strict read-only and remain protected by backend storage guards.
+
+## 2026-06-07 Workflow Safety Notes
+
+- Face folder naming, ignored detections, AI predictions, and safety labels are metadata only. They never move, hide, delete, or rewrite original files.
+- Geo Align apply writes only Cartolensia database geotag overrides in the current real-peek mode. EXIF writeback is explicitly blocked for `strict_read_only` storage.
+- Video Track Player sessions are read-only and derive transient marker positions from existing media metadata and track points.
+- Map cluster popups and track previews read existing metadata and tile/cache data only; they do not trigger discovery or missing-file marking.
+- AV1 live HLS is blocked when unsupported so the system does not start expensive, failing transcodes without a clear operator decision.

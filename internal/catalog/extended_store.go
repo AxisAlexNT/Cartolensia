@@ -956,6 +956,69 @@ func (s *MemoryStore) ListFaceDetections(_ context.Context, assetID string) ([]F
 	return out, nil
 }
 
+func (s *MemoryStore) UpsertFaceCluster(_ context.Context, cluster FaceCluster) (FaceCluster, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if cluster.ID == "" {
+		cluster.ID = id.NewUUID()
+	}
+	existing := s.faceClusters[cluster.ID]
+	if cluster.Label == "" {
+		cluster.Label = existing.Label
+	}
+	if cluster.Metadata == nil {
+		cluster.Metadata = existing.Metadata
+	}
+	if cluster.Metadata == nil {
+		cluster.Metadata = map[string]any{}
+	}
+	if existing.CreatedAt.IsZero() {
+		cluster.CreatedAt = now
+	} else {
+		cluster.CreatedAt = existing.CreatedAt
+	}
+	cluster.UpdatedAt = now
+	s.faceClusters[cluster.ID] = cluster
+	return cluster, nil
+}
+
+func (s *MemoryStore) ListFaceClusters(_ context.Context) ([]FaceCluster, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]FaceCluster, 0, len(s.faceClusters))
+	for _, cluster := range s.faceClusters {
+		out = append(out, cluster)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Label == out[j].Label {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].Label < out[j].Label
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateFaceDetection(_ context.Context, face FaceDetection) (FaceDetection, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	detections := s.faceDetections[face.AssetID]
+	for i := range detections {
+		if detections[i].ID == face.ID {
+			if face.Metadata == nil {
+				face.Metadata = map[string]any{}
+			}
+			if face.CreatedAt.IsZero() {
+				face.CreatedAt = detections[i].CreatedAt
+			}
+			detections[i] = face
+			s.faceDetections[face.AssetID] = detections
+			return face, nil
+		}
+	}
+	return FaceDetection{}, ErrNotFound
+}
+
 func (s *MemoryStore) UpsertEmbeddingModel(_ context.Context, model EmbeddingModel) (EmbeddingModel, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -392,6 +392,18 @@ type FaceDetection struct {
 	CreatedAt  time.Time      `json:"created_at"`
 }
 
+type FaceCluster struct {
+	ID                   string         `json:"id"`
+	Label                string         `json:"label"`
+	RepresentativeFaceID string         `json:"representative_face_id,omitempty"`
+	FaceCount            int            `json:"face_count"`
+	AssetCount           int            `json:"asset_count"`
+	IgnoredCount         int            `json:"ignored_count"`
+	Metadata             map[string]any `json:"metadata,omitempty"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+}
+
 type EmbeddingModel struct {
 	ID        string         `json:"id"`
 	Modality  string         `json:"modality"`
@@ -471,6 +483,9 @@ type Store interface {
 	ListAIPredictions(context.Context, string) ([]AIPrediction, error)
 	CreateFaceDetection(context.Context, FaceDetection) (FaceDetection, error)
 	ListFaceDetections(context.Context, string) ([]FaceDetection, error)
+	UpsertFaceCluster(context.Context, FaceCluster) (FaceCluster, error)
+	ListFaceClusters(context.Context) ([]FaceCluster, error)
+	UpdateFaceDetection(context.Context, FaceDetection) (FaceDetection, error)
 	UpsertEmbeddingModel(context.Context, EmbeddingModel) (EmbeddingModel, error)
 	UpsertAssetEmbedding(context.Context, AssetEmbedding) (AssetEmbedding, error)
 	ListAssetEmbeddings(context.Context, string) ([]AssetEmbedding, error)
@@ -506,6 +521,7 @@ type MemoryStore struct {
 	assetTags        map[string]map[string]AssetTag
 	aiPredictions    map[string][]AIPrediction
 	faceDetections   map[string][]FaceDetection
+	faceClusters     map[string]FaceCluster
 	embeddingModels  map[string]EmbeddingModel
 	assetEmbeddings  map[string]AssetEmbedding
 	jobs             map[string]jobs.Job
@@ -528,6 +544,7 @@ func NewMemoryStore() *MemoryStore {
 		assetTags:        make(map[string]map[string]AssetTag),
 		aiPredictions:    make(map[string][]AIPrediction),
 		faceDetections:   make(map[string][]FaceDetection),
+		faceClusters:     make(map[string]FaceCluster),
 		embeddingModels:  make(map[string]EmbeddingModel),
 		assetEmbeddings:  make(map[string]AssetEmbedding),
 		jobs:             make(map[string]jobs.Job),

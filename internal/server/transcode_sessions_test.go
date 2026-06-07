@@ -90,4 +90,7 @@ func TestTranscodePresetValidationAndNVENCArgs(t *testing.T) {
 	if warnings := transcodePresetWarnings(av1, transcoding.Capabilities{}); len(warnings) == 0 {
 		t.Fatal("expected RTX 3090 Ti AV1 warning")
 	}
+	if _, err := hlsArgsForPreset(av1, "/tmp/input.mp4", t.TempDir()); err == nil || !strings.Contains(err.Error(), "AV1 live HLS playback is disabled") {
+		t.Fatalf("expected AV1 HLS disabled error, got %v", err)
+	}
 }

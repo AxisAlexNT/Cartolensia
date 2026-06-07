@@ -1505,6 +1505,63 @@ Continue from the current Cartolensia repository and live real-peek service. Imp
 - PostgreSQL was not reset.
 - No commit and no push were done.
 
+## 2026-06-07 Long Productization/Workflow Stabilization Run
+
+Start state:
+
+- Live real-peek app was available at `http://127.0.0.1:18080`.
+- Current DB state remained bounded: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks.
+- `/api/v1/jobs?limit=5` showed a very large `ai_detect_faces` payload in list responses, confirming the Jobs UI noise/performance issue.
+
+Implemented:
+
+- File picker/modal stacking fix: dedicated Cartolensia modal backdrop with explicit z-index ordering.
+- Track preview and overlay hardening: full-height track gallery layout, repeated OpenLayers `updateSize()`/fit after layout settles, and track controls above OpenLayers layers.
+- Map cluster stability: single-click cluster auto-zoom was removed; cluster popups now stay open and expose an explicit `Zoom to cluster` action.
+- Face management: added local face cluster store/API support, `Face Gallery` page, cluster naming, ignore actions, and asset-detail face box overlays.
+- Jobs progress hardening: list responses summarize large AI payloads by default while individual job details can still expose the full payload.
+- AV1 truthfulness: custom AV1 live-HLS presets now fail validation before spawning ffmpeg with an actionable browser-safety message.
+- Transcoding metrics: added `GET /api/v1/transcoding/metrics/status` for SSIM/PSNR/libvmaf filter status and fixed ffmpeg encoder legend parsing.
+- Photo/GPS alignment MVP: added bounded in-memory session API and `Geo Align` page; apply writes DB-only `manual_user` geotags; EXIF writeback is disabled for strict read-only storage.
+- Video/track synchronized player MVP: added session/position API and `Video Track Player` page with video selection, track selection, timestamp mode, offset, and synchronized position payload.
+
+Live validation:
+
+- `/api/v1/faces/clusters`: returned `10` provisional face folders from existing detections.
+- `/api/v1/transcoding/metrics/status`: returned SSIM/PSNR available and libvmaf unavailable.
+- `/api/v1/jobs?limit=2`: large AI face job payload is summarized in list response.
+- `/api/v1/media/56ff84bf-b7ae-4f23-baf4-ea0e6b5d633f/track-preview?max_points=500`: returned non-empty KML LineString preview.
+- `POST /api/v1/geo-align/session`: created a bounded session over current indexed media and selected track without writing originals.
+- `POST /api/v1/video-track-player/session`: created a session and returned a clear warning that the selected video has no `taken_at`.
+
+Verification passed:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+Known limitations:
+
+- Face Gallery currently uses provisional per-asset clusters until reviewed/named; true embedding-based clustering remains future work.
+- Geo Align map is an MVP marker preview, not yet a full OpenLayers drag map. Apply is DB-only and EXIF writeback is intentionally disabled for `rclone_peek`.
+- Video Track Player computes positions only when a video has usable `taken_at`; the current test video did not.
+- AV1 live playback is disabled rather than attempted because the current HLS route is not browser-safe for AV1.
+- Vite still reports the existing large chunk warning; build passes.
+
+Safety confirmation:
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, AI models, previews, tiles, exports, transcodes, temp files, database files, or caches were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
 ## 2026-06-07 Supervised AI/Transcoding Approval Preflight
 
 ### Scope
@@ -1994,6 +2051,94 @@ Notes:
 - AI actions are visible as durable job records, but execution still happens inside bounded API handlers. Moving AI execution into long-running leased workers remains future hardening.
 - Transcoding page now has management surfaces and validation scaffolding; full durable transcode job planning/execution and VMAF/SSIM/PSNR sample runs remain future work.
 - Manual browser inspection is still needed for the new UI surfaces.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, AI models, previews, tiles, exports, transcodes, temp files, database files, or caches were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
+## 2026-06-07 Long Productization/Workflow Stabilization Run
+
+### Start State
+
+- Live app: `http://127.0.0.1:18080`.
+- Storage: `rclone_peek`, root `/mnt/Models/rclone`, mode `strict_read_only`.
+- Live counts remained `54` assets, `54` hashed, `48` photos, `2` videos, and `4` tracks.
+- PostgreSQL was preserved; no reset was performed.
+
+### Implemented
+
+- Fixed the file picker modal backdrop regression:
+  - the modal and dialog now sit above the backdrop with explicit z-index rules;
+  - the backdrop no longer blocks clicks on the file/folder picker.
+- Improved track preview/gallery layout and reliability:
+  - gallery track maps now fill the available overlay space;
+  - OpenLayers `updateSize`/fit timing runs after the overlay and features settle;
+  - track line visibility is preserved above OSM tiles and dark fallback backgrounds.
+- Stabilized map cluster interaction:
+  - single-click opens a cluster popup and no longer immediately zooms/refits;
+  - cluster zoom is now an explicit popup action;
+  - popup state survives normal refreshes unless the feature truly disappears.
+- Added Face Gallery MVP:
+  - backend face cluster APIs;
+  - provisional face folders when embedding clusters are not yet assigned;
+  - cluster naming;
+  - cluster asset listing;
+  - detection ignore metadata;
+  - asset-detail face boxes.
+- Made AI job lists more scalable:
+  - large AI job payloads are summarized by default;
+  - callers can request full payloads explicitly with `full_payload=true`.
+- Made AV1 behavior truthful:
+  - AV1 live HLS sessions are rejected with a clear validation reason instead of timing out after expensive startup attempts;
+  - H.264/NVENC remains the usable live-streaming path.
+- Added transcoding metrics capability status:
+  - `/api/v1/transcoding/metrics/status`;
+  - current ffmpeg reports `ssim` and `psnr`, but not `libvmaf`.
+- Added Geo Align MVP:
+  - scoped sessions over selected/current media and optional tracks;
+  - candidate positions from existing geotags and track interpolation;
+  - DB-only manual geotag override application;
+  - EXIF writeback disabled for strict read-only storage.
+- Added Video Track Player MVP:
+  - scoped video/track sessions;
+  - position interpolation endpoint;
+  - clear warning when the selected video lacks reliable `taken_at` metadata.
+
+### Live Validation
+
+- `GET /api/v1/health`: returned `ok`.
+- `GET /api/v1/stats`: returned `54` assets and `54` hashed.
+- `GET /api/v1/faces/clusters`: returned face folders for the current bounded sample.
+- `GET /api/v1/transcoding/metrics/status`: returned `ssim` and `psnr` available, `libvmaf` unavailable.
+- `GET /api/v1/media/{track_asset_id}/track-preview`: returned non-empty track geometry for checked current tracks.
+- `POST /api/v1/geo-align/session`: created a scoped session without scanning or writing originals.
+- `POST /api/v1/video-track-player/session`: created a scoped session and reported missing timestamp metadata for the current sample video.
+- The live app was restarted at `http://127.0.0.1:18080` with the same `.cartolensia/runtime/realpeek.yaml` and existing PostgreSQL data.
+
+### Verification
+
+Passed:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+
+### Known Limitations
+
+- Face folders are provisional until local embedding-based clustering is hardened.
+- Geo Align has safe backend/session behavior and a first UI, but the full OpenLayers shift-drag marker editor remains future work.
+- Video Track Player needs user-entered start/end timestamp or offset controls for videos without reliable capture timestamps.
+- AV1 live playback remains disabled until a verified browser-compatible AV1 WebM/fMP4 or HLS fMP4 path is implemented.
+- Browser automation was not added in this pass; manual inspection should verify modal layering, track overlay sizing, cluster popup stability, face gallery, Geo Align, and Video Track Player pages.
 
 ### Safety Confirmation
 

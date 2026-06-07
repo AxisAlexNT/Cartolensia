@@ -242,3 +242,11 @@ Settings path fields use `GET /api/v1/files/browse` for an allowlisted file/fold
 - The AI sidecar is now a packaged FastAPI service under `services/ai/cartolensia_ai`; backend AI worker status probes a local sidecar on `127.0.0.1:19090`, and approved local models can run classification, safety, face detection, captions, and embeddings without remote APIs.
 - Transcoding hardware validation has an explicit API and UI flow. NVIDIA H.264 NVENC command generation is validated with a short null-output dry run when approved.
 - Universal search now includes filename/path/extension/hash/date/metadata plus implemented `album:` and `track:` token handling through existing store data.
+
+## 2026-06-07 Workflow Stabilization Update
+
+- Face management now has explicit backend APIs for cluster listing, cluster naming, cluster assets, detection assignment, and detection ignore metadata. When model clustering has not produced stable cluster IDs, the backend exposes deterministic provisional folders so users can still review detected faces.
+- Geo alignment is represented by scoped in-memory sessions and DB-only geotag override application. The API combines existing EXIF geotags, selected track interpolation candidates, and manual marker changes. EXIF writeback is deliberately disabled for strict read-only storage.
+- Video-track playback is represented by scoped in-memory sessions. The position endpoint interpolates selected tracks against video playback time when a reliable video timestamp exists and returns a warning when synchronization inputs are insufficient.
+- Job list responses summarize very large payloads by default to keep operational pages responsive. Full payloads remain available to callers that explicitly request them.
+- Transcoding capability reporting now includes metrics filter detection for `libvmaf`, `ssim`, and `psnr`. AV1 live HLS is treated as unsupported unless a verified browser-compatible route is selected.
