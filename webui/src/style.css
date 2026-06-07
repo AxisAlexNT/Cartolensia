@@ -799,6 +799,7 @@ td {
   white-space: pre-wrap;
 }
 
+.file-picker-modal,
 .transcode-modal {
   z-index: 1080;
 }
