@@ -727,6 +727,9 @@ Passed:
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
 - `go test ./...`
 - `npm --prefix webui run build`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
 - `bash scripts/smoke-test.sh`
 - `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
 - `bash scripts/test-db.sh`
@@ -1678,6 +1681,91 @@ Final full verification is recorded in the latest closeout notes.
 - `/mnt/Models/rclone` was read only through Cartolensia media URLs and was not modified.
 - No generated files, model files, components, transcripts, caches, or exports were written under `/mnt/Models/rclone`.
 - No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
+## 2026-06-09 Full Cartolensia-Photos Read-Only Indexing And UI Hardening
+
+Implemented:
+
+- Geo Align layer switches were widened and normalized to Bootstrap switch dimensions so they no longer render as a small white circle inside a blue circle.
+- Discovery supported extensions are now centralized in the backend storage package and exposed through runtime settings. The default list covers supported photo, video, GPS/KML, audio, and document extensions.
+- Normal indexing now accepts `max_files=-1` and `max_bytes=-1` as unlimited for an explicit storage/prefix. Real-archive validation still rejects omitted/zero limits and root/all-storage scans. Dry-run previews remain conservatively capped unless explicitly over-limit, and the UI now says the cap is preview-only.
+- Runtime setting `gps.track_arrow_interval_m` was added with default `500`. OpenLayers track visualizations now render directional arrowheads at that interval and hide them when the value is set to `0`.
+- Track direction arrows were wired into GPS track detail/gallery preview styles, the main map track layer style, and Geo Align track styling.
+- Added local-first reverse geocoding endpoint `GET/POST /api/v1/places/reverse`. It checks cached place bounding boxes first, supports optional user-triggered Nominatim-compatible online reverse lookup when enabled, and caches online results into `place_cache`.
+- Asset detail place refresh now calls the reverse-geocode endpoint and shows cache/source notes.
+
+Full read-only indexing run for `rclone_peek` prefix `Cartolensia-photos`:
+
+- Discovery job `1b5d749c-ae3f-4a09-871d-dd2d3dbbf204`: `616` files seen/indexed, `509` assets created, `107` updated, `37,704,581,680` bytes observed, `0` errors.
+- Hash job `21292c01-3433-445a-aafe-801966605795`: `509/509` files hashed in the job; final stats show `616/616` assets hashed.
+- Metadata job `bd2ed3e6-21e6-44f0-a7dc-b8dcdd36e489`: `616/616` assets updated, `0` errors.
+- Preview job `568b878a-d39b-449d-a7fb-d6d2163a0071`: `443/443` missing photo previews generated in cache only, `0` errors.
+
+Final indexed media counts:
+
+- `616` assets and `616` locations.
+- `541` photos, `52` videos, `5` audio files, `18` GPS/KML/GPX tracks.
+- `200` geotagged assets reported by map status.
+- `0` unhashed assets.
+- `37,704,581,680` total bytes.
+
+AI and metadata jobs run on the explicit indexed scope:
+
+- Classification: `541` image assets processed, `75` non-image assets skipped, `3,202` rows stored, `0` errors.
+- Safety/NSFW: `541` image assets processed, `75` skipped, `1,625` rows stored, `2` unsafe/potentially unsafe results, `0` errors.
+- Face detection: `541` image assets processed, `75` skipped, `1,062` rows stored, `0` errors.
+- Embeddings: `541` image assets processed, `75` skipped, `541` embeddings stored, `0` errors.
+- Captions: `541` image assets processed, `75` skipped, `1,082` caption rows stored, `0` errors.
+- OCR: `541` image assets processed, `75` skipped, `1,702` OCR blocks stored, `0` errors.
+- ASR transcription: `57` audio/video assets processed, `559` photos/tracks skipped, `253` transcript/segment records stored, `0` errors.
+- Audio analysis: `5` audio assets processed, `611` non-audio assets skipped, `12` feature records stored, `0` errors.
+
+Component status:
+
+- `23` components installed/available after checks.
+- Remaining failed/provenance-gated components:
+  - `vmaf`: no reviewed `source_url`; current FFmpeg build still lacks the `libvmaf` filter.
+  - `asr-model-medium`: no reviewed `source_url`; small faster-whisper model remains installed and active.
+  - `mobilenetv3-large`: no reviewed `source_url`; EfficientNet-B0 is installed and active as the primary classifier.
+- The Component Manager correctly refused silent downloads for unreviewed sources and recorded failed component jobs with actionable messages.
+
+Live validation:
+
+- `/api/v1/stats`: `616` assets, `616` hashed, `541` photos, `52` videos, `5` audio, `18` tracks.
+- `/api/v1/map/status`: PostGIS enabled, `screen_distance` clustering active, `200` geotagged assets, `18` tracks.
+- `/api/v1/settings`: `indexing.default_max_files=-1`, `gps.track_arrow_interval_m=500`, and supported extension list includes audio/document types.
+- `/api/v1/search?q=Yerevan`: local place cache matched `Yerevan, Armenia`, returned place/media/track matches.
+- `/api/v1/search?q=Armenia`: local place cache matched `Armenia`.
+- `/api/v1/search?q=audio`: returned `12` audio-related results.
+- `/api/v1/search?q=caption:train`: returned `31` caption-related results.
+- `/api/v1/search?q=ocr:%D0%B0`: returned `17` OCR text matches.
+- `/api/v1/assets/de7abf69-f077-4d4e-9648-46c850a4aa8e/ocr`: returned `5` OCR blocks and full text.
+- `/api/v1/assets/b0f0896d-21be-41a2-9310-c4b310b13b76/transcripts`: returned one transcript record.
+- `/api/v1/assets/b0f0896d-21be-41a2-9310-c4b310b13b76/audio-features`: returned tempo/key/loudness/speech-music feature metadata.
+- `/api/v1/gps/tracks`: returned `18` tracks; first checked track had `17,207` points.
+
+Validation commands:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+
+Notes and limitations:
+
+- The explicit `/api/v1/map/clusters/refresh` and `/api/v1/map/clusters/status` endpoints are not present yet; current map status still reports the existing `screen_distance` clustering path. Track direction arrows are implemented in frontend vector styles.
+- Online reverse geocoding remains disabled by default and must be operator-triggered. The new endpoint supports cache-first reverse lookup and Nominatim-compatible provider caching when enabled.
+- The built binary had to be launched outside the sandbox to bind `127.0.0.1:18080` and connect to local PostgreSQL during final validation. It is left running for inspection, and the AI sidecar remains running on `127.0.0.1:19090`.
+- Vite build passed with the existing large-chunk warning.
+
+Safety confirmation:
+
+- `/mnt/Models/rclone` was read only through the approved `rclone_peek` prefix `Cartolensia-photos`.
+- No writes, chmods, moves, transcodes, exports, OCR caches, models, or component files were placed under `/mnt/Models/rclone`.
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.

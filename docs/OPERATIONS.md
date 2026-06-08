@@ -513,3 +513,84 @@ Useful inspection endpoints:
 - `/api/v1/search?q=document:invoice`.
 
 ASR uses faster-whisper when `asr-faster-whisper`, `asr-ctranslate2`, and an ASR model component are installed. Audio analysis uses librosa/SoundFile. Marker, advanced video captioning, and dedicated genre classifiers are optional component/model paths. If they are missing, operators should see a missing-component state rather than silent fallback to a remote service.
+
+## Full Cartolensia-Photos Read-Only Indexing
+
+For the real-peek archive, full normal indexing is allowed only for an explicit storage and prefix. Do not use storage `all`, do not use the storage root, and do not enable missing-file marking.
+
+Recommended full-prefix request for newly added files under `Cartolensia-photos`:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/indexing/start \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "storage":"rclone_peek",
+    "prefixes":["Cartolensia-photos"],
+    "max_files":-1,
+    "max_bytes":-1,
+    "include_extensions":[
+      "jpg","jpeg","png","heif","heic",
+      "mp4","mov","webm","mkv","avi","m4v",
+      "gpx","kml","kmz","gpz",
+      "wav","mp3","3gp","3gpp","aac","m4a","flac","ogg","oga","opus","amr",
+      "pdf","djvu","txt","md","markdown"
+    ],
+    "index_files":true,
+    "hash":true,
+    "metadata":true,
+    "previews":true,
+    "parse_tracks":true,
+    "geotag_exif":true,
+    "snap_to_tracks":true,
+    "refresh_map":true
+  }'
+```
+
+`max_files=-1` means no file-count limit for normal indexing. Dry-run and preview screens may still cap output at `50` files for safety and UI readability; that cap is not the normal indexing limit.
+
+After discovery, run bounded AI jobs from the UI or API. For full explicit indexed scope, the accepted pattern is:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/ai/jobs/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"indexed","limit":-1}'
+```
+
+Use the equivalent job paths for `faces`, `safety`, `embed`, `describe`, `ocr`, `transcribe`, and `audio-analyze`. These jobs skip unsupported media kinds, keep generated metadata in PostgreSQL/cache paths, and do not write sidecars to original storage.
+
+## GPS Track Direction Arrows
+
+Direction arrows are drawn in OpenLayers vector styles at a configurable distance interval. Runtime setting:
+
+- `gps.track_arrow_interval_m=500` by default.
+- Set to `0` to hide track arrows.
+
+The setting applies to the shared track style used by track previews/detail maps, Geo Align track layers, and main map track layers where those layers use the shared style helper.
+
+## Reverse Geocoding Operations
+
+Reverse geocoding is local-first and safe by default:
+
+- `GET /api/v1/places/reverse?lat=<lat>&lon=<lon>` searches cached place bounding boxes.
+- `POST /api/v1/places/reverse` accepts JSON with `lat`, `lon`, and optional `online`.
+- Online lookup requires runtime setting `search.online_geocoding=true` and an explicit `online=true` request.
+- Online providers must be Nominatim-compatible and are configured with `search.geocoder_provider_url`.
+- Results are cached into `place_cache`; no public API bulk reverse-geocoding is run automatically.
+
+## Local Production Run On This Machine
+
+With PostgreSQL and the AI sidecar environment already prepared, a local production-style run is:
+
+```bash
+docker compose -p cartolensia_realpeek -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
+GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go build -o /tmp/cartolensia-live ./cmd/cartolensia
+CARTOLENSIA_HTTP_ADDR=127.0.0.1:18080 /tmp/cartolensia-live -config .cartolensia/runtime/realpeek.yaml
+```
+
+In another terminal:
+
+```bash
+.cartolensia/ai-venv/bin/python -m cartolensia_ai.server
+```
+
+For another offline machine, copy the built application/package, the reviewed `.cartolensia/components` and `.cartolensia/models` contents, the Python AI environment or recreated wheelhouse, and a PostgreSQL runtime or database service. Keep real media mounted read-only and point storage config at that read-only root. Do not copy local secrets or machine-specific `.env` files.

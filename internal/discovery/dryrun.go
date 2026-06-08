@@ -33,13 +33,16 @@ func NormalizeDryRunPayload(payload DryRunPayload) DryRunPayload {
 	payload.Prefixes = compactPayloadStrings(payload.Prefixes)
 	payload.IncludeExtensions = normalizeExtensions(payload.IncludeExtensions)
 	payload.ExcludePatterns = compactPayloadStrings(payload.ExcludePatterns)
-	if payload.MaxFiles <= 0 {
+	if payload.MaxFiles == 0 {
+		payload.MaxFiles = 50
+	}
+	if payload.MaxFiles < 0 && !payload.AllowOverLimit {
 		payload.MaxFiles = 50
 	}
 	if payload.MaxFiles > 50 && !payload.AllowOverLimit {
 		payload.MaxFiles = 50
 	}
-	if payload.MaxBytes <= 0 {
+	if payload.MaxBytes == 0 {
 		payload.MaxBytes = 2 << 30
 	}
 	if payload.Mode == "" {
@@ -66,6 +69,7 @@ func (p DryRunPayload) SafetySummary() map[string]any {
 		"strict_read_only_required": true,
 		"prefixes_required":         true,
 		"default_max_files":         50,
+		"unlimited_requires":        "normal indexing may use -1; dry-run previews stay capped unless allow_over_limit is explicit",
 		"default_max_bytes":         int64(2 << 30),
 		"mark_missing_allowed":      false,
 		"hash_requested":            p.Hash,

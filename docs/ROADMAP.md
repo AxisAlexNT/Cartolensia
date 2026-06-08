@@ -218,3 +218,22 @@ Next:
 - Add waveform peak generation stored in PostgreSQL/cache metadata.
 - Add durable media-track player sessions for audio as well as video.
 - Implement persisted zoom-level map cluster cache after the current screen-distance cluster path is fully characterized.
+
+## 2026-06-09 Full Prefix Indexing Progress
+
+Completed:
+
+- Full read-only `Cartolensia-photos` indexing path validated with `max_files=-1`.
+- Central supported-extension defaults now include audio and lightweight document formats.
+- Geo Align switch layout fixed.
+- Direction arrows are available for track vector visualizations with a configurable default interval.
+- Cache-first reverse geocoding endpoint exists and can optionally cache user-triggered online Nominatim-compatible lookups.
+- Full explicit-prefix AI metadata pass was executed for classification, safety, faces, embeddings, captions, OCR, ASR, and audio analysis.
+
+Next:
+
+- Add persisted zoom/tile-level map cluster cache endpoints and UI refresh controls.
+- Add place-cache import/export for offline gazetteer packages and operator-managed regional datasets.
+- Add reviewed source URLs or offline package import flow for VMAF, optional Whisper medium, and MobileNetV3 fallback weights.
+- Add browser automation for Geo Align switches/arrows, track previews, reverse-place refresh, and unlimited-indexing UI labels.
+- Split large WebUI chunks with route-level dynamic imports.

@@ -197,6 +197,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/search", s.handleSearch)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
+	s.mux.HandleFunc("/api/v1/places/reverse", s.handlePlaceReverse)
 	s.mux.HandleFunc("/api/v1/places/", s.handlePlaceByID)
 	s.mux.HandleFunc("/api/v1/duplicates", s.handleDuplicates)
 	s.mux.HandleFunc("/api/v1/albums", s.handleAlbums)
@@ -1390,6 +1391,76 @@ func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct {
+		Lat    float64 `json:"lat"`
+		Lon    float64 `json:"lon"`
+		Online bool    `json:"online,omitempty"`
+	}
+	if r.Method == http.MethodGet {
+		req.Lat, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lat")), 64)
+		req.Lon, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lon")), 64)
+		req.Online = boolQuery(r.URL.Query().Get("online"))
+	} else if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if req.Lat < -90 || req.Lat > 90 || req.Lon < -180 || req.Lon > 180 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("lat/lon are required and must be valid"))
+		return
+	}
+	places := placesForPoint(req.Lat, req.Lon, s.placeEntries(r.Context()))
+	if len(places) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"lat":      req.Lat,
+			"lon":      req.Lon,
+			"source":   "local_place_cache",
+			"cached":   true,
+			"places":   places,
+			"note":     "Matched existing cached place bbox; no online geocoder was called.",
+			"provider": "local_place_cache",
+		})
+		return
+	}
+	if !req.Online || !runtimeBoolSetting("search.online_geocoding", false) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"lat":      req.Lat,
+			"lon":      req.Lon,
+			"source":   "local_place_cache",
+			"cached":   false,
+			"places":   []catalog.PlaceCacheEntry{},
+			"provider": runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
+			"note":     "No local cached place contains this coordinate. Online reverse geocoding is disabled or was not requested.",
+		})
+		return
+	}
+	place, err := s.reverseGeocodeOnline(r.Context(), req.Lat, req.Lon)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	created, err := s.deps.Store.UpsertPlace(r.Context(), place)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"lat":      req.Lat,
+		"lon":      req.Lon,
+		"source":   created.Source,
+		"cached":   true,
+		"places":   []catalog.PlaceCacheEntry{created},
+		"provider": created.Provider,
+		"note":     "User-triggered reverse geocode cached in place_cache.",
+	})
+}
+
 func (s *Server) handlePlaces(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1567,6 +1638,128 @@ func mergePlacePatch(existing, patch catalog.PlaceCacheEntry) catalog.PlaceCache
 		return normalized
 	}
 	return existing
+}
+
+func (s *Server) reverseGeocodeOnline(ctx context.Context, lat, lon float64) (catalog.PlaceCacheEntry, error) {
+	provider := strings.TrimSpace(runtimeStringSetting("search.geocoder_provider", "nominatim"))
+	if provider == "" || provider == "local_place_cache" || provider == "none" {
+		provider = "nominatim"
+	}
+	baseURL := strings.TrimRight(runtimeStringSetting("search.geocoder_provider_url", "https://nominatim.openstreetmap.org"), "/")
+	if baseURL == "" {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder provider URL is empty")
+	}
+	endpoint, err := url.Parse(baseURL + "/reverse")
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	query := endpoint.Query()
+	query.Set("format", "jsonv2")
+	query.Set("lat", strconv.FormatFloat(lat, 'f', 7, 64))
+	query.Set("lon", strconv.FormatFloat(lon, 'f', 7, 64))
+	query.Set("addressdetails", "1")
+	query.Set("extratags", "1")
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	req.Header.Set("User-Agent", "Cartolensia/1.0 local user-triggered geocoder")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder returned HTTP %d", resp.StatusCode)
+	}
+	var data struct {
+		DisplayName string            `json:"display_name"`
+		Name        string            `json:"name"`
+		Lat         string            `json:"lat"`
+		Lon         string            `json:"lon"`
+		BoundingBox []string          `json:"boundingbox"`
+		Address     map[string]string `json:"address"`
+		PlaceID     int64             `json:"place_id"`
+		OSMType     string            `json:"osm_type"`
+		OSMID       int64             `json:"osm_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&data); err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	if strings.TrimSpace(data.DisplayName) == "" {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder returned no display_name")
+	}
+	country := firstNonEmpty(data.Address["country"], data.Address["country_code"])
+	region := firstNonEmpty(data.Address["state"], data.Address["region"], data.Address["province"], data.Address["county"])
+	city := firstNonEmpty(data.Address["city"], data.Address["town"], data.Address["village"], data.Address["municipality"])
+	road := firstNonEmpty(data.Address["road"], data.Address["pedestrian"], data.Address["footway"], data.Address["path"])
+	name := firstNonEmpty(data.Name, road, city, region, country, data.DisplayName)
+	centerLat := lat
+	centerLon := lon
+	if parsed, err := strconv.ParseFloat(data.Lat, 64); err == nil {
+		centerLat = parsed
+	}
+	if parsed, err := strconv.ParseFloat(data.Lon, 64); err == nil {
+		centerLon = parsed
+	}
+	bbox := catalog.BBox{MinLon: lon - 0.01, MinLat: lat - 0.01, MaxLon: lon + 0.01, MaxLat: lat + 0.01}
+	if len(data.BoundingBox) >= 4 {
+		minLat, err1 := strconv.ParseFloat(data.BoundingBox[0], 64)
+		maxLat, err2 := strconv.ParseFloat(data.BoundingBox[1], 64)
+		minLon, err3 := strconv.ParseFloat(data.BoundingBox[2], 64)
+		maxLon, err4 := strconv.ParseFloat(data.BoundingBox[3], 64)
+		if err1 == nil && err2 == nil && err3 == nil && err4 == nil {
+			bbox = catalog.BBox{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+		}
+	}
+	aliases := uniqueStrings(compactStrings([]string{name, data.DisplayName, country, region, city, road}))
+	return normalizePlacePayload(catalog.PlaceCacheEntry{
+		Name:           name,
+		NormalizedName: strings.Join(strings.Fields(strings.ToLower(name)), " "),
+		Aliases:        aliases,
+		Provider:       provider,
+		DisplayName:    data.DisplayName,
+		Country:        country,
+		Region:         region,
+		City:           city,
+		Road:           road,
+		Lat:            centerLat,
+		Lon:            centerLon,
+		BBox:           bbox,
+		Source:         "online_user_triggered_cache",
+		Metadata: map[string]any{
+			"place_id": data.PlaceID,
+			"osm_type": data.OSMType,
+			"osm_id":   data.OSMID,
+			"policy":   "user-triggered online reverse geocode; cached for offline reuse",
+		},
+	})
+}
+
+func runtimeStringSetting(key, fallback string) string {
+	runtimeSettings.RLock()
+	defer runtimeSettings.RUnlock()
+	if value, ok := runtimeSettings.values[key]; ok {
+		if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+			return text
+		}
+	}
+	return fallback
+}
+
+func runtimeBoolSetting(key string, fallback bool) bool {
+	runtimeSettings.RLock()
+	defer runtimeSettings.RUnlock()
+	if value, ok := runtimeSettings.values[key]; ok {
+		switch typed := value.(type) {
+		case bool:
+			return typed
+		case string:
+			return boolQuery(typed)
+		}
+	}
+	return fallback
 }
 
 type assetSearchContext struct {
@@ -2873,8 +3066,21 @@ func (s *Server) resolveAIAssets(ctx context.Context, req aiJobRequest) ([]catal
 		return nil, fmt.Errorf("unsupported AI scope %q", req.Scope)
 	}
 	limit := req.Limit
-	if limit <= 0 || limit > 250 {
+	if limit == 0 {
 		limit = 250
+	}
+	if limit < 0 {
+		var out []catalog.Asset
+		for offset := 0; ; offset += 500 {
+			page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: 500, Offset: offset, Sort: "taken_at"})
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, page.Assets...)
+			if offset+len(page.Assets) >= page.Page.Total || len(page.Assets) == 0 {
+				return out, nil
+			}
+		}
 	}
 	page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: limit, Sort: "taken_at"})
 	if err != nil {

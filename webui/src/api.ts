@@ -1253,6 +1253,11 @@ export const api = {
     request<Record<string, unknown>>(`/api/v1/places/${encodeURIComponent(id)}`, {
       method: "DELETE"
     }),
+  reversePlace: (lat: number, lon: number, online = false) =>
+    request<Record<string, unknown>>("/api/v1/places/reverse", {
+      method: "POST",
+      body: JSON.stringify({ lat, lon, online })
+    }),
   settings: () => request<SettingsPayload>("/api/v1/settings"),
   pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
   patchPendingSettings: (settings: Record<string, unknown>) =>

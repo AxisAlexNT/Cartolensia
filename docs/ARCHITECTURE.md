@@ -320,3 +320,12 @@ Asset detail exposes OCR full text, transcripts, audio features, video frame cap
 - The AI sidecar also exposes `POST /analyze-audio` using librosa/SoundFile. The backend routes `/api/v1/audio/analyze/start` and `/api/v1/ai/jobs/audio-analyze` persist tempo, key, mode, loudness, speech/music ratio, spectral summary, and heuristic labels into the existing `audio_features` table.
 - `postgres_local` search now matches transcript text and audio features. Supported audio tokens include `transcript:...`, `genre:...`, `key:...`, exact tempo values, and tempo ranges such as `tempo:120..140`.
 - Component Manager tracks ASR/audio dependencies and models as first-class components: `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, and `audio-soundfile`.
+
+## 2026-06-09 Indexing, Tracks, And Geocoding Update
+
+- Supported discovery extensions are centralized in `internal/storage` and surfaced through runtime setting `indexing.supported_extensions`. The default covers photos, videos, GPS/KML/KMZ/GPX, audio, and lightweight document/text formats.
+- Normal discovery/indexing jobs use `max_files=-1` and `max_bytes=-1` as explicit unlimited sentinels. Real archive storage still requires a named storage and non-root prefix; omitted/zero limits remain invalid for guarded real-archive flows.
+- Dry-run/preview discovery keeps conservative caps and reports that those caps are preview-only.
+- Track rendering now has a shared OpenLayers style path for direction arrows. Runtime setting `gps.track_arrow_interval_m` controls spacing, defaults to `500`, and `0` disables arrows.
+- Reverse geocoding is cache-first. `/api/v1/places/reverse` resolves coordinates against durable `place_cache` bounding boxes before considering a user-triggered Nominatim-compatible provider. Online provider use remains disabled by default and every online result is persisted back to `place_cache`.
+- The current map clustering implementation remains screen-distance based. Persisted zoom-level cluster cache endpoints are still planned; frontend cluster state should continue to replace stale layer data on zoom changes.

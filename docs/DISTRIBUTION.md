@@ -156,3 +156,31 @@ Audio/document/ASR features are component-managed in offline packages.
 - Audio feature labels are currently heuristic when no reviewed genre model is bundled; do not advertise offline packages as having a production genre classifier unless a reviewed model is included.
 
 The current Linux package flow can include the application, WebUI, OCR/media tools, PostgreSQL runtime, Python runtime, and reviewed model cache. It does not bundle host GPU drivers, public map data, online geocoders, or unreviewed model weights.
+
+## 2026-06-09 Offline Dependency Placement Notes
+
+The live real-peek environment currently has the core multimedia stack available through Component Manager checks:
+
+- FFmpeg/FFprobe system tools;
+- Tesseract plus English, Russian, Armenian, Simplified Chinese, and Traditional Chinese tessdata;
+- Python AI runtime with PyTorch/torchvision, OpenCV YuNet, Falconsai NSFW, OpenCLIP, BLIP, faster-whisper small, CTranslate2, librosa, SoundFile, and PyMuPDF.
+
+For an offline target machine, place reviewed component payloads under the extracted package's `.cartolensia/components` and `.cartolensia/models` directories, or provide paths through Settings -> Components after launch. Do not place tools, model weights, OCR data, ASR models, or Python environments under the original media root.
+
+The following optional components are intentionally not bundled/downloaded until a reviewed source URL or operator-provided archive/path exists:
+
+- `vmaf`: current FFmpeg lacks `libvmaf`; bundle only a reviewed libvmaf/FFmpeg component and record its flags.
+- `asr-model-medium`: optional quality upgrade over installed faster-whisper small.
+- `mobilenetv3-large`: optional classifier fallback weights; EfficientNet-B0 is the active classifier.
+
+For a self-sufficient offline package, include:
+
+- Cartolensia binary and `webui/dist`;
+- PostgreSQL runtime or a documented external PostgreSQL service;
+- `config/offline-postgres.yaml` or a machine-specific config derived from it;
+- reviewed media tools under `external/` or `.cartolensia/components`;
+- `.cartolensia/ai-venv` or a rebuilt Python runtime/wheelhouse;
+- reviewed `.cartolensia/models` cache;
+- `components-manifest.json`, license notices, and source archive.
+
+Run the package with media mounted read-only and configure storage mode as `strict_read_only` unless a separate journaled write path has been implemented and tested.

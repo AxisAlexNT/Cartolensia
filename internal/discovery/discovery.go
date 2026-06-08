@@ -161,7 +161,7 @@ func ValidateHashSafety(registry *storage.Registry, payload HashPayload) error {
 	if len(payload.Prefixes) == 0 {
 		return fmt.Errorf("hashing real archive assets requires an adapter-relative prefix")
 	}
-	if payload.MaxFiles <= 0 {
+	if payload.MaxFiles == 0 {
 		return fmt.Errorf("hashing real archive assets requires max_files")
 	}
 	adapter, err := registry.Adapter(payload.Storage)
@@ -356,11 +356,11 @@ func validateRealArchiveScanPayload(payload ScanPayload) error {
 	if len(payload.Prefixes) == 0 {
 		return fmt.Errorf("real archive discovery requires at least one adapter-relative prefix")
 	}
-	if payload.MaxFiles <= 0 {
-		return fmt.Errorf("real archive discovery requires max_files")
+	if payload.MaxFiles == 0 {
+		return fmt.Errorf("real archive discovery requires explicit max_files; use -1 for no file-count limit")
 	}
-	if payload.MaxBytes <= 0 {
-		return fmt.Errorf("real archive discovery requires max_bytes")
+	if payload.MaxBytes == 0 {
+		return fmt.Errorf("real archive discovery requires explicit max_bytes; use -1 for no byte-count limit")
 	}
 	return nil
 }

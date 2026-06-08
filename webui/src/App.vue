@@ -10,9 +10,11 @@ import { defaults as defaultInteractions } from "ol/interaction/defaults";
 import VectorSource from "ol/source/Vector";
 import XYZ from "ol/source/XYZ";
 import { fromLonLat, toLonLat } from "ol/proj";
-import Feature from "ol/Feature";
+import Feature, { type FeatureLike } from "ol/Feature";
 import Point from "ol/geom/Point";
-import { Circle as CircleStyle, Fill, Icon, Stroke, Style, Text } from "ol/style";
+import LineString from "ol/geom/LineString";
+import MultiLineString from "ol/geom/MultiLineString";
+import { Circle as CircleStyle, Fill, Icon, RegularShape, Stroke, Style, Text } from "ol/style";
 import Hls from "hls.js";
 import "ol/ol.css";
 import {
@@ -119,6 +121,13 @@ const navPageAliases: Record<string, string> = {
 };
 
 const routeLabels = new Set([...nav, "Asset Detail"]);
+const supportedDiscoveryExtensions = [
+  "jpg", "jpeg", "png", "heif", "heic",
+  "mp4", "mov", "webm", "mkv", "avi", "m4v",
+  "gpx", "kml", "kmz", "gpz",
+  "wav", "mp3", "3gp", "3gpp", "aac", "m4a", "flac", "ogg", "oga", "opus", "amr",
+  "pdf", "djvu", "txt", "md", "markdown"
+].join(",");
 
 function pageFromQuery(): string | null {
   // Explicit ?page=... URLs must win over localStorage so shared/typed links open the requested page.
@@ -408,12 +417,12 @@ const albumViewMode = ref<"table" | "tile">("tile");
 const monthFilter = ref("");
 const previewCacheStats = ref<PreviewCacheStats | null>(null);
 const previewCache = ref<PreviewCacheEntry[]>([]);
-const jobMaxFiles = ref(50);
+const jobMaxFiles = ref(-1);
 const dryRunStorage = ref("");
 const dryRunPrefix = ref("Cartolensia-photos");
-const dryRunMaxFiles = ref(50);
-const dryRunMaxBytes = ref(2147483648);
-const dryRunExtensions = ref("jpg,jpeg,png,gpx,kml,kmz,gpz,heif,heic,mp4,mov");
+const dryRunMaxFiles = ref(-1);
+const dryRunMaxBytes = ref(-1);
+const dryRunExtensions = ref(supportedDiscoveryExtensions);
 const hashAfterIndex = ref(true);
 const metadataAfterIndex = ref(true);
 const previewsAfterIndex = ref(true);
@@ -873,11 +882,101 @@ function createLocalOSMLayer(onError: () => void): TileLayer<XYZ> {
   return layer;
 }
 
-function trackPreviewStyle() {
+function numericRuntimeSetting(key: string, fallback: number): number {
+  const value = settings.value?.runtime_settings?.[key];
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function trackArrowIntervalM(): number {
+  return Math.max(0, numericRuntimeSetting("gps.track_arrow_interval_m", 500));
+}
+
+function trackPreviewStyle(feature: FeatureLike) {
   return [
     new Style({ stroke: new Stroke({ color: "rgba(0,0,0,0.72)", width: 7 }) }),
     new Style({ stroke: new Stroke({ color: "#ffd33d", width: 4 }) })
-  ];
+  ].concat(trackArrowStyles(feature, trackArrowIntervalM(), "#ffd33d", "#0d1117"));
+}
+
+function greenTrackStyle(feature: FeatureLike) {
+  return [
+    new Style({ stroke: new Stroke({ color: "rgba(255,255,255,0.9)", width: 5 }) }),
+    new Style({ stroke: new Stroke({ color: "#1a7f37", width: 3 }) })
+  ].concat(trackArrowStyles(feature, trackArrowIntervalM(), "#1a7f37", "#ffffff"));
+}
+
+function trackArrowStyles(feature: FeatureLike, intervalM: number, fillColor: string, strokeColor: string): Style[] {
+  if (intervalM <= 0) return [];
+  const geometry = feature.getGeometry();
+  if (!geometry) return [];
+  const cacheKey = `track_arrows_${Math.round(intervalM)}`;
+  const cached = feature.get(cacheKey) as Style[] | undefined;
+  if (cached) return cached;
+  const lines: number[][][] = [];
+  if (geometry instanceof LineString) {
+    lines.push(geometry.getCoordinates() as number[][]);
+  } else if (geometry instanceof MultiLineString) {
+    lines.push(...(geometry.getCoordinates() as number[][][]));
+  }
+  const styles: Style[] = [];
+  for (const line of lines) {
+    styles.push(...arrowStylesForLine(line, intervalM, fillColor, strokeColor));
+  }
+  if ("set" in feature && typeof feature.set === "function") {
+    feature.set(cacheKey, styles, true);
+  }
+  return styles;
+}
+
+function arrowStylesForLine(line: number[][], intervalM: number, fillColor: string, strokeColor: string): Style[] {
+  const styles: Style[] = [];
+  if (line.length < 2) return styles;
+  let nextAt = intervalM;
+  let walked = 0;
+  for (let i = 1; i < line.length; i += 1) {
+    const start = line[i - 1];
+    const end = line[i];
+    const segmentM = projectedSegmentDistanceM(start, end);
+    if (!Number.isFinite(segmentM) || segmentM <= 0) continue;
+    while (walked + segmentM >= nextAt) {
+      const ratio = (nextAt - walked) / segmentM;
+      const x = start[0] + (end[0] - start[0]) * ratio;
+      const y = start[1] + (end[1] - start[1]) * ratio;
+      const rotation = Math.atan2(end[1] - start[1], end[0] - start[0]) - Math.PI / 2;
+      styles.push(new Style({
+        geometry: new Point([x, y]),
+        image: new RegularShape({
+          points: 3,
+          radius: 8,
+          rotation,
+          rotateWithView: true,
+          fill: new Fill({ color: fillColor }),
+          stroke: new Stroke({ color: strokeColor, width: 1.5 })
+        })
+      }));
+      nextAt += intervalM;
+    }
+    walked += segmentM;
+  }
+  return styles;
+}
+
+function projectedSegmentDistanceM(start: number[], end: number[]): number {
+  const [lon1, lat1] = toLonLat(start);
+  const [lon2, lat2] = toLonLat(end);
+  return haversineDistanceM(lat1, lon1, lat2, lon2);
+}
+
+function haversineDistanceM(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const radiusM = 6371008.8;
+  const toRad = Math.PI / 180;
+  const phi1 = lat1 * toRad;
+  const phi2 = lat2 * toRad;
+  const dLat = (lat2 - lat1) * toRad;
+  const dLon = (lon2 - lon1) * toRad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLon / 2) ** 2;
+  return 2 * radiusM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function fitTrackMap(target: OLMap | null, source: VectorSource, maxZoom = 16) {
@@ -1912,6 +2011,10 @@ async function refresh() {
 	    aiSafetyPayload.value = aiSafetyData;
     faceClustersPayload.value = faceClusterPayload;
     settings.value = settingsPayload;
+    if (dryRunExtensions.value === supportedDiscoveryExtensions) {
+      const configuredExtensions = String(settingsPayload.runtime_settings?.["indexing.supported_extensions"] ?? "");
+      if (configuredExtensions.trim()) dryRunExtensions.value = configuredExtensions;
+    }
     components.value = asArray(componentStatusPayload.components);
     componentRoot.value = componentStatusPayload.root;
     componentCounts.value = componentStatusPayload.counts ?? {};
@@ -1971,7 +2074,14 @@ function pipelineStorage(): string {
 }
 
 function pipelineMaxFiles(): number {
-  return Math.min(Math.max(dryRunMaxFiles.value, 1), 50);
+  const value = Number(dryRunMaxFiles.value);
+  return Number.isFinite(value) && value !== 0 ? Math.trunc(value) : -1;
+}
+
+function dryRunPreviewMaxFiles(): number {
+  const value = Number(dryRunMaxFiles.value);
+  if (!Number.isFinite(value) || value <= 0) return 50;
+  return Math.min(Math.trunc(value), 50);
 }
 
 async function refreshIndexingStatus() {
@@ -2108,7 +2218,7 @@ async function startHashForCurrentPrefix() {
     scope: "prefix",
     storage,
     prefixes,
-    max_files: Math.min(Math.max(dryRunMaxFiles.value, 1), 50)
+    max_files: pipelineMaxFiles()
   });
   await refresh();
 }
@@ -2447,6 +2557,32 @@ function downloadTextFile(name: string, text: string) {
   URL.revokeObjectURL(url);
 }
 
+function assetReverseCoordinate(): { lat: number; lon: number } | null {
+  const detail = assetDetail.value;
+  if (!detail) return null;
+  const firstPlace = detail.places?.[0];
+  if (firstPlace && Number.isFinite(firstPlace.lat) && Number.isFinite(firstPlace.lon)) {
+    return { lat: firstPlace.lat, lon: firstPlace.lon };
+  }
+  const metadata = detail.asset.metadata ?? {};
+  const lat = Number(metadata.lat ?? metadata.gps_lat);
+  const lon = Number(metadata.lon ?? metadata.gps_lon);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  return null;
+}
+
+async function refreshAssetPlaces() {
+  const detail = assetDetail.value;
+  const coordinate = assetReverseCoordinate();
+  if (!detail || !coordinate) {
+    error.value = "This asset has no known coordinate to reverse-geocode.";
+    return;
+  }
+  const online = Boolean(settings.value?.runtime_settings?.["search.online_geocoding"]);
+  await api.reversePlace(coordinate.lat, coordinate.lon, online);
+  assetDetail.value = await api.asset(detail.asset.id);
+}
+
 async function resetGeoAlign() {
   if (!geoAlignSession.value) return;
   geoAlignSession.value = await api.resetGeoAlignSession(geoAlignSession.value.id);
@@ -2500,7 +2636,7 @@ async function startDryRun() {
   const result = await api.dryRunDiscovery({
     storage,
     prefixes,
-    max_files: dryRunMaxFiles.value,
+    max_files: dryRunPreviewMaxFiles(),
     max_bytes: dryRunMaxBytes.value,
     include_extensions
   });
@@ -2932,10 +3068,14 @@ type RuntimeSettingSpec = { key: string; label: string; help: string; kind?: "te
 
 const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
   indexing: [
-    { key: "indexing.default_max_files", label: "Default max files", help: "Bounded default for real-peek and dry-run forms.", kind: "number" },
+    { key: "indexing.default_max_files", label: "Default max files", help: "-1 means no file-count limit for normal indexing. Preview scans stay capped at 50.", kind: "number" },
+    { key: "indexing.supported_extensions", label: "Supported discovery extensions", help: "Comma-separated default include list for discovery.", kind: "text" },
     { key: "indexing.hash_after_index", label: "Hash after indexing", help: "Default pipeline stage.", kind: "boolean" },
     { key: "indexing.metadata_after_index", label: "Extract metadata after indexing", help: "Default pipeline stage.", kind: "boolean" },
     { key: "indexing.previews_after_index", label: "Generate previews after indexing", help: "Default pipeline stage.", kind: "boolean" }
+  ],
+  gps: [
+    { key: "gps.track_arrow_interval_m", label: "Track direction arrow interval (m)", help: "Default 500 m. Set 0 to hide direction arrows.", kind: "number" }
   ],
   preview: [
     { key: "preview.cache_max_bytes", label: "Preview cache max bytes", help: "Cleanup target for generated previews and thumbnails.", kind: "number" },
@@ -2949,7 +3089,8 @@ const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
     { key: "search.default_limit", label: "Default search limit", help: "Bounded result count for broad universal searches.", kind: "number" },
     { key: "search.geocoder_mode", label: "Geocoder mode", help: "cache_only is the current safe default.", kind: "text" },
     { key: "search.online_geocoding", label: "Online geocoding enabled", help: "Currently off by default; provider calls must be user-triggered and cached.", kind: "boolean" },
-    { key: "search.geocoder_provider", label: "Geocoder provider", help: "local_place_cache is active now; Nominatim-compatible providers remain explicit future configuration.", kind: "text" }
+    { key: "search.geocoder_provider", label: "Geocoder provider", help: "local_place_cache is active now; Nominatim-compatible providers are user-triggered and cached.", kind: "text" },
+    { key: "search.geocoder_provider_url", label: "Geocoder provider URL", help: "Nominatim-compatible base URL used only for explicit reverse-geocode requests.", kind: "text" }
   ],
   transcoding: [
     { key: "transcode.session_ttl", label: "Transcode session TTL", help: "Cleanup age for cache-scoped HLS sessions.", kind: "text" }
@@ -3640,7 +3781,7 @@ function ensureOpenLayersMap() {
       style: (feature) => {
         const kind = String(feature.get("kind") ?? feature.get("asset_type") ?? "");
         if (kind === "track") {
-          return new Style({ stroke: new Stroke({ color: "#1a7f37", width: 3 }) });
+          return greenTrackStyle(feature as Feature);
         }
         return undefined;
       }
@@ -4063,7 +4204,7 @@ onBeforeUnmount(() => {
               <button type="button" :disabled="!pipelineRunning" @click="stopIndexingPipeline">Stop current pipeline</button>
               <label class="inline-label">
                 Job max files
-                <input v-model.number="jobMaxFiles" type="number" min="1" max="50" />
+                <input v-model.number="jobMaxFiles" type="number" min="-1" />
               </label>
             </div>
           </header>
@@ -4074,7 +4215,7 @@ onBeforeUnmount(() => {
           </div>
           <form class="control-grid pipeline-settings" @submit.prevent="startDryRun">
             <h3>Shared scan scope and pipeline stages</h3>
-            <p class="form-note">These settings apply to both Preview scan report and Start indexing pipeline.</p>
+            <p class="form-note">These settings apply to the indexing pipeline. Use -1 for no file or byte limit. Preview scan reports stay capped at 50 files unless explicitly over-limit in the API.</p>
             <label>
               Storage
               <select v-model="dryRunStorage">
@@ -4090,15 +4231,16 @@ onBeforeUnmount(() => {
             </label>
             <label>
               Max files
-              <input v-model.number="dryRunMaxFiles" type="number" min="1" max="50" />
+              <input v-model.number="dryRunMaxFiles" type="number" min="-1" />
             </label>
             <label>
               Max bytes
-              <input v-model.number="dryRunMaxBytes" type="number" min="1" />
+              <input v-model.number="dryRunMaxBytes" type="number" min="-1" />
             </label>
             <label>
               Include extensions
               <input v-model="dryRunExtensions" type="text" />
+              <small>Defaults include photos, videos, GPS tracks, audio, PDFs, and text/Markdown documents.</small>
             </label>
             <label class="checkbox-label">
               <input v-model="pipelineIndexFiles" type="checkbox" />
@@ -4247,12 +4389,12 @@ onBeforeUnmount(() => {
               <button type="button" @click="cleanupPreviews(true)">Dry Run Cleanup</button>
               <label class="inline-label">
                 Max files
-                <input v-model.number="jobMaxFiles" type="number" min="1" max="50" />
+                <input v-model.number="jobMaxFiles" type="number" min="-1" />
               </label>
             </div>
           </header>
           <p class="muted">
-            Metadata and preview jobs are bounded by this max-files value and write only to metadata/cache, never originals.
+            Metadata and preview jobs use -1 for no file-count limit and write only to metadata/cache, never originals.
           </p>
           <div class="metrics">
             <article><strong>{{ stats?.photos ?? 0 }}</strong><span>Images</span></article>
@@ -4719,9 +4861,15 @@ onBeforeUnmount(() => {
             <p v-if="assetDetail.embeddings?.length">Embeddings stored: {{ assetDetail.embeddings.length }} vector record(s).</p>
           </section>
           <section v-if="assetDetail" class="settings-form settings-wide">
-            <h3><i class="bi bi-geo-alt" aria-hidden="true"></i> Places and Coordinates</h3>
+            <div class="section-title-row">
+              <h3><i class="bi bi-geo-alt" aria-hidden="true"></i> Places and Coordinates</h3>
+              <button type="button" class="btn btn-sm btn-outline-primary" @click="refreshAssetPlaces">
+                <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+                Refresh place
+              </button>
+            </div>
             <p class="muted">
-              Cache-only reverse geocoding from Cartolensia's local place cache. No public geocoder is called automatically.
+              Reverse geocoding uses the local cache first. Online lookup runs only when enabled in Settings and this button is clicked.
             </p>
             <div v-if="assetDetail.places?.length" class="place-record-grid">
               <article v-for="place in assetDetail.places" :key="`${place.coordinate_source}-${place.display_name}-${place.lat}-${place.lon}`" class="place-record-card">

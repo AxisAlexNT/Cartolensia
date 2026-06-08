@@ -12,16 +12,20 @@ import (
 
 	"github.com/AxisAlexNT/Cartolensia/internal/id"
 	"gopkg.in/yaml.v3"
+
+	"github.com/AxisAlexNT/Cartolensia/internal/storage"
 )
 
 var runtimeSettings = struct {
 	sync.RWMutex
 	values map[string]any
 }{values: map[string]any{
-	"indexing.default_max_files":    50,
+	"indexing.default_max_files":    -1,
+	"indexing.supported_extensions": strings.Join(storage.SupportedExtensions(), ","),
 	"indexing.hash_after_index":     true,
 	"indexing.metadata_after_index": true,
 	"indexing.previews_after_index": false,
+	"gps.track_arrow_interval_m":    500,
 	"map.cluster_radius_px":         64,
 	"map.tiles_enabled":             true,
 	"preview.cache_max_bytes":       int64(10 * 1024 * 1024 * 1024),
@@ -30,6 +34,7 @@ var runtimeSettings = struct {
 	"search.geocoder_mode":          "cache_only",
 	"search.online_geocoding":       false,
 	"search.geocoder_provider":      "local_place_cache",
+	"search.geocoder_provider_url":  "https://nominatim.openstreetmap.org",
 	"transcode.session_ttl":         "2h",
 }}
 
@@ -347,10 +352,12 @@ func restartRequiredSettings() map[string]any {
 
 func runtimeSettingsSchema() []map[string]any {
 	return []map[string]any{
-		{"tab": "indexing", "key": "indexing.default_max_files", "type": "number", "label": "Default max files"},
+		{"tab": "indexing", "key": "indexing.default_max_files", "type": "number", "label": "Default max files", "help": "-1 means no file-count limit for normal indexing. Dry-run previews remain conservatively capped unless explicitly overridden."},
+		{"tab": "indexing", "key": "indexing.supported_extensions", "type": "text", "label": "Supported discovery extensions", "help": "Comma-separated default include list used by the Discovery form."},
 		{"tab": "indexing", "key": "indexing.hash_after_index", "type": "boolean", "label": "Hash after indexing"},
 		{"tab": "indexing", "key": "indexing.metadata_after_index", "type": "boolean", "label": "Extract metadata after indexing"},
 		{"tab": "indexing", "key": "indexing.previews_after_index", "type": "boolean", "label": "Generate previews after indexing"},
+		{"tab": "gps", "key": "gps.track_arrow_interval_m", "type": "number", "label": "Track direction arrow interval (m)", "help": "Direction arrows are drawn on GPS track visualizations at this interval. Set 0 to hide arrows."},
 		{"tab": "preview", "key": "preview.cache_max_bytes", "type": "number", "label": "Preview cache max bytes"},
 		{"tab": "map", "key": "map.cluster_radius_px", "type": "number", "label": "Cluster radius px"},
 		{"tab": "map", "key": "map.tiles_enabled", "type": "boolean", "label": "OSM tiles enabled"},
@@ -358,6 +365,7 @@ func runtimeSettingsSchema() []map[string]any {
 		{"tab": "search", "key": "search.geocoder_mode", "type": "text", "label": "Geocoder mode"},
 		{"tab": "search", "key": "search.online_geocoding", "type": "boolean", "label": "Online geocoding enabled"},
 		{"tab": "search", "key": "search.geocoder_provider", "type": "text", "label": "Geocoder provider"},
+		{"tab": "search", "key": "search.geocoder_provider_url", "type": "text", "label": "Geocoder provider URL"},
 		{"tab": "transcoding", "key": "transcode.session_ttl", "type": "text", "label": "Transcode session TTL"},
 	}
 }

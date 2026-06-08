@@ -56,6 +56,20 @@ type WalkOptions struct {
 	ExcludePatterns   []string
 }
 
+var supportedExtensions = []string{
+	"jpg", "jpeg", "png", "heif", "heic",
+	"mp4", "mov", "webm", "mkv", "avi", "m4v",
+	"gpx", "kml", "kmz", "gpz",
+	"wav", "mp3", "3gp", "3gpp", "aac", "m4a", "flac", "ogg", "oga", "opus", "amr",
+	"pdf", "djvu", "txt", "md", "markdown",
+}
+
+func SupportedExtensions() []string {
+	out := append([]string{}, supportedExtensions...)
+	sort.Strings(out)
+	return out
+}
+
 type WalkReport struct {
 	FilesSeen      int            `json:"files_seen"`
 	FilesReturned  int            `json:"files_returned"`
@@ -271,10 +285,12 @@ func (a *FSAdapter) ListRecursive(ctx context.Context) ([]FileInfo, error) {
 
 func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) ([]FileInfo, WalkReport, error) {
 	report := WalkReport{Complete: true, SkippedReasons: map[string]int{}}
-	if opts.MaxFiles <= 0 {
+	maxFilesUnlimited := opts.MaxFiles < 0
+	maxBytesUnlimited := opts.MaxBytes < 0
+	if opts.MaxFiles == 0 {
 		opts.MaxFiles = 50
 	}
-	if opts.MaxBytes <= 0 {
+	if opts.MaxBytes == 0 {
 		opts.MaxBytes = 2 << 30
 	}
 	include := extensionSet(opts.IncludeExtensions)
@@ -333,7 +349,7 @@ func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) 
 				report.SkippedReasons["pattern"]++
 				return nil
 			}
-			if report.FilesReturned >= opts.MaxFiles || report.BytesSeen+info.SizeBytes > opts.MaxBytes {
+			if (!maxFilesUnlimited && report.FilesReturned >= opts.MaxFiles) || (!maxBytesUnlimited && report.BytesSeen+info.SizeBytes > opts.MaxBytes) {
 				report.Complete = false
 				report.SkippedReasons["limit"]++
 				return stopped

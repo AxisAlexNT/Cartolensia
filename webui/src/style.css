@@ -1477,12 +1477,26 @@ td {
   display: flex;
   gap: 0.6rem;
   min-height: 34px;
+  padding-left: 0;
   width: 100%;
 }
 
 .geo-align-sidebar .form-check-input,
 .layer-menu .form-check-input {
   flex: 0 0 auto;
+}
+
+.geo-align-sidebar .form-switch .form-check-input,
+.layer-menu .form-switch .form-check-input {
+  height: 1.25rem;
+  margin-left: 0;
+  width: 2.5rem;
+}
+
+.geo-align-sidebar .form-check span,
+.layer-menu .form-check span {
+  line-height: 1.25rem;
+  min-width: 7rem;
 }
 
 .geo-align-main {

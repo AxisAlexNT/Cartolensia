@@ -197,3 +197,12 @@ The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not u
 - `/transcribe-audio` and `/analyze-audio` accept only bounded Cartolensia media URLs or safe local temp/cache paths. Temporary media copies are deleted after sidecar processing.
 - ASR transcripts, timestamped segments, and audio features are PostgreSQL metadata only. They do not create sidecars and do not modify media files.
 - Audio-analysis genre labels are heuristic until a reviewed classifier model is added; UI/reporting should avoid presenting them as authoritative identity or safety decisions.
+
+## 2026-06-09 Full Prefix Indexing Safety Notes
+
+- `max_files=-1` is accepted only as an explicit unlimited sentinel for normal indexing jobs. Real archive storage still requires a named storage and explicit non-root prefix.
+- Dry-run/preview caps are intentionally retained and labeled as preview-only so operators can inspect a sample without accidentally starting a full scan.
+- The full `Cartolensia-photos` run used `rclone_peek` in `strict_read_only` mode and did not run missing-file marking.
+- Track arrows and reverse-geocoding changes are metadata/UI operations only. They do not modify tracks, photos, or original geotags.
+- `/api/v1/places/reverse` is cache-first. Public-provider calls require an explicit request and enabled runtime setting; automatic bulk public reverse-geocoding remains disallowed.
+- Component downloads remain provenance-gated. Even with operator approval, the Component Manager refuses silent downloads without a reviewed source URL and records an actionable failed job instead.
