@@ -193,3 +193,24 @@ Next:
 - Continue safety/private visibility and WebDAV/productization work.
 - Add cross-platform distribution targets after the Linux x86_64 package has been validated on clean offline hosts.
 - Add a release-time license review checklist for model weights, CUDA wheels, and ffmpeg codec flags.
+
+## 2026-06-08 Multimodal Roadmap Update
+
+Completed:
+
+- Audio media kind detection and ffprobe metadata extraction.
+- Document media kind detection.
+- Durable schema for transcripts, transcript segments, audio features, video frame captions, and document text.
+- Asset-detail APIs and UI panels for OCR full text, transcripts, audio features, frame captions, and document text.
+- PostgreSQL/local universal search hooks for OCR, transcripts, documents, frame captions, and audio features.
+- Cache-safe bounded live indexing of the current Sound Records audio samples.
+
+Next:
+
+- Install/review ASR components and enable faster-whisper transcription jobs with CPU/CUDA fallback.
+- Add librosa/scipy-backed tempo/key/loudness extraction and a reviewed genre classifier.
+- Add Marker/PDF document extraction with Tesseract fallback and Markdown storage.
+- Add simple video frame sampling jobs that use existing image classification/caption/OCR tools.
+- Add waveform peak generation stored in PostgreSQL/cache metadata.
+- Add durable media-track player sessions for audio as well as video.
+- Implement persisted zoom-level map cluster cache after the current screen-distance cluster path is fully characterized.

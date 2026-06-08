@@ -445,3 +445,60 @@ The Check action validates the current system or repo-local path and records com
 Do not use `/mnt/Models/rclone` as a component source, destination, cache, or extraction target. The API rejects that path for component operations. Component download/install buttons create visible jobs and provenance-gated messages; they do not silently fetch unreviewed third-party binaries.
 
 Asset detail pages use the component registry to explain missing AI/OCR/model prerequisites before starting an asset-scoped action. A missing component can be resolved by opening Settings -> Components and checking/providing the relevant component key.
+
+## Audio And Multimodal Metadata Operations
+
+Audio files are indexed only through the normal bounded discovery flow. For real-archive storage, always provide a non-root prefix plus `max_files` and `max_bytes`; do not run unbounded discovery or missing-file marking.
+
+Example bounded audio scan:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/indexing/start \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "storage":"rclone_peek",
+    "prefix":"Cartolensia-photos/Sound Records",
+    "max_files":20,
+    "max_bytes":2147483648,
+    "include_extensions":["wav","mp3","m4a","flac","ogg","opus","aac","amr","3gp","3gpp","webm"],
+    "index_files":true,
+    "hash":false,
+    "metadata":true,
+    "previews":false,
+    "parse_tracks":false,
+    "geotag_exif":false,
+    "snap_to_tracks":false,
+    "refresh_map":false
+  }'
+```
+
+Run or rerun audio metadata/feature seeding with:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/audio/analyze/start \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "storage":"rclone_peek",
+    "prefix":"Cartolensia-photos/Sound Records",
+    "media_kind":"audio",
+    "max_files":20,
+    "include_audio":true,
+    "include_video":false,
+    "include_images":false,
+    "include_tracks":false,
+    "include_documents":false
+  }'
+```
+
+Useful inspection endpoints:
+
+- `/api/v1/assets?media_kind=audio&limit=20`;
+- `/api/v1/assets/{id}/audio-features`;
+- `/api/v1/audio/{id}/metadata`;
+- `/api/v1/assets/{id}/transcripts`;
+- `/api/v1/assets/{id}/document`;
+- `/api/v1/search?q=audio`;
+- `/api/v1/search?q=transcript:station`;
+- `/api/v1/search?q=document:invoice`.
+
+ASR, Marker, advanced video captioning, and genre classifiers are optional component/model paths. If they are missing, operators should see a missing-component state rather than silent fallback to a remote service.

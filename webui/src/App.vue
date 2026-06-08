@@ -956,9 +956,7 @@ function renderGalleryTrackMap(preview: Record<string, unknown>) {
   galleryTrackTileLayer.setVisible(trackPreviewTilesEnabled.value);
   galleryTrackLayer = new VectorLayer({
     source: galleryTrackSource,
-    style: trackPreviewStyle,
-    updateWhileAnimating: true,
-    updateWhileInteracting: true
+    style: trackPreviewStyle
   });
   galleryTrackLayer.setVisible(galleryTrackLayerVisible.value);
   galleryTrackMap = new OLMap({
@@ -1025,7 +1023,7 @@ function renderSelectedTrackMap(preview: Record<string, unknown>) {
   const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
   selectedTrackSource.clear();
   selectedTrackSource.addFeatures(features);
-  selectedTrackFallbackPath.value = trackFallbackPathFromPreview(preview);
+  selectedTrackFallbackPath.value = features.length === 0 ? trackFallbackPathFromPreview(preview) : "";
   selectedTrackPreviewStatus.value = trackPreviewStatus(preview, features.length);
   selectedTrackTileLayer?.setVisible(trackPreviewTilesEnabled.value);
   selectedTrackLayer?.setVisible(selectedTrackLayerVisible.value);
@@ -2413,6 +2411,18 @@ function copyText(text: string) {
   void navigator.clipboard?.writeText(text);
 }
 
+function downloadTextFile(name: string, text: string) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function resetGeoAlign() {
   if (!geoAlignSession.value) return;
   geoAlignSession.value = await api.resetGeoAlignSession(geoAlignSession.value.id);
@@ -3778,6 +3788,16 @@ function formatBytes(value: number): string {
   return `${size.toFixed(1)} ${unit}`;
 }
 
+function formatDuration(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "unknown";
+  const total = Math.round(value);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   await refresh();
@@ -3869,6 +3889,8 @@ onBeforeUnmount(() => {
                 <option value="">All</option>
                 <option value="photo">Photos</option>
                 <option value="video">Videos</option>
+                <option value="audio">Audio</option>
+                <option value="document">Documents</option>
                 <option value="track">Tracks</option>
               </select>
             </label>
@@ -4361,6 +4383,40 @@ onBeforeUnmount(() => {
 	                Advanced
 	              </button>
 	            </div>
+            <div v-else-if="assetDetail.asset.media_kind === 'audio'" class="audio-panel">
+              <audio
+                v-if="assetDetail.original_url"
+                :src="assetDetail.original_url"
+                controls
+                preload="metadata"
+              ></audio>
+              <div class="detail-grid compact-detail-grid">
+                <article>
+                  <strong>Duration</strong>
+                  <span>{{ formatDuration(Number(assetDetail.asset.metadata?.duration_seconds ?? 0)) }}</span>
+                </article>
+                <article>
+                  <strong>Codec</strong>
+                  <span>{{ assetDetail.asset.metadata?.audio_codec || assetDetail.asset.metadata?.codec || "unknown" }}</span>
+                </article>
+                <article>
+                  <strong>Sample rate</strong>
+                  <span>{{ assetDetail.asset.metadata?.sample_rate_hz || "unknown" }}</span>
+                </article>
+                <article>
+                  <strong>Channels</strong>
+                  <span>{{ assetDetail.asset.metadata?.channels || "unknown" }}</span>
+                </article>
+              </div>
+              <p class="muted">Audio analysis and transcript actions store metadata in Cartolensia only; originals stay read-only.</p>
+            </div>
+            <div v-else-if="assetDetail.asset.media_kind === 'document'" class="document-panel">
+              <div class="empty-state compact-empty">
+                <i class="bi bi-file-earmark-text" aria-hidden="true"></i>
+                <strong>Document metadata</strong>
+                <span>Document OCR/Markdown extraction is available as an explicit metadata job when the component is installed.</span>
+              </div>
+            </div>
             <div v-else-if="assetDetail.asset.media_kind === 'track'" class="track-detail-preview">
               <img :src="`/api/v1/media/${assetDetail.asset.id}/track-thumbnail?width=720&height=360`" alt="" />
               <button type="button" @click="openGallery([assetToGallery(assetDetail.asset)], 0)">Open interactive track preview</button>
@@ -4456,7 +4512,7 @@ onBeforeUnmount(() => {
               </article>
             </div>
           </section>
-          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.ocr_blocks?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0)" class="settings-form settings-wide">
+          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.ocr_blocks?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0 || (assetDetail.transcripts?.length ?? 0) > 0 || !!assetDetail.audio_features || (assetDetail.frame_captions?.length ?? 0) > 0 || !!assetDetail.document)" class="settings-form settings-wide">
             <h3>AI Results</h3>
             <div v-if="assetDetail.ai_tags?.length" class="chip-row">
               <span v-for="tag in assetDetail.ai_tags" :key="`${tag.tag}-${tag.source}`" class="chip">
@@ -4500,6 +4556,35 @@ onBeforeUnmount(() => {
             <section v-if="assetDetail.ocr_blocks?.length" class="ocr-record-list">
               <h4>OCR Text</h4>
               <p class="muted">OCR is stored as local metadata with bounding boxes. Click text to highlight it on the image.</p>
+              <div v-if="assetDetail.ocr_full_text || assetDetail.ocr_summary?.full_text" class="ocr-full-text-panel">
+                <div class="section-title-row">
+                  <strong>Full text</strong>
+                  <span class="status-badge">{{ assetDetail.ocr_summary?.block_count ?? assetDetail.ocr_blocks.length }} blocks</span>
+                  <span v-if="assetDetail.ocr_summary?.languages?.length" class="status-badge ok">
+                    {{ assetDetail.ocr_summary.languages.join(", ") }}
+                  </span>
+                </div>
+                <textarea
+                  readonly
+                  :value="assetDetail.ocr_full_text || assetDetail.ocr_summary?.full_text"
+                  rows="6"
+                  aria-label="Full OCR text"
+                ></textarea>
+                <div class="inline-actions">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyText(assetDetail.ocr_full_text || assetDetail.ocr_summary?.full_text || '')">
+                    <i class="bi bi-clipboard" aria-hidden="true"></i>
+                    Copy full text
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    @click="downloadTextFile(`${assetDetail.asset.display_name || 'ocr'}.txt`, assetDetail.ocr_full_text || assetDetail.ocr_summary?.full_text || '')"
+                  >
+                    <i class="bi bi-download" aria-hidden="true"></i>
+                    Download .txt
+                  </button>
+                </div>
+              </div>
               <article
                 v-for="block in assetDetail.ocr_blocks"
                 :key="block.id"
@@ -4520,6 +4605,60 @@ onBeforeUnmount(() => {
                   Delete
                 </button>
               </article>
+            </section>
+            <section v-if="assetDetail.transcripts?.length" class="ocr-record-list">
+              <h4>Transcripts</h4>
+              <article v-for="transcript in assetDetail.transcripts" :key="transcript.id" class="ocr-record-card wide-record-card">
+                <div>
+                  <strong>{{ transcript.language || 'auto language' }} · {{ transcript.model || 'ASR model' }}</strong>
+                  <small>{{ transcript.source_kind || 'media audio' }} · {{ transcript.segments?.length ?? 0 }} segments</small>
+                  <p>{{ transcript.full_text }}</p>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" @click.stop="copyText(transcript.full_text)">
+                  <i class="bi bi-clipboard" aria-hidden="true"></i>
+                  Copy
+                </button>
+              </article>
+            </section>
+            <section v-if="assetDetail.audio_features" class="place-record-grid">
+              <article class="place-record-card">
+                <strong>Audio features</strong>
+                <p>
+                  Tempo {{ assetDetail.audio_features.tempo_bpm ?? 'n/a' }} BPM ·
+                  Key {{ assetDetail.audio_features.key || 'n/a' }}{{ assetDetail.audio_features.mode ? ` ${assetDetail.audio_features.mode}` : '' }} ·
+                  Genres {{ assetDetail.audio_features.genre_labels?.join(', ') || 'not classified' }}
+                </p>
+                <small>{{ assetDetail.audio_features.model || 'local audio analyzer' }}</small>
+              </article>
+            </section>
+            <section v-if="assetDetail.frame_captions?.length" class="ocr-record-list">
+              <h4>Video Frame Captions</h4>
+              <article v-for="caption in assetDetail.frame_captions" :key="caption.id" class="ocr-record-card wide-record-card">
+                <div>
+                  <strong>{{ caption.caption }}</strong>
+                  <small>{{ Math.round(caption.timestamp_ms / 1000) }}s · {{ caption.model || 'frame caption model' }}</small>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" @click.stop="copyText(caption.caption)">
+                  <i class="bi bi-clipboard" aria-hidden="true"></i>
+                  Copy
+                </button>
+              </article>
+            </section>
+            <section v-if="assetDetail.document" class="ocr-record-list">
+              <h4>Document Text</h4>
+              <div class="ocr-full-text-panel">
+                <div class="section-title-row">
+                  <strong>{{ assetDetail.document.title || assetDetail.asset.display_name }}</strong>
+                  <span class="status-badge">{{ assetDetail.document.engine || 'document extractor' }}</span>
+                </div>
+                <textarea readonly :value="assetDetail.document.markdown || assetDetail.document.text || ''" rows="8"></textarea>
+                <div class="inline-actions">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyText(assetDetail.document?.markdown || assetDetail.document?.text || '')">
+                    <i class="bi bi-clipboard" aria-hidden="true"></i>
+                    Copy document text
+                  </button>
+                </div>
+              </div>
             </section>
             <p v-if="assetDetail.embeddings?.length">Embeddings stored: {{ assetDetail.embeddings.length }} vector record(s).</p>
           </section>
@@ -4914,6 +5053,7 @@ onBeforeUnmount(() => {
                 <option value="">All</option>
                 <option value="photo">Photos</option>
                 <option value="video">Videos</option>
+                <option value="audio">Audio</option>
               </select>
             </label>
             <label>

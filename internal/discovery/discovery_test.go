@@ -35,14 +35,14 @@ func TestDiscoveryScansFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(assets) != 4 {
-		t.Fatalf("expected 4 media assets, got %d: %#v", len(assets), assets)
+	if len(assets) != 5 {
+		t.Fatalf("expected 5 media assets, got %d: %#v", len(assets), assets)
 	}
 	stats, err := store.Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Unhashed != 4 || stats.Hashed != 0 {
+	if stats.Unhashed != 5 || stats.Hashed != 0 || stats.Documents != 1 {
 		t.Fatalf("unexpected hash stats %#v", stats)
 	}
 }
@@ -70,7 +70,7 @@ func TestHashUnhashedFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Hashed != 4 || stats.Unhashed != 0 {
+	if stats.Hashed != 5 || stats.Unhashed != 0 || stats.Documents != 1 {
 		t.Fatalf("unexpected hash stats %#v", stats)
 	}
 }

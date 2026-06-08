@@ -561,14 +561,24 @@ func MediaKind(ext, mimeType string) string {
 		return "photo"
 	case "mp4", "mov", "mkv", "avi", "webm", "m4v":
 		return "video"
+	case "3gp", "3gpp", "aac", "m4a", "mp3", "wav", "flac", "ogg", "oga", "opus", "amr":
+		return "audio"
 	case "gpx", "tcx", "fit", "kml", "kmz", "gpz":
 		return "track"
+	case "pdf", "djvu", "txt", "md", "markdown":
+		return "document"
 	}
 	if strings.HasPrefix(mimeType, "image/") {
 		return "photo"
 	}
 	if strings.HasPrefix(mimeType, "video/") {
 		return "video"
+	}
+	if strings.HasPrefix(mimeType, "audio/") {
+		return "audio"
+	}
+	if strings.HasPrefix(mimeType, "application/pdf") || strings.HasPrefix(mimeType, "text/") {
+		return "document"
 	}
 	return "other"
 }

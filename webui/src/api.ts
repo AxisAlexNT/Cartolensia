@@ -205,6 +205,12 @@ export type AssetDetail = {
   embeddings?: Record<string, unknown>[];
   places?: AssetPlaceRecord[];
   ocr_blocks?: OCRBlock[];
+  ocr_summary?: OCRSummary;
+  ocr_full_text?: string;
+  transcripts?: TranscriptRecord[];
+  audio_features?: AudioFeatureRecord;
+  frame_captions?: VideoFrameCaptionRecord[];
+  document?: DocumentTextRecord;
 };
 
 export type AssetPlaceRecord = {
@@ -234,6 +240,74 @@ export type OCRBlock = {
   height: number;
   model_name?: string;
   created_at: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type OCRSummary = {
+  full_text: string;
+  languages: string[];
+  engines: string[];
+  model_name?: string;
+  created_at?: string;
+  block_count: number;
+};
+
+export type TranscriptRecord = {
+  id: string;
+  asset_id: string;
+  source_kind: string;
+  language?: string;
+  model?: string;
+  full_text: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+  segments?: Array<{
+    id: string;
+    transcript_id: string;
+    asset_id: string;
+    start_ms: number;
+    end_ms: number;
+    text: string;
+    confidence?: number;
+    speaker?: string;
+    metadata?: Record<string, unknown>;
+  }>;
+};
+
+export type AudioFeatureRecord = {
+  asset_id: string;
+  duration_seconds?: number;
+  tempo_bpm?: number;
+  key?: string;
+  mode?: string;
+  loudness?: number;
+  speech_music_ratio?: number;
+  genre_labels?: string[];
+  model?: string;
+  created_at?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type VideoFrameCaptionRecord = {
+  id: string;
+  asset_id: string;
+  timestamp_ms: number;
+  fraction: number;
+  caption: string;
+  model?: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type DocumentTextRecord = {
+  asset_id: string;
+  page_count?: number;
+  title?: string;
+  author?: string;
+  text?: string;
+  markdown?: string;
+  engine?: string;
+  created_at?: string;
   metadata?: Record<string, unknown>;
 };
 

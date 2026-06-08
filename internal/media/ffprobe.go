@@ -17,9 +17,14 @@ type FFProbeInfo struct {
 	Width           *int     `json:"width,omitempty"`
 	Height          *int     `json:"height,omitempty"`
 	Codec           string   `json:"codec,omitempty"`
+	AudioCodec      string   `json:"audio_codec,omitempty"`
 	Container       string   `json:"container,omitempty"`
 	BitrateBPS      *int64   `json:"bitrate_bps,omitempty"`
 	FrameRate       *float64 `json:"frame_rate,omitempty"`
+	SampleRateHz    *int     `json:"sample_rate_hz,omitempty"`
+	Channels        *int     `json:"channels,omitempty"`
+	HasVideo        bool     `json:"has_video,omitempty"`
+	HasAudio        bool     `json:"has_audio,omitempty"`
 }
 
 func DetectFFProbe() FFProbeInfo {
@@ -31,6 +36,10 @@ func DetectFFProbe() FFProbeInfo {
 }
 
 func ProbeVideo(ctx context.Context, path string) (FFProbeInfo, error) {
+	return ProbeMedia(ctx, path)
+}
+
+func ProbeMedia(ctx context.Context, path string) (FFProbeInfo, error) {
 	info := DetectFFProbe()
 	if !info.Available {
 		return info, fmt.Errorf("ffprobe not found")
@@ -39,7 +48,7 @@ func ProbeVideo(ctx context.Context, path string) (FFProbeInfo, error) {
 	defer cancel()
 	output, err := exec.CommandContext(ctx, info.Path,
 		"-v", "error",
-		"-show_entries", "format=duration,format_name,bit_rate:stream=codec_name,width,height,avg_frame_rate",
+		"-show_entries", "format=duration,format_name,bit_rate:stream=codec_name,codec_type,width,height,avg_frame_rate,sample_rate,channels",
 		"-of", "json",
 		path,
 	).Output()
@@ -48,10 +57,13 @@ func ProbeVideo(ctx context.Context, path string) (FFProbeInfo, error) {
 	}
 	var parsed struct {
 		Streams []struct {
+			CodecType    string `json:"codec_type"`
 			CodecName    string `json:"codec_name"`
 			Width        int    `json:"width"`
 			Height       int    `json:"height"`
 			AvgFrameRate string `json:"avg_frame_rate"`
+			SampleRate   string `json:"sample_rate"`
+			Channels     int    `json:"channels"`
 		} `json:"streams"`
 		Format struct {
 			Duration   string `json:"duration"`
@@ -74,7 +86,13 @@ func ProbeVideo(ctx context.Context, path string) (FFProbeInfo, error) {
 		}
 	}
 	for _, stream := range parsed.Streams {
-		if stream.Width > 0 && stream.Height > 0 {
+		switch stream.CodecType {
+		case "video":
+			info.HasVideo = true
+		case "audio":
+			info.HasAudio = true
+		}
+		if stream.Width > 0 && stream.Height > 0 && info.Width == nil {
 			width := stream.Width
 			height := stream.Height
 			info.Width = &width
@@ -83,7 +101,19 @@ func ProbeVideo(ctx context.Context, path string) (FFProbeInfo, error) {
 			if frameRate, ok := parseFrameRate(stream.AvgFrameRate); ok {
 				info.FrameRate = &frameRate
 			}
-			break
+		}
+		if (stream.CodecType == "audio" || stream.SampleRate != "" || stream.Channels > 0) && info.AudioCodec == "" {
+			info.HasAudio = true
+			info.AudioCodec = stream.CodecName
+			if stream.SampleRate != "" {
+				if value, err := strconv.Atoi(stream.SampleRate); err == nil {
+					info.SampleRateHz = &value
+				}
+			}
+			if stream.Channels > 0 {
+				channels := stream.Channels
+				info.Channels = &channels
+			}
 		}
 	}
 	return info, nil

@@ -175,3 +175,17 @@ Current added dependency notes:
 - Component paths and archive sources under `/mnt/Models/rclone` are rejected. The real archive remains strict read-only and is never used as a component cache or extraction target.
 - Component download jobs are provenance-gated. The current handler records a job and actionable message rather than silently downloading binaries without a reviewed source URL/license note.
 - FFmpeg redistributability is checked during offline package assembly. `--enable-nonfree` fails packaging by default, while `--enable-gpl` is recorded so release operators can label the package appropriately.
+
+## Multimodal Metadata Safety
+
+Audio, transcript, video-frame, and document metadata follow the same immutable-original policy as photos and tracks.
+
+- Audio discovery must be bounded for real archive storage and must not use missing-file marking.
+- FFprobe reads original audio/video files through the configured read-only adapter and writes only database metadata.
+- `audio_features` rows are Cartolensia metadata only; they must not create sidecars next to originals.
+- ASR transcripts and segments are database metadata. ASR temp files, extracted audio, and model caches must stay under `.cartolensia/realpeek-cache`, `.cartolensia/models`, `.cartolensia/ai-venv`, `.cartolensia/components`, or `/tmp`.
+- Document OCR/Markdown output is stored in PostgreSQL/cache metadata and must not be written beside source PDFs/images.
+- OCR full-text `.txt` downloads in the browser are user-initiated client downloads, not server writes to storage.
+- Optional ASR/Marker/video/genre model downloads require component provenance and license review before bundling or release.
+
+The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not use it as an ASR temp directory, OCR cache, document export location, waveform cache, model cache, or component extraction target.

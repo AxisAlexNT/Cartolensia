@@ -36,6 +36,8 @@ type Payload struct {
 	IncludeVideo  bool     `json:"include_video"`
 	IncludeImages bool     `json:"include_images"`
 	IncludeTracks bool     `json:"include_tracks"`
+	IncludeAudio  bool     `json:"include_audio"`
+	IncludeDocs   bool     `json:"include_documents"`
 }
 
 type Runner struct {
@@ -46,7 +48,7 @@ type Runner struct {
 }
 
 func NewPayload() Payload {
-	return Payload{IncludeVideo: true, IncludeImages: true, IncludeTracks: true}
+	return Payload{IncludeVideo: true, IncludeImages: true, IncludeTracks: true, IncludeAudio: true, IncludeDocs: true}
 }
 
 func DecodePayload(raw any) Payload {
@@ -143,6 +145,12 @@ func selectTargets(assets []catalog.Asset, payload Payload) []catalog.Asset {
 		if !payload.IncludeTracks && asset.MediaKind == "track" {
 			continue
 		}
+		if !payload.IncludeAudio && asset.MediaKind == "audio" {
+			continue
+		}
+		if !payload.IncludeDocs && asset.MediaKind == "document" {
+			continue
+		}
 		if payload.OnlyMissing && !metadataMissing(asset) {
 			continue
 		}
@@ -182,8 +190,12 @@ func metadataMissing(asset catalog.Asset) bool {
 		return asset.Metadata["width"] == nil || asset.Metadata["height"] == nil
 	case "video":
 		return asset.Metadata["duration_seconds"] == nil || asset.Metadata["ffprobe_available"] == nil
+	case "audio":
+		return asset.Metadata["duration_seconds"] == nil || asset.Metadata["audio_codec"] == nil || asset.Metadata["ffprobe_available"] == nil
 	case "track":
 		return asset.Metadata["track_point_count"] == nil
+	case "document":
+		return asset.Metadata["document_metadata_extracted_at"] == nil
 	default:
 		return false
 	}
@@ -199,6 +211,10 @@ func (r Runner) enrichAsset(ctx context.Context, asset catalog.Asset) error {
 		return r.enrichImage(ctx, asset, loc)
 	case "video":
 		return r.enrichVideo(ctx, asset, loc)
+	case "audio":
+		return r.enrichAudio(ctx, asset, loc)
+	case "document":
+		return r.enrichDocument(ctx, asset, loc)
 	case "track":
 		switch strings.ToLower(loc.Extension) {
 		case "gpx":
@@ -255,15 +271,24 @@ func (r Runner) enrichImage(ctx context.Context, asset catalog.Asset, loc catalo
 }
 
 func (r Runner) enrichVideo(ctx context.Context, asset catalog.Asset, loc catalog.Location) error {
+	return r.enrichFFProbeMedia(ctx, asset, loc, "video")
+}
+
+func (r Runner) enrichAudio(ctx context.Context, asset catalog.Asset, loc catalog.Location) error {
+	return r.enrichFFProbeMedia(ctx, asset, loc, "audio")
+}
+
+func (r Runner) enrichFFProbeMedia(ctx context.Context, asset catalog.Asset, loc catalog.Location, kind string) error {
 	file, _, err := r.Registry.OpenByURL(loc.StorageURL)
 	if err != nil {
 		return err
 	}
 	path := file.Name()
 	_ = file.Close()
-	probe, err := media.ProbeVideo(ctx, path)
+	probe, err := media.ProbeMedia(ctx, path)
 	metadata := map[string]any{
 		"ffprobe_available":     probe.Available,
+		"media_probe_kind":      kind,
 		"metadata_extracted_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	if err != nil {
@@ -281,6 +306,9 @@ func (r Runner) enrichVideo(ctx context.Context, asset catalog.Asset, loc catalo
 	if probe.Codec != "" {
 		metadata["codec"] = probe.Codec
 	}
+	if probe.AudioCodec != "" {
+		metadata["audio_codec"] = probe.AudioCodec
+	}
 	if probe.Container != "" {
 		metadata["container"] = probe.Container
 	}
@@ -289,6 +317,38 @@ func (r Runner) enrichVideo(ctx context.Context, asset catalog.Asset, loc catalo
 	}
 	if probe.FrameRate != nil {
 		metadata["frame_rate"] = *probe.FrameRate
+	}
+	if probe.SampleRateHz != nil {
+		metadata["sample_rate_hz"] = *probe.SampleRateHz
+	}
+	if probe.Channels != nil {
+		metadata["channels"] = *probe.Channels
+	}
+	metadata["has_video_stream"] = probe.HasVideo
+	metadata["has_audio_stream"] = probe.HasAudio
+	if kind == "audio" {
+		features := catalog.AudioFeatures{
+			AssetID:         asset.ID,
+			DurationSeconds: probe.DurationSeconds,
+			Model:           "ffprobe_metadata",
+			Metadata: map[string]any{
+				"audio_codec":    probe.AudioCodec,
+				"container":      probe.Container,
+				"sample_rate_hz": metadata["sample_rate_hz"],
+				"channels":       metadata["channels"],
+				"analyzer":       "ffprobe",
+				"genre_status":   "model_missing",
+			},
+		}
+		_, _ = r.Store.UpsertAudioFeatures(ctx, features)
+	}
+	return r.Store.UpdateAssetMetadata(ctx, asset.ID, nil, metadata)
+}
+
+func (r Runner) enrichDocument(ctx context.Context, asset catalog.Asset, loc catalog.Location) error {
+	metadata := map[string]any{
+		"document_metadata_extracted_at": time.Now().UTC().Format(time.RFC3339),
+		"document_extension":             strings.ToLower(loc.Extension),
 	}
 	return r.Store.UpdateAssetMetadata(ctx, asset.ID, nil, metadata)
 }

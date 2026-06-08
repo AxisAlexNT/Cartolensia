@@ -266,6 +266,23 @@ The GitHub Actions offline release workflow is manual. It verifies Go/WebUI buil
 
 The packager also writes `components-manifest.json` into the archive root and `licenses/components-manifest.json` for release review. FFmpeg configure flags are captured when FFmpeg is bundled; `--enable-nonfree` fails the package by default, and `--enable-gpl` is recorded so the archive can be labeled as a GPL-tools bundle.
 
+## Multimodal Metadata Architecture
+
+Cartolensia now treats audio and documents as first-class media kinds alongside photos, videos, and GPS tracks. The storage classifier recognizes common audio extensions (`wav`, `mp3`, `m4a`, `flac`, `ogg`, `opus`, `aac`, `amr`, `3gp`, `3gpp`) and document extensions (`pdf`, `djvu`, `txt`, `md`, `markdown`). Discovery still obeys the same bounded/strict-read-only safety model.
+
+FFprobe probing is shared across video and audio. Audio metadata stored on assets includes duration, audio codec, container, bitrate, sample rate, channel count, and stream-presence flags. Audio enrichment also writes a durable `audio_features` record using the `ffprobe_metadata` model so future analyzers can extend the same row with tempo, key, loudness, speech/music ratio, and genre labels.
+
+New normalized metadata tables support multimodal search and asset-detail pages:
+
+- `asset_transcripts` and `asset_transcript_segments` for ASR output;
+- `audio_features` for audio analysis;
+- `video_frame_captions` for sampled-frame descriptions;
+- `document_text` for OCR/Marker/PDF markdown output.
+
+The current `postgres_local` search backend indexes these records through bounded asset-scoped lookups and PostgreSQL indexes. Elasticsearch/OpenSearch remain future optional adapters behind the SearchBackend abstraction.
+
+Asset detail exposes OCR full text, transcripts, audio features, video frame captions, and document text through dedicated subroutes. Heavy engines such as ASR, Marker, advanced video description, and genre classifiers remain optional component-managed integrations.
+
 ## 2026-06-07 Update
 
 - GPS/KML track detail now has a dedicated API/UI flow with OpenLayers geometry preview, altitude and speed profiles, point-info lookup, media-by-time lookup, and nearby-geotag media lookup.

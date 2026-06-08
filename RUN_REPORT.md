@@ -1505,6 +1505,105 @@ Continue from the current Cartolensia repository and live real-peek service. Imp
 - PostgreSQL was not reset.
 - No commit and no push were done.
 
+## 2026-06-08 Multimodal Audio/OCR Productization Pass
+
+Implemented:
+
+- Added first-class `audio` and `document` media kinds.
+- Extended `/api/v1/stats` with `audio` and `documents` counts.
+- Extended ffprobe probing to capture audio codec, sample rate, channels, bitrate, duration, container, and stream presence.
+- Added metadata enrichment for audio and document assets.
+- Added durable multimodal metadata schema and store methods:
+  - `asset_transcripts`;
+  - `asset_transcript_segments`;
+  - `audio_features`;
+  - `video_frame_captions`;
+  - `document_text`.
+- Added per-asset APIs:
+  - `GET /api/v1/assets/{id}/transcripts`;
+  - `GET /api/v1/assets/{id}/audio-features`;
+  - `GET /api/v1/assets/{id}/frame-captions`;
+  - `GET /api/v1/assets/{id}/document`;
+  - `GET /api/v1/audio/{id}/metadata`;
+  - `POST /api/v1/audio/analyze/start`.
+- Added OCR full-text aggregation:
+  - `GET /api/v1/assets/{id}/ocr` now returns `full_text` and `summary`;
+  - asset detail now exposes `ocr_full_text` and `ocr_summary`;
+  - UI shows copyable/downloadable full OCR text above the block list.
+- Expanded PostgreSQL/local universal search:
+  - `ocr:...`;
+  - `transcript:...`;
+  - `document:...`;
+  - `caption:...` including video frame captions;
+  - `genre:...`, `key:...`, and `tempo:...` from audio feature rows.
+- Added asset-detail UI panels for:
+  - audio playback and ffprobe metadata;
+  - transcripts;
+  - audio features;
+  - video frame captions;
+  - document text/markdown.
+- Fixed track detail/gallery ghost overlay by hiding the static fallback SVG after the interactive OpenLayers vector layer has loaded.
+- Fixed asset-detail top-level `metadata` to return `asset.Metadata` instead of an empty object.
+
+Live bounded audio scan:
+
+- Scanned only the approved prefix: `/mnt/Models/rclone/Cartolensia-photos/Sound Records`.
+- Request was bounded with `max_files=20`, `max_bytes=2147483648`, and audio extensions only.
+- Discovery job `f5f0bc3d-4902-4c22-b11c-0d77e3a3ce96` succeeded:
+  - `3` files indexed;
+  - `3` created;
+  - `617252484` bytes observed;
+  - hashing disabled;
+  - missing marking disabled.
+- Metadata/audio analysis job `e3cd0d9f-f923-4bea-8575-31f97b1fefd2` succeeded and updated all `3` audio assets.
+- Live stats after scan:
+  - `57` assets;
+  - `48` photos;
+  - `2` videos;
+  - `3` audio;
+  - `4` tracks;
+  - `54` hashed;
+  - `3` unhashed.
+- Sample audio asset `74625869-da0b-474a-a233-93984a8fb982`:
+  - codec `pcm_s16le`;
+  - sample rate `44100`;
+  - channels `2`;
+  - duration `456.282993` seconds;
+  - `audio_features` record created with model `ffprobe_metadata`.
+
+Verification:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- Focused live checks:
+  - `/api/v1/stats`;
+  - `/api/v1/components/status`;
+  - `/api/v1/search?q=ocr:test`;
+  - `/api/v1/search?q=audio`;
+  - `/api/v1/search?q=wav`;
+  - `/api/v1/search?q=transcript:test`;
+  - `/api/v1/search?q=caption:train`;
+  - `/api/v1/assets/{audio_id}/audio-features`;
+  - `/api/v1/audio/{audio_id}/metadata`;
+  - `/api/v1/map/status`.
+
+Known limitations:
+
+- ASR/faster-whisper, librosa feature extraction, Marker document extraction, and advanced video-caption models remain component/model dependent. The durable schema/API/UI/search contracts are in place, but model-backed jobs are not enabled unless the relevant components are installed and reviewed.
+- Audio feature MVP currently stores ffprobe-backed duration/container/codec metadata and marks genre classification as `model_missing`.
+- Document discovery is supported for extensions and durable text storage, but PDF/Marker extraction remains pending component integration.
+- Map clustering still reports `screen_distance`; the deeper persisted zoom-level cluster cache remains future work.
+
+Safety confirmation:
+
+- `/mnt/Models/rclone` was read only.
+- No generated files, models, components, transcodes, caches, OCR dumps, exports, or sidecars were written under `/mnt/Models/rclone`.
+- Only the explicitly approved `Cartolensia-photos/Sound Records` prefix was scanned.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
 ## 2026-06-08 OCR Runtime And Durable Place Cache Pass
 
 This pass continued from the live real-peek service after the operator installed OCR packages. I did not install packages, download models, pull Docker images, scan new real-data prefixes, reset PostgreSQL, run missing-file marking, commit, or push.

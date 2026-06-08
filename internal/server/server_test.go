@@ -63,7 +63,7 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"assets":4`) || !strings.Contains(rec.Body.String(), `"hashed":4`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"assets":5`) || !strings.Contains(rec.Body.String(), `"hashed":5`) || !strings.Contains(rec.Body.String(), `"documents":1`) {
 		t.Fatalf("stats status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
@@ -351,10 +351,77 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	audio, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/audio/clip.wav",
+		RelativePath: "audio/clip.wav",
+		Name:         "clip.wav",
+		Extension:    ".wav",
+		MIME:         "audio/wav",
+		MediaKind:    "audio",
+		SizeBytes:    48,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/docs/invoice.pdf",
+		RelativePath: "docs/invoice.pdf",
+		Name:         "invoice.pdf",
+		Extension:    ".pdf",
+		MIME:         "application/pdf",
+		MediaKind:    "document",
+		SizeBytes:    64,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.UpdateAssetMetadata(ctx, photo.Asset.ID, &now, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpdateAssetMetadata(ctx, video.Asset.ID, &now, map[string]any{"duration_seconds": 7}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertTranscript(ctx, catalog.Transcript{
+		AssetID:    audio.Asset.ID,
+		SourceKind: "audio",
+		Language:   "eng",
+		Model:      "fixture-asr",
+		FullText:   "Station announcement for the laboratory train.",
+	}, []catalog.TranscriptSegment{{StartMS: 0, EndMS: 1200, Text: "Station announcement"}}); err != nil {
+		t.Fatal(err)
+	}
+	tempo := 120.0
+	if _, err := store.UpsertAudioFeatures(ctx, catalog.AudioFeatures{
+		AssetID:         audio.Asset.ID,
+		DurationSeconds: floatPtr(3.5),
+		TempoBPM:        &tempo,
+		Key:             "Am",
+		GenreLabels:     []string{"ambient", "field-recording"},
+		Model:           "fixture-audio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertVideoFrameCaption(ctx, catalog.VideoFrameCaption{
+		AssetID:     video.Asset.ID,
+		TimestampMS: 3000,
+		Fraction:    0.5,
+		Caption:     "Train platform with people",
+		Model:       "fixture-frame-caption",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertDocumentText(ctx, catalog.DocumentText{
+		AssetID:   doc.Asset.ID,
+		PageCount: 1,
+		Title:     "Fixture invoice",
+		Text:      "Invoice number laboratory-123",
+		Markdown:  "# Fixture invoice\n\nInvoice number laboratory-123",
+		Engine:    "fixture-document",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	confidence := 0.9
@@ -418,6 +485,31 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 		t.Fatalf("OCR search status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=ocr:laboratory", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched OCR text"`) {
+		t.Fatalf("OCR prefix search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=transcript:station", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched transcript"`) {
+		t.Fatalf("transcript search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=genre:ambient", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched audio features"`) {
+		t.Fatalf("audio feature search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=caption:train", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched video frame caption"`) {
+		t.Fatalf("frame caption search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=document:invoice", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched document text"`) {
+		t.Fatalf("document search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search/places", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cache_only"`) || !strings.Contains(rec.Body.String(), `"Yerevan"`) || !strings.Contains(rec.Body.String(), `"Vanadzor"`) {
 		t.Fatalf("place cache status %d body %s", rec.Code, rec.Body.String())
@@ -454,8 +546,28 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ocr", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Laboratory sample label"`) || !strings.Contains(rec.Body.String(), `"blocks"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Laboratory sample label"`) || !strings.Contains(rec.Body.String(), `"full_text"`) || !strings.Contains(rec.Body.String(), `"blocks"`) {
 		t.Fatalf("asset OCR status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+audio.Asset.ID+"/transcripts", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Station announcement"`) {
+		t.Fatalf("asset transcripts status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+audio.Asset.ID+"/audio-features", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ambient"`) {
+		t.Fatalf("asset audio features status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+video.Asset.ID+"/frame-captions", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `Train platform`) {
+		t.Fatalf("asset frame captions status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+doc.Asset.ID+"/document", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Fixture invoice"`) {
+		t.Fatalf("asset document status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ai", nil))
@@ -920,4 +1032,8 @@ func TestHLSArgsProfilesAndPathSafety(t *testing.T) {
 	if err := ensurePathInside(dir, filepath.Join(dir, "..", "escape")); err == nil {
 		t.Fatal("expected escape to be rejected")
 	}
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
 }

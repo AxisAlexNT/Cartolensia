@@ -627,7 +627,7 @@ func (r Runner) enrichDiscoveredFile(ctx context.Context, assetID string, info s
 		start := points[0].RecordedAt
 		return r.Store.UpdateAssetMetadata(ctx, assetID, &start, metadata)
 	}
-	if info.MediaKind == "video" {
+	if info.MediaKind == "video" || info.MediaKind == "audio" {
 		r.applyFFProbe(ctx, assetID, info)
 	}
 	return nil
@@ -682,7 +682,7 @@ func (r Runner) applyFFProbe(ctx context.Context, assetID string, info storage.F
 	}
 	path := file.Name()
 	_ = file.Close()
-	probe, err := media.ProbeVideo(ctx, path)
+	probe, err := media.ProbeMedia(ctx, path)
 	if err != nil {
 		metadata := map[string]any{"ffprobe_available": probe.Available}
 		_ = r.Store.UpdateAssetMetadata(ctx, assetID, nil, metadata)
@@ -697,6 +697,44 @@ func (r Runner) applyFFProbe(ctx context.Context, assetID string, info storage.F
 	}
 	if probe.Height != nil {
 		metadata["height"] = *probe.Height
+	}
+	if probe.Codec != "" {
+		metadata["codec"] = probe.Codec
+	}
+	if probe.AudioCodec != "" {
+		metadata["audio_codec"] = probe.AudioCodec
+	}
+	if probe.Container != "" {
+		metadata["container"] = probe.Container
+	}
+	if probe.BitrateBPS != nil {
+		metadata["bitrate_bps"] = *probe.BitrateBPS
+	}
+	if probe.FrameRate != nil {
+		metadata["frame_rate"] = *probe.FrameRate
+	}
+	if probe.SampleRateHz != nil {
+		metadata["sample_rate_hz"] = *probe.SampleRateHz
+	}
+	if probe.Channels != nil {
+		metadata["channels"] = *probe.Channels
+	}
+	metadata["has_video_stream"] = probe.HasVideo
+	metadata["has_audio_stream"] = probe.HasAudio
+	if info.MediaKind == "audio" {
+		_, _ = r.Store.UpsertAudioFeatures(ctx, catalog.AudioFeatures{
+			AssetID:         assetID,
+			DurationSeconds: probe.DurationSeconds,
+			Model:           "ffprobe_metadata",
+			Metadata: map[string]any{
+				"audio_codec":    probe.AudioCodec,
+				"container":      probe.Container,
+				"sample_rate_hz": metadata["sample_rate_hz"],
+				"channels":       metadata["channels"],
+				"analyzer":       "ffprobe",
+				"genre_status":   "model_missing",
+			},
+		})
 	}
 	_ = r.Store.UpdateAssetMetadata(ctx, assetID, nil, metadata)
 }

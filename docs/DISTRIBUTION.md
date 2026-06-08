@@ -140,3 +140,15 @@ Before publishing a public release, review:
 - CUDA/NVIDIA redistribution terms when using CUDA wheels.
 
 The package builder records dependency facts but does not replace legal review.
+
+## Multimodal Component Packaging
+
+Audio/document/ASR features are component-managed in offline packages.
+
+- FFmpeg/FFprobe are required for rich audio/video metadata and are listed in the component manifest when bundled.
+- Tesseract and tessdata language packs are required for OCR and are listed individually.
+- faster-whisper, ctranslate2, librosa/scipy, Marker/PDF tooling, and any advanced video/genre models are optional payloads. Bundle them only after license/provenance review.
+- ASR and document models must be stored under package-local component/model/runtime directories, never under original media roots.
+- Offline packages should expose missing ASR/Marker/genre components as actionable Component Manager states if they are not bundled.
+
+The current Linux package flow can include the application, WebUI, OCR/media tools, PostgreSQL runtime, Python runtime, and reviewed model cache. It does not bundle host GPU drivers, public map data, online geocoders, or unreviewed model weights.

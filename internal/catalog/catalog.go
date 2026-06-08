@@ -55,6 +55,8 @@ type Stats struct {
 	Locations          int   `json:"locations"`
 	Photos             int   `json:"photos"`
 	Videos             int   `json:"videos"`
+	Audio              int   `json:"audio"`
+	Documents          int   `json:"documents"`
 	Tracks             int   `json:"tracks"`
 	Unhashed           int   `json:"unhashed"`
 	Hashed             int   `json:"hashed"`
@@ -121,6 +123,67 @@ type TrackCandidate struct {
 	OverlapSeconds float64      `json:"overlap_seconds"`
 	Confidence     float64      `json:"confidence"`
 	Reason         string       `json:"reason,omitempty"`
+}
+
+type Transcript struct {
+	ID         string              `json:"id"`
+	AssetID    string              `json:"asset_id"`
+	SourceKind string              `json:"source_kind"`
+	Language   string              `json:"language,omitempty"`
+	Model      string              `json:"model,omitempty"`
+	FullText   string              `json:"full_text"`
+	CreatedAt  time.Time           `json:"created_at"`
+	Metadata   map[string]any      `json:"metadata,omitempty"`
+	Segments   []TranscriptSegment `json:"segments,omitempty"`
+}
+
+type TranscriptSegment struct {
+	ID           string         `json:"id"`
+	TranscriptID string         `json:"transcript_id"`
+	AssetID      string         `json:"asset_id"`
+	StartMS      int64          `json:"start_ms"`
+	EndMS        int64          `json:"end_ms"`
+	Text         string         `json:"text"`
+	Confidence   *float64       `json:"confidence,omitempty"`
+	Speaker      string         `json:"speaker,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
+type AudioFeatures struct {
+	AssetID          string         `json:"asset_id"`
+	DurationSeconds  *float64       `json:"duration_seconds,omitempty"`
+	TempoBPM         *float64       `json:"tempo_bpm,omitempty"`
+	Key              string         `json:"key,omitempty"`
+	Mode             string         `json:"mode,omitempty"`
+	Loudness         *float64       `json:"loudness,omitempty"`
+	SpeechMusicRatio *float64       `json:"speech_music_ratio,omitempty"`
+	GenreLabels      []string       `json:"genre_labels,omitempty"`
+	Model            string         `json:"model,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+}
+
+type VideoFrameCaption struct {
+	ID          string         `json:"id"`
+	AssetID     string         `json:"asset_id"`
+	TimestampMS int64          `json:"timestamp_ms"`
+	Fraction    float64        `json:"fraction"`
+	Caption     string         `json:"caption"`
+	Model       string         `json:"model,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+type DocumentText struct {
+	AssetID   string         `json:"asset_id"`
+	PageCount int            `json:"page_count,omitempty"`
+	Title     string         `json:"title,omitempty"`
+	Author    string         `json:"author,omitempty"`
+	Text      string         `json:"text,omitempty"`
+	Markdown  string         `json:"markdown,omitempty"`
+	Engine    string         `json:"engine,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 type Page struct {
@@ -559,6 +622,14 @@ type Store interface {
 	UpsertAssetEmbedding(context.Context, AssetEmbedding) (AssetEmbedding, error)
 	ListAssetEmbeddings(context.Context, string) ([]AssetEmbedding, error)
 	VectorSearch(context.Context, string, []float64, int) ([]VectorSearchResult, error)
+	UpsertTranscript(context.Context, Transcript, []TranscriptSegment) (Transcript, error)
+	ListTranscripts(context.Context, string, int) ([]Transcript, error)
+	UpsertAudioFeatures(context.Context, AudioFeatures) (AudioFeatures, error)
+	GetAudioFeatures(context.Context, string) (AudioFeatures, error)
+	UpsertVideoFrameCaption(context.Context, VideoFrameCaption) (VideoFrameCaption, error)
+	ListVideoFrameCaptions(context.Context, string, int) ([]VideoFrameCaption, error)
+	UpsertDocumentText(context.Context, DocumentText) (DocumentText, error)
+	GetDocumentText(context.Context, string) (DocumentText, error)
 	UpsertComponent(context.Context, Component) (Component, error)
 	ListComponents(context.Context, ComponentQuery) ([]Component, error)
 	GetComponent(context.Context, string) (Component, error)
@@ -599,6 +670,10 @@ type MemoryStore struct {
 	faceClusters     map[string]FaceCluster
 	embeddingModels  map[string]EmbeddingModel
 	assetEmbeddings  map[string]AssetEmbedding
+	transcripts      map[string][]Transcript
+	audioFeatures    map[string]AudioFeatures
+	frameCaptions    map[string][]VideoFrameCaption
+	documentText     map[string]DocumentText
 	components       map[string]Component
 	componentEvents  map[string][]ComponentEvent
 	jobs             map[string]jobs.Job
@@ -625,6 +700,10 @@ func NewMemoryStore() *MemoryStore {
 		faceClusters:     make(map[string]FaceCluster),
 		embeddingModels:  make(map[string]EmbeddingModel),
 		assetEmbeddings:  make(map[string]AssetEmbedding),
+		transcripts:      make(map[string][]Transcript),
+		audioFeatures:    make(map[string]AudioFeatures),
+		frameCaptions:    make(map[string][]VideoFrameCaption),
+		documentText:     make(map[string]DocumentText),
 		components:       make(map[string]Component),
 		componentEvents:  make(map[string][]ComponentEvent),
 		jobs:             make(map[string]jobs.Job),
@@ -813,6 +892,10 @@ func (s *MemoryStore) Stats(_ context.Context) (Stats, error) {
 				stats.Photos++
 			case "video":
 				stats.Videos++
+			case "audio":
+				stats.Audio++
+			case "document":
+				stats.Documents++
 			case "track":
 				stats.Tracks++
 			}

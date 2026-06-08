@@ -627,12 +627,14 @@ func (db *DB) Stats(ctx context.Context) (catalog.Stats, error) {
 			(select count(*) from asset_locations),
 			coalesce(sum(case when media_kind='photo' then 1 else 0 end), 0),
 			coalesce(sum(case when media_kind='video' then 1 else 0 end), 0),
+			coalesce(sum(case when media_kind='audio' then 1 else 0 end), 0),
+			coalesce(sum(case when media_kind='document' then 1 else 0 end), 0),
 			coalesce(sum(case when media_kind='track' then 1 else 0 end), 0),
 			coalesce(sum(case when hash_status='hashed' then 1 else 0 end), 0),
 			coalesce(sum(case when hash_status <> 'hashed' then 1 else 0 end), 0),
 			coalesce(sum(size_bytes), 0)
 		from asset_locations
-	`).Scan(&stats.Assets, &stats.Locations, &stats.Photos, &stats.Videos, &stats.Tracks, &stats.Hashed, &stats.Unhashed, &stats.TotalBytes)
+	`).Scan(&stats.Assets, &stats.Locations, &stats.Photos, &stats.Videos, &stats.Audio, &stats.Documents, &stats.Tracks, &stats.Hashed, &stats.Unhashed, &stats.TotalBytes)
 	if err != nil {
 		return stats, err
 	}

@@ -210,6 +210,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/sync/links", s.handleSyncLinks)
 	s.mux.HandleFunc("/api/v1/sync/links/", s.handleSyncLinkByID)
 	s.mux.HandleFunc("/api/v1/videos/", s.handleVideoByID)
+	s.mux.HandleFunc("/api/v1/audio/analyze/start", s.handleAudioAnalyzeStart)
+	s.mux.HandleFunc("/api/v1/audio/", s.handleAudioByID)
 	s.mux.HandleFunc("/api/v1/geo-align/session", s.handleGeoAlignSessionCreate)
 	s.mux.HandleFunc("/api/v1/geo-align/sessions/", s.handleGeoAlignSessionByID)
 	s.mux.HandleFunc("/api/v1/video-track-player/session", s.handleVideoTrackPlayerSessionCreate)
@@ -1134,6 +1136,77 @@ func (s *Server) handleMetadataEnrichStart(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusAccepted, job)
 }
 
+func (s *Server) handleAudioAnalyzeStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "audio.analyze") {
+		return
+	}
+	payload := metadata.NewPayload()
+	payload.MediaKind = "audio"
+	payload.IncludeImages = false
+	payload.IncludeVideo = false
+	payload.IncludeTracks = false
+	payload.IncludeAudio = true
+	payload.IncludeDocs = false
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+	}
+	payload.MediaKind = "audio"
+	payload.IncludeAudio = true
+	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("metadata_enrich", payload))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if s.deps.SyncJobs {
+		runner := metadata.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
+		if err := runner.Enrich(r.Context(), &job); err != nil && !errors.Is(err, jobs.ErrCanceled) {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) handleAudioByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/audio/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[1] != "metadata" {
+		http.NotFound(w, r)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), parts[0])
+	if errors.Is(err, catalog.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if asset.MediaKind != "audio" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("asset %s is %s, not audio", asset.ID, asset.MediaKind))
+		return
+	}
+	features, err := s.deps.Store.GetAudioFeatures(r.Context(), asset.ID)
+	if errors.Is(err, catalog.ErrNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{"asset": asset, "features": nil, "status": "features_missing"})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"asset": asset, "features": features, "status": "ok"})
+}
+
 func (s *Server) handlePreviewsStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -1478,6 +1551,10 @@ type assetSearchContext struct {
 	predictionMatches map[string]map[string]struct{}
 	faceMatches       map[string]map[string]struct{}
 	placeMatches      map[string]map[string]struct{}
+	transcriptMatches map[string]map[string]struct{}
+	documentMatches   map[string]map[string]struct{}
+	audioMatches      map[string]map[string]struct{}
+	frameMatches      map[string]map[string]struct{}
 	places            []searchPlaceMatch
 	placeEntries      []catalog.PlaceCacheEntry
 }
@@ -1543,6 +1620,15 @@ type ocrBlockRecord struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
+type ocrSummaryRecord struct {
+	FullText   string    `json:"full_text"`
+	Languages  []string  `json:"languages"`
+	Engines    []string  `json:"engines"`
+	ModelName  string    `json:"model_name,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+	BlockCount int       `json:"block_count"`
+}
+
 func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetSearchContext {
 	out := assetSearchContext{
 		albumAssetMatches: map[string]map[string]struct{}{},
@@ -1551,6 +1637,10 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 		predictionMatches: map[string]map[string]struct{}{},
 		faceMatches:       map[string]map[string]struct{}{},
 		placeMatches:      map[string]map[string]struct{}{},
+		transcriptMatches: map[string]map[string]struct{}{},
+		documentMatches:   map[string]map[string]struct{}{},
+		audioMatches:      map[string]map[string]struct{}{},
+		frameMatches:      map[string]map[string]struct{}{},
 	}
 	out.placeEntries = s.placeEntries(ctx)
 	var indexedAssets []catalog.Asset
@@ -1632,7 +1722,7 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 				break
 			}
 			fallthrough
-		case "tag", "category", "safety", "caption", "face":
+		case "tag", "category", "safety", "caption", "ocr", "face", "transcript", "document", "genre", "key", "tempo", "frame", "video-caption":
 			if indexedAssets == nil {
 				page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: 1000})
 				if err == nil {
@@ -1641,6 +1731,10 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 			}
 			matches := map[string]struct{}{}
 			faceMatches := map[string]struct{}{}
+			transcriptMatches := map[string]struct{}{}
+			documentMatches := map[string]struct{}{}
+			audioMatches := map[string]struct{}{}
+			frameMatches := map[string]struct{}{}
 			for _, asset := range indexedAssets {
 				if prefix == "face" || prefix == "" {
 					faces, err := s.deps.Store.ListFaceDetections(ctx, asset.ID)
@@ -1665,27 +1759,76 @@ func (s *Server) buildSearchContext(ctx context.Context, tokens []string) assetS
 						continue
 					}
 				}
-				tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
-				for _, tag := range tags {
-					text := strings.ToLower(tag.Tag + " " + tag.Source)
-					if strings.Contains(text, plain) {
-						matches[asset.ID] = struct{}{}
+				if prefix == "" || prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" || prefix == "ocr" {
+					tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
+					for _, tag := range tags {
+						text := strings.ToLower(tag.Tag + " " + tag.Source)
+						if strings.Contains(text, plain) {
+							matches[asset.ID] = struct{}{}
+						}
+					}
+					predictions, _ := s.deps.Store.ListAIPredictions(ctx, asset.ID)
+					for _, prediction := range predictions {
+						if prefix == "ocr" && prediction.Task != "ocr_image" && prediction.Task != "ocr" && prediction.Task != "ocr_text" {
+							continue
+						}
+						text := strings.ToLower(prediction.Label + " " + prediction.Task + " " + prediction.ModelName)
+						if strings.Contains(text, plain) {
+							matches[asset.ID] = struct{}{}
+						}
 					}
 				}
-				predictions, _ := s.deps.Store.ListAIPredictions(ctx, asset.ID)
-				for _, prediction := range predictions {
-					text := strings.ToLower(prediction.Label + " " + prediction.Task + " " + prediction.ModelName)
-					if strings.Contains(text, plain) {
-						matches[asset.ID] = struct{}{}
+				if prefix == "" || prefix == "transcript" {
+					transcripts, _ := s.deps.Store.ListTranscripts(ctx, asset.ID, 20)
+					for _, transcript := range transcripts {
+						text := strings.ToLower(transcript.FullText + " " + transcript.Language + " " + transcript.Model)
+						for _, segment := range transcript.Segments {
+							text += " " + strings.ToLower(segment.Text)
+						}
+						if strings.Contains(text, plain) {
+							transcriptMatches[asset.ID] = struct{}{}
+						}
+					}
+				}
+				if prefix == "" || prefix == "document" {
+					doc, err := s.deps.Store.GetDocumentText(ctx, asset.ID)
+					if err == nil && strings.Contains(strings.ToLower(doc.Title+" "+doc.Author+" "+doc.Text+" "+doc.Markdown+" "+doc.Engine), plain) {
+						documentMatches[asset.ID] = struct{}{}
+					}
+				}
+				if prefix == "" || prefix == "genre" || prefix == "key" || prefix == "tempo" {
+					features, err := s.deps.Store.GetAudioFeatures(ctx, asset.ID)
+					if err == nil && audioFeatureMatchesToken(features, prefix, plain) {
+						audioMatches[asset.ID] = struct{}{}
+					}
+				}
+				if prefix == "" || prefix == "frame" || prefix == "video-caption" || prefix == "caption" {
+					captions, _ := s.deps.Store.ListVideoFrameCaptions(ctx, asset.ID, 200)
+					for _, caption := range captions {
+						if strings.Contains(strings.ToLower(caption.Caption+" "+caption.Model), plain) {
+							frameMatches[asset.ID] = struct{}{}
+						}
 					}
 				}
 			}
-			if prefix == "" || prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" {
+			if prefix == "" || prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" || prefix == "ocr" {
 				out.tagMatches[token] = matches
 				out.predictionMatches[token] = matches
 				out.faceMatches[token] = faceMatches
 			} else {
 				out.faceMatches[token] = faceMatches
+			}
+			if prefix == "" || prefix == "transcript" {
+				out.transcriptMatches[token] = transcriptMatches
+			}
+			if prefix == "" || prefix == "document" {
+				out.documentMatches[token] = documentMatches
+			}
+			if prefix == "" || prefix == "genre" || prefix == "key" || prefix == "tempo" {
+				out.audioMatches[token] = audioMatches
+			}
+			if prefix == "" || prefix == "frame" || prefix == "video-caption" || prefix == "caption" {
+				out.frameMatches[token] = frameMatches
 			}
 		}
 	}
@@ -1777,12 +1920,52 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 		case "safety":
 			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "safety": s.assetSafetyRecords(r.Context(), asset.ID)})
 		case "ocr":
+			blocks := s.assetOCRBlocks(r.Context(), asset.ID)
+			summary := ocrSummaryFromBlocks(blocks)
 			writeJSON(w, http.StatusOK, map[string]any{
-				"asset_id": asset.ID,
-				"blocks":   s.assetOCRBlocks(r.Context(), asset.ID),
-				"engine":   "tesseract_sidecar_contract",
-				"note":     "OCR blocks are metadata records. Running OCR is explicit and never writes to originals.",
+				"asset_id":  asset.ID,
+				"blocks":    blocks,
+				"full_text": summary.FullText,
+				"summary":   summary,
+				"engine":    "tesseract_sidecar_contract",
+				"note":      "OCR blocks are metadata records. Running OCR is explicit and never writes to originals.",
 			})
+		case "transcripts":
+			transcripts, err := s.deps.Store.ListTranscripts(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 20, 100))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "transcripts": transcripts, "total": len(transcripts)})
+		case "audio-features":
+			features, err := s.deps.Store.GetAudioFeatures(r.Context(), asset.ID)
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "status": "missing", "features": nil})
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "features": features})
+		case "frame-captions", "video-analysis":
+			captions, err := s.deps.Store.ListVideoFrameCaptions(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 200, 1000))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "frame_captions": captions, "total": len(captions)})
+		case "document":
+			doc, err := s.deps.Store.GetDocumentText(r.Context(), asset.ID)
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "status": "missing", "document": nil})
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "document": doc})
 		default:
 			http.NotFound(w, r)
 		}
@@ -4774,7 +4957,7 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 		"asset":        asset,
 		"locations":    asset.Locations,
 		"preview":      preview.InfoForAsset(s.deps.Config.Cache.Dir, asset),
-		"metadata":     map[string]any{},
+		"metadata":     asset.Metadata,
 		"timestamps":   map[string]any{"first_seen_at": asset.FirstSeenAt, "updated_at": asset.UpdatedAt},
 		"content":      map[string]any{"hash_status": "unhashed"},
 		"original_url": "",
@@ -4794,13 +4977,29 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 	}
 	if predictions, err := s.deps.Store.ListAIPredictions(ctx, asset.ID); err == nil {
 		detail["ai_predictions"] = predictions
-		detail["ocr_blocks"] = ocrBlocksFromPredictions(predictions)
+		ocrBlocks := ocrBlocksFromPredictions(predictions)
+		ocrSummary := ocrSummaryFromBlocks(ocrBlocks)
+		detail["ocr_blocks"] = ocrBlocks
+		detail["ocr_summary"] = ocrSummary
+		detail["ocr_full_text"] = ocrSummary.FullText
 	}
 	if faces, err := s.deps.Store.ListFaceDetections(ctx, asset.ID); err == nil {
 		detail["face_detections"] = faces
 	}
 	if embeddings, err := s.deps.Store.ListAssetEmbeddings(ctx, asset.ID); err == nil {
 		detail["embeddings"] = summarizeAssetEmbeddings(embeddings)
+	}
+	if transcripts, err := s.deps.Store.ListTranscripts(ctx, asset.ID, 20); err == nil {
+		detail["transcripts"] = transcripts
+	}
+	if audioFeatures, err := s.deps.Store.GetAudioFeatures(ctx, asset.ID); err == nil {
+		detail["audio_features"] = audioFeatures
+	}
+	if frameCaptions, err := s.deps.Store.ListVideoFrameCaptions(ctx, asset.ID, 200); err == nil {
+		detail["frame_captions"] = frameCaptions
+	}
+	if doc, err := s.deps.Store.GetDocumentText(ctx, asset.ID); err == nil {
+		detail["document"] = doc
 	}
 	detail["places"] = s.assetPlaceRecords(ctx, asset)
 	return detail
@@ -4811,13 +5010,15 @@ func (s *Server) assetAIRecord(ctx context.Context, asset catalog.Asset) map[str
 	tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
 	faces, _ := s.deps.Store.ListFaceDetections(ctx, asset.ID)
 	embeddings, _ := s.deps.Store.ListAssetEmbeddings(ctx, asset.ID)
+	ocrBlocks := ocrBlocksFromPredictions(predictions)
 	return map[string]any{
 		"asset_id":        asset.ID,
 		"tags":            tags,
 		"predictions":     predictions,
 		"classification":  s.classificationRecordsFrom(predictions, tags),
 		"captions":        s.captionRecordsFrom(predictions, tags),
-		"ocr_blocks":      ocrBlocksFromPredictions(predictions),
+		"ocr_blocks":      ocrBlocks,
+		"ocr_summary":     ocrSummaryFromBlocks(ocrBlocks),
 		"faces":           faces,
 		"safety":          s.safetyRecordsFrom(predictions, tags),
 		"embeddings":      summarizeAssetEmbeddings(embeddings),
@@ -5689,7 +5890,26 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 			metadataText = strings.ToLower(string(data))
 		}
 	}
-	if prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" {
+	if prefix == "tag" || prefix == "category" || prefix == "safety" || prefix == "caption" || prefix == "ocr" {
+		if prefix == "ocr" {
+			if _, ok := searchCtx.predictionMatches[token][asset.ID]; ok {
+				return []string{"matched OCR text"}
+			}
+			return nil
+		}
+		if prefix == "caption" {
+			fields := []string{}
+			if _, ok := searchCtx.tagMatches[token][asset.ID]; ok {
+				fields = append(fields, "AI tag/prediction")
+			}
+			if _, ok := searchCtx.predictionMatches[token][asset.ID]; ok {
+				fields = append(fields, "AI prediction")
+			}
+			if _, ok := searchCtx.frameMatches[token][asset.ID]; ok {
+				fields = append(fields, "matched video frame caption")
+			}
+			return uniqueStrings(fields)
+		}
 		if _, ok := searchCtx.tagMatches[token][asset.ID]; ok {
 			return []string{"AI tag/prediction"}
 		}
@@ -5701,6 +5921,30 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 	if prefix == "face" {
 		if _, ok := searchCtx.faceMatches[token][asset.ID]; ok {
 			return []string{"face detection"}
+		}
+		return nil
+	}
+	if prefix == "transcript" {
+		if _, ok := searchCtx.transcriptMatches[token][asset.ID]; ok {
+			return []string{"matched transcript"}
+		}
+		return nil
+	}
+	if prefix == "document" {
+		if _, ok := searchCtx.documentMatches[token][asset.ID]; ok {
+			return []string{"matched document text"}
+		}
+		return nil
+	}
+	if prefix == "genre" || prefix == "key" || prefix == "tempo" {
+		if _, ok := searchCtx.audioMatches[token][asset.ID]; ok {
+			return []string{"matched audio features"}
+		}
+		return nil
+	}
+	if prefix == "frame" || prefix == "video-caption" {
+		if _, ok := searchCtx.frameMatches[token][asset.ID]; ok {
+			return []string{"matched video frame caption"}
 		}
 		return nil
 	}
@@ -5768,6 +6012,18 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 	if _, ok := searchCtx.faceMatches[token][asset.ID]; ok {
 		out = append(out, "face")
 	}
+	if _, ok := searchCtx.transcriptMatches[token][asset.ID]; ok {
+		out = append(out, "matched transcript")
+	}
+	if _, ok := searchCtx.documentMatches[token][asset.ID]; ok {
+		out = append(out, "matched document text")
+	}
+	if _, ok := searchCtx.audioMatches[token][asset.ID]; ok {
+		out = append(out, "matched audio features")
+	}
+	if _, ok := searchCtx.frameMatches[token][asset.ID]; ok {
+		out = append(out, "matched video frame caption")
+	}
 	if _, ok := searchCtx.placeMatches[token][asset.ID]; ok {
 		out = append(out, "local place bbox")
 	}
@@ -5795,6 +6051,33 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 		}
 	}
 	return uniqueStrings(out)
+}
+
+func audioFeatureMatchesToken(features catalog.AudioFeatures, prefix, plain string) bool {
+	text := strings.ToLower(strings.Join(features.GenreLabels, " ") + " " + features.Key + " " + features.Mode + " " + features.Model)
+	switch prefix {
+	case "genre":
+		return strings.Contains(strings.ToLower(strings.Join(features.GenreLabels, " ")), plain)
+	case "key":
+		return strings.EqualFold(features.Key, plain) || strings.Contains(strings.ToLower(features.Key+" "+features.Mode), plain)
+	case "tempo":
+		if features.TempoBPM == nil {
+			return false
+		}
+		target, err := strconv.ParseFloat(plain, 64)
+		if err != nil {
+			return strings.Contains(strings.ToLower(fmt.Sprintf("%.0f %.1f bpm", *features.TempoBPM, *features.TempoBPM)), plain)
+		}
+		return math.Abs(*features.TempoBPM-target) <= 2
+	default:
+		if strings.Contains(text, plain) {
+			return true
+		}
+		if features.TempoBPM != nil && strings.Contains(strings.ToLower(fmt.Sprintf("%.0f %.1f bpm", *features.TempoBPM, *features.TempoBPM)), plain) {
+			return true
+		}
+		return false
+	}
 }
 
 func trackSearchMatches(track catalog.TrackSummary, tokens []string, places []catalog.PlaceCacheEntry) []string {
@@ -6027,6 +6310,75 @@ func ocrBlocksFromPredictions(predictions []catalog.AIPrediction) []ocrBlockReco
 		return out[i].Y < out[j].Y
 	})
 	return out
+}
+
+func ocrSummaryFromBlocks(blocks []ocrBlockRecord) ocrSummaryRecord {
+	languages := map[string]struct{}{}
+	engines := map[string]struct{}{}
+	lines := []string{}
+	currentLine := []string{}
+	var lastY float64
+	var newest time.Time
+	modelName := ""
+	for i, block := range blocks {
+		text := strings.TrimSpace(block.Text)
+		if text == "" {
+			continue
+		}
+		if block.Language != "" {
+			languages[block.Language] = struct{}{}
+		}
+		if block.Engine != "" {
+			engines[block.Engine] = struct{}{}
+		}
+		if modelName == "" {
+			modelName = block.ModelName
+		}
+		if block.CreatedAt.After(newest) {
+			newest = block.CreatedAt
+		}
+		if i > 0 && block.Y > 0 && lastY > 0 && math.Abs(block.Y-lastY) > 0.025 {
+			if len(currentLine) > 0 {
+				lines = append(lines, strings.Join(currentLine, " "))
+			}
+			currentLine = []string{}
+		}
+		currentLine = append(currentLine, text)
+		if block.Y > 0 {
+			lastY = block.Y
+		}
+	}
+	if len(currentLine) > 0 {
+		lines = append(lines, strings.Join(currentLine, " "))
+	}
+	return ocrSummaryRecord{
+		FullText:   strings.TrimSpace(strings.Join(lines, "\n")),
+		Languages:  sortedMapKeys(languages),
+		Engines:    sortedMapKeys(engines),
+		ModelName:  modelName,
+		CreatedAt:  newest,
+		BlockCount: len(blocks),
+	}
+}
+
+func sortedMapKeys(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func parsePositiveInt(raw string, fallback, maxValue int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	if maxValue > 0 && value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func (s *Server) seedDefaultPlaces() {
