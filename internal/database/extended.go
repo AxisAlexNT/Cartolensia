@@ -735,12 +735,27 @@ func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuer
 	if len(mediaKinds) == 1 {
 		assetQueryMediaKind = mediaKinds[0]
 	}
-	page, err := db.QueryAssets(ctx, catalog.AssetQuery{MediaKind: assetQueryMediaKind, TakenFrom: &start, TakenTo: &end, Limit: 10000, Offset: 0, Sort: "taken_at"})
+	page, err := db.QueryAssets(ctx, catalog.AssetQuery{MediaKind: assetQueryMediaKind, Limit: 500, Offset: 0, Sort: "taken_at"})
 	if err != nil {
 		return catalog.AssetPage{}, err
 	}
-	filtered := page.Assets[:0]
-	for _, asset := range page.Assets {
+	allAssets := append([]catalog.Asset(nil), page.Assets...)
+	for nextOffset := len(page.Assets); nextOffset < page.Page.Total; {
+		if len(page.Assets) == 0 {
+			break
+		}
+		next, err := db.QueryAssets(ctx, catalog.AssetQuery{MediaKind: assetQueryMediaKind, Limit: 500, Offset: nextOffset, Sort: "taken_at"})
+		if err != nil {
+			return catalog.AssetPage{}, err
+		}
+		allAssets = append(allAssets, next.Assets...)
+		nextOffset += len(next.Assets)
+		page = next
+	}
+	points, _ := db.QueryTrackPoints(ctx, catalog.TrackPointQuery{TrackAssetID: query.TrackAssetID, Simplify: true, MaxPoints: 4000})
+	filtered := make([]catalog.Asset, 0, len(allAssets))
+	seen := map[string]bool{}
+	for _, asset := range allAssets {
 		if !catalog.TrackAssetMediaKindAllowed(asset.MediaKind, mediaKinds, query.ExcludeTrackAssets) {
 			continue
 		}
@@ -752,7 +767,20 @@ func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuer
 		if !geotagged && !query.IncludeUngeotagged {
 			continue
 		}
-		filtered = append(filtered, asset)
+		_, timeMatch := catalog.AssetTimestampInRange(asset, start, end, 90*time.Minute, time.Local)
+		geoMatch := false
+		if geotagged && len(points) > 0 {
+			if lat, lon, ok := assetLatLon(asset); ok {
+				geoMatch = nearestTrackDistanceM(points, lat, lon) <= 1000
+			}
+		}
+		if !timeMatch && !geoMatch {
+			continue
+		}
+		if !seen[asset.ID] {
+			filtered = append(filtered, asset)
+			seen[asset.ID] = true
+		}
 	}
 	total := len(filtered)
 	if offset >= len(filtered) {
@@ -767,6 +795,39 @@ func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuer
 	page.Assets = filtered
 	page.Page = catalog.Page{Limit: limit, Offset: offset, Total: total}
 	return page, nil
+}
+
+func assetLatLon(asset catalog.Asset) (float64, float64, bool) {
+	lat, okLat := metadataFloat(asset.Metadata, "lat")
+	lon, okLon := metadataFloat(asset.Metadata, "lon")
+	if okLat && okLon {
+		return lat, lon, true
+	}
+	lat, okLat = metadataFloat(asset.Metadata, "gps_lat")
+	lon, okLon = metadataFloat(asset.Metadata, "gps_lon")
+	return lat, lon, okLat && okLon
+}
+
+func nearestTrackDistanceM(points []catalog.TrackPoint, lat, lon float64) float64 {
+	best := math.MaxFloat64
+	for _, point := range points {
+		dist := haversineMeters(lat, lon, point.Lat, point.Lon)
+		if dist < best {
+			best = dist
+		}
+	}
+	return best
+}
+
+func haversineMeters(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadiusM = 6371000.0
+	toRad := math.Pi / 180
+	phi1 := lat1 * toRad
+	phi2 := lat2 * toRad
+	dPhi := (lat2 - lat1) * toRad
+	dLambda := (lon2 - lon1) * toRad
+	a := math.Sin(dPhi/2)*math.Sin(dPhi/2) + math.Cos(phi1)*math.Cos(phi2)*math.Sin(dLambda/2)*math.Sin(dLambda/2)
+	return earthRadiusM * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 func downsampleTrackPoints(points []catalog.TrackPoint, maxPoints int) []catalog.TrackPoint {

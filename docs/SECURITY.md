@@ -206,3 +206,12 @@ The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not u
 - Track arrows and reverse-geocoding changes are metadata/UI operations only. They do not modify tracks, photos, or original geotags.
 - `/api/v1/places/reverse` is cache-first. Public-provider calls require an explicit request and enabled runtime setting; automatic bulk public reverse-geocoding remains disallowed.
 - Component downloads remain provenance-gated. Even with operator approval, the Component Manager refuses silent downloads without a reviewed source URL and records an actionable failed job instead.
+
+## 2026-06-09 Context/Search Safety Notes
+
+- Timestamp candidates are metadata interpretations only. They do not rewrite EXIF, change file mtimes, or modify original media.
+- Track media matching now uses timestamp candidates and geotag proximity, but it still only returns metadata associations from PostgreSQL/local state.
+- Asset related/context endpoints are bounded local queries. They do not trigger discovery, hashing, AI inference, geocoding, transcodes, or writes.
+- Audio previews in Explorer/Search/Gallery stream originals through the existing read-only media endpoint; they do not create sidecars or waveform files under original storage.
+- Search wildcard and field-token support is executed through the existing PostgreSQL/local backend and bounded paging. It does not enable shell-style filesystem globbing against storage roots.
+- Middle-click/new-tab support uses browser anchors for navigation only. It does not change authorization or storage access rules.

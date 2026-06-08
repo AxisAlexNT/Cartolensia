@@ -329,3 +329,18 @@ Asset detail exposes OCR full text, transcripts, audio features, video frame cap
 - Track rendering now has a shared OpenLayers style path for direction arrows. Runtime setting `gps.track_arrow_interval_m` controls spacing, defaults to `500`, and `0` disables arrows.
 - Reverse geocoding is cache-first. `/api/v1/places/reverse` resolves coordinates against durable `place_cache` bounding boxes before considering a user-triggered Nominatim-compatible provider. Online provider use remains disabled by default and every online result is persisted back to `place_cache`.
 - The current map clustering implementation remains screen-distance based. Persisted zoom-level cluster cache endpoints are still planned; frontend cluster state should continue to replace stale layer data on zoom changes.
+
+## 2026-06-09 Metadata Context And Timestamp Candidates
+
+Cartolensia now derives bounded timestamp candidates for media records instead of relying only on a trusted `taken_at` column. Candidate sources are ranked by confidence:
+
+- trusted `taken_at`;
+- EXIF `exif_datetime_original_raw`, interpreted in the runtime/default local timezone when EXIF is timezone-less;
+- filename timestamps for common phone patterns such as `PXL_YYYYMMDD_HHMMSS` and `VID_YYYYMMDD_HHMMSS`;
+- file mtime as a low-priority fallback.
+
+GPS track media lookup uses those candidates plus geotag proximity, so photos with raw timezone-less EXIF and videos without GPS can still be associated with a track when metadata indicates they were created during or near that track. This is a metadata-only association and never writes back EXIF or changes originals.
+
+Asset context is exposed through `GET /api/v1/assets/{id}/related`. The current implementation is a bounded PostgreSQL/local query service that returns grouped related assets by folder, device metadata, same local day, a short time window, and GPS-track overlap. It is intentionally not a separate graph database yet; the response gives enough related records for asset-detail navigation while avoiding unbounded scans.
+
+Universal Search still uses the `postgres_local` backend. Plain searches now page through all candidate assets before applying local metadata/OCR/place matching, while explicit tokens such as `ext:`, `kind:`, `filename:`, and `path:` can narrow the initial asset query. Space-separated tokens are AND, comma-separated alternatives are OR within a token, and wildcard matching is supported for filename/path/text fields.

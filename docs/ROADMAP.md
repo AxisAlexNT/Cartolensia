@@ -237,3 +237,23 @@ Next:
 - Add reviewed source URLs or offline package import flow for VMAF, optional Whisper medium, and MobileNetV3 fallback weights.
 - Add browser automation for Geo Align switches/arrows, track previews, reverse-place refresh, and unlimited-indexing UI labels.
 - Split large WebUI chunks with route-level dynamic imports.
+
+## 2026-06-09 Context/Search Stabilization Progress
+
+Completed:
+
+- Audio cards and gallery overlay now provide audio playback instead of generic no-preview fallback.
+- GPS track media lookup now uses EXIF raw timestamps, filename timestamps, file mtimes, and geotag proximity.
+- The concrete `20260509-144424.gpx` trip now returns the expected `PXL_20260509_165208189.jpg`, `PXL_20260509_172507172.jpg`, and timestamp-matched videos.
+- Video Track Player now derives usable timestamps from filename/mtime candidates and has searchable video plus track-pill selectors.
+- Asset detail gained a Related Context section backed by `/api/v1/assets/{id}/related`.
+- Search and Explorer counts are synchronized for MP4 extension queries; `mp4` and `ext:mp4` both report the full live set.
+- Search syntax now supports AND terms, comma OR groups, wildcards, explicit filename/path/extension/kind tokens, and in-page help.
+- Major asset-detail navigation links now preserve browser middle-click/new-tab behavior.
+
+Next:
+
+- Implement folder-sharded discovery worker pools for NAS-scale scans.
+- Turn related/context into a stronger trip/session graph with persisted scoring and richer device/place/track joins.
+- Replace the Video Track Player placeholder map with a full OpenLayers synchronized map.
+- Add browser automation for middle-click-safe anchors, audio previews, selector typeaheads, and search count consistency.

@@ -531,12 +531,24 @@ func (s *MemoryStore) QueryTrackAssets(ctx context.Context, query TrackAssetQuer
 	if len(mediaKinds) == 1 {
 		assetQueryMediaKind = mediaKinds[0]
 	}
-	page, err := s.QueryAssets(ctx, AssetQuery{MediaKind: assetQueryMediaKind, TakenFrom: &start, TakenTo: &end, Limit: 10000, Offset: 0})
+	page, err := s.QueryAssets(ctx, AssetQuery{MediaKind: assetQueryMediaKind, Limit: 500, Offset: 0})
 	if err != nil {
 		return AssetPage{}, err
 	}
+	allAssets := append([]Asset(nil), page.Assets...)
+	for nextOffset := len(page.Assets); nextOffset < page.Page.Total; nextOffset += len(page.Assets) {
+		if len(page.Assets) == 0 {
+			break
+		}
+		next, err := s.QueryAssets(ctx, AssetQuery{MediaKind: assetQueryMediaKind, Limit: 500, Offset: nextOffset})
+		if err != nil {
+			return AssetPage{}, err
+		}
+		allAssets = append(allAssets, next.Assets...)
+		page = next
+	}
 	var filtered []Asset
-	for _, asset := range page.Assets {
+	for _, asset := range allAssets {
 		if !TrackAssetMediaKindAllowed(asset.MediaKind, mediaKinds, query.ExcludeTrackAssets) {
 			continue
 		}
@@ -545,6 +557,9 @@ func (s *MemoryStore) QueryTrackAssets(ctx context.Context, query TrackAssetQuer
 			continue
 		}
 		if !geotagged && !query.IncludeUngeotagged {
+			continue
+		}
+		if _, ok := AssetTimestampInRange(asset, start, end, 90*time.Minute, time.Local); !ok {
 			continue
 		}
 		filtered = append(filtered, asset)

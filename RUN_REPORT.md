@@ -2914,3 +2914,92 @@ Live validation after restart:
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-09 Track Context, Search Consistency, And Video Player Fix Run
+
+This focused run fixed several real-peek browsing inconsistencies without modifying originals, resetting PostgreSQL, running missing-file marking, committing, or pushing.
+
+### Implemented
+
+- Added reusable timestamp-candidate logic for media assets:
+  - trusted `taken_at`;
+  - EXIF `exif_datetime_original_raw` interpreted in local runtime timezone;
+  - filename timestamps for Pixel/phone-style `PXL_YYYYMMDD_HHMMSS`, `VID_YYYYMMDD_HHMMSS`, `IMG_...`, and `DSC_...`;
+  - file mtime as lower-confidence fallback.
+- Fixed GPS track media lookup to use timestamp candidates and geotag proximity:
+  - time match uses candidate timestamps rather than only `taken_at`;
+  - geotagged assets within roughly 1 km of the track can match even when EXIF time policy is raw-only;
+  - videos without GPS can match by filename/mtime timestamp candidates.
+- Fixed Video Track Player timestamp handling:
+  - sessions now store `video_start_at` and `time_source`;
+  - position lookup uses the selected timestamp candidate and clamps to nearby track start/end when within tolerance;
+  - the previous `video timestamp unavailable` failure is avoided when filename or mtime candidates exist.
+- Improved Video Track Player selectors:
+  - searchable server-backed video selector by partial filename;
+  - track selector uses name-based suggestions and removable pills rather than raw UUID textarea.
+- Added asset related/context endpoint and UI:
+  - `GET /api/v1/assets/{id}/related`;
+  - groups same folder, same device, same day, 30-minute time window, and overlapping GPS tracks.
+- Fixed audio preview UX:
+  - audio cards now show a compact player/soundwave preview instead of generic “no preview” fallback;
+  - gallery overlay opens a real audio player for audio assets.
+- Improved middle-click/new-tab behavior:
+  - major asset-detail links in Explorer, Search, map popups, albums, GPS media lists, face gallery, and gallery overlay now use anchors and preserve modified-click browser behavior.
+- Fixed Search/Explorer mp4 inconsistency:
+  - search now gathers all candidate asset pages before applying metadata/OCR/place matching;
+  - explicit `ext:mp4` and plain `mp4` now report the same 53 media matches on the live real-peek DB.
+- Improved search language:
+  - space-separated terms are AND;
+  - comma-separated terms act as OR within a token;
+  - explicit `ext:`, `kind:`, `filename:`, `path:`, `ocr:`, `transcript:`, `caption:`, `document:`, `place:`, `camera:`, `hash:`, `track:`, `album:`, `face:`, `safety:`, and `private:` tokens remain supported;
+  - wildcard `*`/`?` matching is supported for filename/path/plain text matching.
+- Added a Search page syntax help panel and made Discovery controls less cramped with wider responsive layout rules.
+
+### Live Validation
+
+- App rebuilt to `/tmp/cartolensia-live`, restarted with `.cartolensia/runtime/realpeek.yaml`, and left running at `http://127.0.0.1:18080`.
+- `/api/v1/search?q=ext:mp4`: total `53`, shown `53`.
+- `/api/v1/search?q=mp4`: total `53`, shown `53`.
+- `/api/v1/assets?media_kind=video&extension=mp4&limit=5`: returned first five MP4 videos and matches the Explorer count path.
+- Video selector query `/api/v1/assets?media_kind=video&q=072546&limit=10` returned `PXL_20260512_072546131.mp4`.
+- `GET /api/v1/gps/tracks/56501e5a-9704-40cc-a56a-4495628f7bb7/assets?limit=200&include_ungeotagged=true` for `20260509-144424.gpx` returned total `128` and included:
+  - `PXL_20260509_165208189.jpg`;
+  - `PXL_20260509_172507172.jpg`.
+- The same track media lookup also returned timestamp-matched ungps-tagged trip videos such as `VID_20260509_164812_8K.mp4`, `VID_20260509_174113_8K.mp4`, and related files.
+- Video Track Player session for `PXL_20260512_072546131.mp4` + `20260512-072610.gpx` returned no warning, selected `file_mtime` as the best overlapping candidate, and position lookup returned one clamped start track position instead of `video timestamp unavailable`.
+- `/api/v1/assets/18357bfc-74d2-4132-a976-c3bd35ad829f/related` reported:
+  - device `Google Pixel 5`;
+  - folder `Cartolensia-photos/DCIM/Camera`;
+  - timestamp candidates `exif_datetime_original_raw`, `filename_timestamp`, `file_mtime`;
+  - `same_track: 1`, `same_device: 24`, `time_window: 13`.
+
+### Verification
+
+Passed:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- live health and focused API checks listed above.
+
+Added tests cover:
+
+- EXIF raw timestamp candidates for the concrete `PXL_20260509_172507172.jpg` style.
+- Filename timestamp candidate fallback for `PXL_20260512_072546131.mp4` style videos.
+- Track range matching through timestamp candidates.
+
+### Known Limitations
+
+- Discovery worker-per-folder sharding was not implemented in this focused pass.
+- Related/context scoring is intentionally bounded and metadata-based; it is not yet a full graph database.
+- Video Track Player still uses a simplified map marker preview. It now computes positions correctly, but a richer OpenLayers synchronized map remains future polish.
+- The best timestamp for `PXL_20260512_072546131.mp4` was `file_mtime`, because the filename timestamp was outside the selected GPX track window. Manual offset/mode controls remain important for devices with inconsistent local timestamp conventions.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No generated files, model files, caches, transcodes, or exports were written under `/mnt/Models/rclone`.
+- No new discovery or missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.

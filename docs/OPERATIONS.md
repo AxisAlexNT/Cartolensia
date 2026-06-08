@@ -594,3 +594,56 @@ In another terminal:
 ```
 
 For another offline machine, copy the built application/package, the reviewed `.cartolensia/components` and `.cartolensia/models` contents, the Python AI environment or recreated wheelhouse, and a PostgreSQL runtime or database service. Keep real media mounted read-only and point storage config at that read-only root. Do not copy local secrets or machine-specific `.env` files.
+
+## Search And Context Operations
+
+Universal Search is PostgreSQL/local in the current build. Elasticsearch/OpenSearch remain deferred.
+
+Useful syntax:
+
+- Space-separated terms are AND: `filename:PXL* Pixel`.
+- Comma-separated alternatives are OR inside one token: `ext:jpg,mp4`.
+- Quotes keep phrases together: `ocr:"station sign"`.
+- Wildcards `*` and `?` are supported for filename/path/plain text matching.
+- Common explicit tokens: `ext:`, `kind:`, `filename:`, `path:`, `ocr:`, `transcript:`, `caption:`, `document:`, `place:`, `camera:`, `hash:`, `track:`, `album:`, `face:`, `safety:`, `private:`.
+
+Examples:
+
+```bash
+curl -fsS "http://127.0.0.1:18080/api/v1/search?q=ext:mp4"
+curl -fsS "http://127.0.0.1:18080/api/v1/search?q=filename:PXL_20260512*"
+curl -fsS "http://127.0.0.1:18080/api/v1/search?q=kind:video%20caption:train"
+```
+
+Asset context can be inspected with:
+
+```bash
+curl -fsS "http://127.0.0.1:18080/api/v1/assets/<asset-id>/related"
+```
+
+The related endpoint is bounded and metadata-only. It returns groups such as same folder, same camera/device, same day, nearby time window, and overlapping GPS tracks.
+
+## GPS Track Media Matching
+
+Track media matching uses timestamp candidates and geotag proximity:
+
+- trusted `taken_at`;
+- EXIF raw DateTimeOriginal interpreted with runtime local timezone;
+- filename timestamps such as `PXL_YYYYMMDD_HHMMSS` and `VID_YYYYMMDD_HHMMSS`;
+- file mtime as lower-confidence fallback;
+- geotag proximity to track geometry.
+
+This helps associate videos without GPS and photos with timezone-less EXIF to GPX/KML tracks. The lookup is read-only and metadata-only.
+
+Useful checks:
+
+```bash
+curl -fsS "http://127.0.0.1:18080/api/v1/gps/tracks/<track-id>/assets?include_ungeotagged=true&limit=200"
+curl -fsS "http://127.0.0.1:18080/api/v1/gps/tracks/<track-id>/nearby-assets?distance_m=1000"
+```
+
+## Video Track Player Operations
+
+Video Track Player sessions now use the same timestamp candidates. The UI exposes a searchable video selector and a track-name pill selector. If a chosen video has no `taken_at`, Cartolensia can still use filename or file mtime candidates and reports the chosen `time_source` in session/position responses.
+
+Manual offset controls remain important when a device encodes local filenames, EXIF, and filesystem mtimes inconsistently. If a candidate timestamp is just outside the track range, the position endpoint may clamp to a nearby track start/end rather than fail.

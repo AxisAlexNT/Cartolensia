@@ -117,6 +117,8 @@ type videoTrackPlayerSession struct {
 	TrackIDs      []string       `json:"track_ids"`
 	TimestampMode string         `json:"timestamp_mode"`
 	OffsetSeconds float64        `json:"offset_seconds"`
+	VideoStartAt  *time.Time     `json:"video_start_at,omitempty"`
+	TimeSource    string         `json:"time_source,omitempty"`
 	Warnings      []string       `json:"warnings,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
@@ -1294,7 +1296,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	tokens := searchTokens(raw)
-	page, err := s.deps.Store.QueryAssets(r.Context(), catalog.AssetQuery{Limit: 500, Sort: "taken_at"})
+	page, err := s.queryAllSearchAssets(r.Context(), tokens)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1352,6 +1354,53 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) queryAllSearchAssets(ctx context.Context, tokens []string) (catalog.AssetPage, error) {
+	base := catalog.AssetQuery{Limit: 500, Sort: "taken_at"}
+	if len(tokens) == 1 {
+		prefix, plain := splitSearchToken(tokens[0])
+		switch prefix {
+		case "ext", "extension":
+			base.Extension = plain
+		case "kind", "type", "media":
+			base.MediaKind = plain
+		case "filename", "path":
+			base.Q = wildcardToLikeText(plain)
+		}
+	}
+	all := []catalog.Asset{}
+	total := 0
+	for offset := 0; ; offset += 500 {
+		query := base
+		query.Offset = offset
+		page, err := s.deps.Store.QueryAssets(ctx, query)
+		if err != nil {
+			return catalog.AssetPage{}, err
+		}
+		total = page.Page.Total
+		all = append(all, page.Assets...)
+		if len(page.Assets) == 0 || offset+len(page.Assets) >= page.Page.Total || offset > 100000 {
+			break
+		}
+	}
+	return catalog.AssetPage{Assets: all, Page: catalog.Page{Limit: len(all), Offset: 0, Total: total}}, nil
+}
+
+func splitSearchToken(token string) (string, string) {
+	token = strings.TrimSpace(strings.ToLower(token))
+	if before, after, ok := strings.Cut(token, ":"); ok {
+		return before, strings.TrimSpace(after)
+	}
+	return "", token
+}
+
+func wildcardToLikeText(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"`)
+	value = strings.ReplaceAll(value, "*", "")
+	value = strings.ReplaceAll(value, "?", "")
+	return value
+}
+
 func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -1389,6 +1438,129 @@ func (s *Server) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 		"places":         places,
 		"note":           "Place search is cache-only. No online geocoder is called by this endpoint.",
 	})
+}
+
+func (s *Server) assetRelated(ctx context.Context, asset catalog.Asset) (map[string]any, error) {
+	page, err := s.queryAllSearchAssets(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	type relatedItem struct {
+		Asset   catalog.Asset  `json:"asset"`
+		Reason  string         `json:"reason"`
+		Score   float64        `json:"score"`
+		Details map[string]any `json:"details,omitempty"`
+	}
+	groups := map[string][]relatedItem{
+		"same_folder": {},
+		"same_device": {},
+		"same_day":    {},
+		"time_window": {},
+		"same_track":  {},
+	}
+	add := func(group string, other catalog.Asset, reason string, score float64, details map[string]any) {
+		if other.ID == "" || other.ID == asset.ID {
+			return
+		}
+		for _, existing := range groups[group] {
+			if existing.Asset.ID == other.ID {
+				return
+			}
+		}
+		groups[group] = append(groups[group], relatedItem{Asset: other, Reason: reason, Score: score, Details: details})
+	}
+	assetFolder := firstAssetFolder(asset)
+	assetDevice := deviceSignature(asset)
+	assetTime, hasAssetTime := catalog.AssetPrimaryTimestamp(asset, time.Local)
+	for _, other := range page.Assets {
+		if assetFolder != "" && firstAssetFolder(other) == assetFolder {
+			add("same_folder", other, "same storage folder", 0.65, map[string]any{"folder": assetFolder})
+		}
+		if assetDevice != "" && deviceSignature(other) == assetDevice {
+			add("same_device", other, "same camera/device metadata", 0.7, map[string]any{"device": assetDevice})
+		}
+		if hasAssetTime {
+			if otherTime, ok := catalog.AssetPrimaryTimestamp(other, time.Local); ok {
+				if sameLocalDay(assetTime.Time, otherTime.Time) {
+					add("same_day", other, "same local calendar day", 0.55, map[string]any{"time_source": otherTime.Source})
+				}
+				diff := otherTime.Time.Sub(assetTime.Time)
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff <= 30*time.Minute {
+					add("time_window", other, "created within 30 minutes", 0.85, map[string]any{"time_source": otherTime.Source, "seconds": diff.Seconds()})
+				}
+			}
+		}
+	}
+	if hasAssetTime {
+		if tracks, err := s.deps.Store.ListGPSTracks(ctx, catalog.GPSTrackQuery{Limit: 1000}); err == nil {
+			for _, track := range tracks {
+				if track.StartTime == nil || track.EndTime == nil {
+					continue
+				}
+				if assetTime.Time.Before(track.StartTime.Add(-30*time.Minute)) || assetTime.Time.After(track.EndTime.Add(30*time.Minute)) {
+					continue
+				}
+				trackAsset, err := s.deps.Store.GetAsset(ctx, track.TrackAssetID)
+				if err == nil {
+					add("same_track", trackAsset, "timestamp candidate overlaps GPS track", 0.75, map[string]any{"track": track.Name, "time_source": assetTime.Source})
+				}
+			}
+		}
+	}
+	for key := range groups {
+		sort.Slice(groups[key], func(i, j int) bool {
+			if groups[key][i].Score == groups[key][j].Score {
+				return groups[key][i].Asset.DisplayName < groups[key][j].Asset.DisplayName
+			}
+			return groups[key][i].Score > groups[key][j].Score
+		})
+		if len(groups[key]) > 24 {
+			groups[key] = groups[key][:24]
+		}
+	}
+	return map[string]any{
+		"asset_id":             asset.ID,
+		"timestamp_candidates": catalog.AssetTimestampCandidates(asset, time.Local),
+		"device":               assetDevice,
+		"folder":               assetFolder,
+		"groups":               groups,
+		"note":                 "Related assets are metadata-only suggestions based on folder, device, local timestamp candidates, and track overlap.",
+	}, nil
+}
+
+func firstAssetFolder(asset catalog.Asset) string {
+	if len(asset.Locations) == 0 {
+		return ""
+	}
+	path := strings.TrimSpace(asset.Locations[0].RelativePath)
+	if path == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[:idx]
+	}
+	return ""
+}
+
+func deviceSignature(asset catalog.Asset) string {
+	makeValue := strings.TrimSpace(fmt.Sprint(asset.Metadata["camera_make"]))
+	modelValue := strings.TrimSpace(fmt.Sprint(asset.Metadata["camera_model"]))
+	if makeValue == "<nil>" {
+		makeValue = ""
+	}
+	if modelValue == "<nil>" {
+		modelValue = ""
+	}
+	return strings.TrimSpace(strings.Join(compactStrings([]string{makeValue, modelValue}), " "))
+}
+
+func sameLocalDay(a, b time.Time) bool {
+	ay, am, ad := a.In(time.Local).Date()
+	by, bm, bd := b.In(time.Local).Date()
+	return ay == by && am == bm && ad == bd
 }
 
 func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
@@ -2184,6 +2356,13 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "document": doc})
+		case "related", "context":
+			payload, err := s.assetRelated(r.Context(), asset)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, payload)
 		default:
 			http.NotFound(w, r)
 		}
@@ -4403,8 +4582,12 @@ func (s *Server) handleVideoTrackPlayerSessionCreate(w http.ResponseWriter, r *h
 		CreatedAt:     time.Now().UTC(),
 		Metadata:      map[string]any{"video_name": asset.DisplayName},
 	}
-	if asset.TakenAt == nil {
-		session.Warnings = append(session.Warnings, "Video has no taken_at timestamp; map synchronization cannot compute absolute positions.")
+	if candidate, ok := s.bestVideoTimestampCandidate(r.Context(), asset, req.TrackIDs); ok {
+		session.VideoStartAt = &candidate.Time
+		session.TimeSource = candidate.Source
+		session.Metadata["video_time_candidate"] = candidate
+	} else {
+		session.Warnings = append(session.Warnings, "Video has no usable timestamp candidate; map synchronization requires manual offset/time settings.")
 	}
 	s.sessionMu.Lock()
 	s.videoTrackSessions[session.ID] = session
@@ -4449,14 +4632,22 @@ func (s *Server) videoTrackPosition(ctx context.Context, session *videoTrackPlay
 	if err != nil {
 		return nil, err
 	}
-	if asset.TakenAt == nil {
+	videoStart := session.VideoStartAt
+	if videoStart == nil {
+		if candidate, ok := s.bestVideoTimestampCandidate(ctx, asset, session.TrackIDs); ok {
+			videoStart = &candidate.Time
+			session.VideoStartAt = &candidate.Time
+			session.TimeSource = candidate.Source
+		}
+	}
+	if videoStart == nil {
 		return map[string]any{"session_id": session.ID, "positions": []map[string]any{}, "warning": "video timestamp unavailable"}, nil
 	}
-	target := asset.TakenAt.Add(time.Duration(timeMS)*time.Millisecond + time.Duration(session.OffsetSeconds*float64(time.Second)))
+	target := videoStart.Add(time.Duration(timeMS)*time.Millisecond + time.Duration(session.OffsetSeconds*float64(time.Second)))
 	if session.TimestampMode == "video_end_time" {
 		duration := mediaDuration(asset.Metadata)
 		if duration > 0 {
-			target = asset.TakenAt.Add(-duration).Add(time.Duration(timeMS)*time.Millisecond + time.Duration(session.OffsetSeconds*float64(time.Second)))
+			target = videoStart.Add(-duration).Add(time.Duration(timeMS)*time.Millisecond + time.Duration(session.OffsetSeconds*float64(time.Second)))
 		}
 	}
 	positions := []map[string]any{}
@@ -4467,7 +4658,7 @@ func (s *Server) videoTrackPosition(ctx context.Context, session *videoTrackPlay
 			warnings = append(warnings, fmt.Sprintf("%s: %v", trackID, err))
 			continue
 		}
-		point, mode, err := interpolateTrackPoint(detail.Points, target)
+		point, mode, err := interpolateTrackPointWithTolerance(detail.Points, target, 10*time.Minute)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: no point at %s", trackID, target.Format(time.RFC3339)))
 			continue
@@ -4481,7 +4672,28 @@ func (s *Server) videoTrackPosition(ctx context.Context, session *videoTrackPlay
 			"mode":     mode,
 		})
 	}
-	return map[string]any{"session_id": session.ID, "target_time": target, "positions": positions, "warnings": warnings}, nil
+	return map[string]any{"session_id": session.ID, "target_time": target, "time_source": session.TimeSource, "positions": positions, "warnings": warnings}, nil
+}
+
+func (s *Server) bestVideoTimestampCandidate(ctx context.Context, asset catalog.Asset, trackIDs []string) (catalog.TimestampCandidate, bool) {
+	candidates := catalog.AssetTimestampCandidates(asset, time.Local)
+	if len(candidates) == 0 {
+		return catalog.TimestampCandidate{}, false
+	}
+	for _, candidate := range candidates {
+		for _, trackID := range trackIDs {
+			detail, err := s.deps.Store.GetTrack(ctx, trackID)
+			if err != nil || detail.Summary.StartTime == nil || detail.Summary.EndTime == nil {
+				continue
+			}
+			start := detail.Summary.StartTime.Add(-30 * time.Minute)
+			end := detail.Summary.EndTime.Add(30 * time.Minute)
+			if !candidate.Time.Before(start) && !candidate.Time.After(end) {
+				return candidate, true
+			}
+		}
+	}
+	return candidates[0], true
 }
 
 func mediaDuration(metadata map[string]any) time.Duration {
@@ -5907,6 +6119,31 @@ func interpolateTrackPoint(points []catalog.TrackPoint, target time.Time) (catal
 	return timed[len(timed)-1], "nearest", nil
 }
 
+func interpolateTrackPointWithTolerance(points []catalog.TrackPoint, target time.Time, tolerance time.Duration) (catalog.TrackPoint, string, error) {
+	point, mode, err := interpolateTrackPoint(points, target)
+	if err == nil {
+		return point, mode, nil
+	}
+	var timed []catalog.TrackPoint
+	for _, point := range points {
+		if !point.RecordedAt.IsZero() {
+			timed = append(timed, point)
+		}
+	}
+	if len(timed) == 0 {
+		return catalog.TrackPoint{}, "", catalog.ErrNotFound
+	}
+	sort.Slice(timed, func(i, j int) bool { return timed[i].RecordedAt.Before(timed[j].RecordedAt) })
+	if target.Before(timed[0].RecordedAt) && timed[0].RecordedAt.Sub(target) <= tolerance {
+		return timed[0], "clamped_start", nil
+	}
+	last := timed[len(timed)-1]
+	if target.After(last.RecordedAt) && target.Sub(last.RecordedAt) <= tolerance {
+		return last, "clamped_end", nil
+	}
+	return catalog.TrackPoint{}, "", catalog.ErrNotFound
+}
+
 type bbox struct {
 	MinLon float64
 	MinLat float64
@@ -6206,11 +6443,29 @@ func assetSearchMatches(asset catalog.Asset, tokens []string, searchCtx assetSea
 	}
 	var matched []string
 	for _, token := range tokens {
-		fields := assetTokenMatches(asset, token, searchCtx)
+		fields := assetTokenOrMatches(asset, token, searchCtx)
+		if len(fields) == 0 {
+			return nil
+		}
 		matched = append(matched, fields...)
 	}
 	sort.Strings(matched)
 	return uniqueStrings(matched)
+}
+
+func assetTokenOrMatches(asset catalog.Asset, token string, searchCtx assetSearchContext) []string {
+	parts := strings.Split(token, ",")
+	if len(parts) <= 1 {
+		return assetTokenMatches(asset, token, searchCtx)
+	}
+	var out []string
+	for _, part := range parts {
+		fields := assetTokenMatches(asset, strings.TrimSpace(part), searchCtx)
+		if len(fields) > 0 {
+			out = append(out, fields...)
+		}
+	}
+	return uniqueStrings(out)
 }
 
 func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchContext) []string {
@@ -6296,8 +6551,27 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 		return nil
 	}
 	if prefix == "camera" || prefix == "exif" {
-		if strings.Contains(metadataText, plain) {
+		if textMatchesSearch(metadataText, plain) {
 			return []string{"metadata/EXIF"}
+		}
+		return nil
+	}
+	if prefix == "filename" {
+		if textMatchesSearch(strings.ToLower(asset.DisplayName), plain) {
+			return []string{"filename"}
+		}
+		for _, loc := range asset.Locations {
+			if textMatchesSearch(strings.ToLower(loc.FileName), plain) {
+				return []string{"filename"}
+			}
+		}
+		return nil
+	}
+	if prefix == "path" {
+		for _, loc := range asset.Locations {
+			if textMatchesSearch(strings.ToLower(loc.RelativePath), plain) {
+				return []string{"path"}
+			}
 		}
 		return nil
 	}
@@ -6341,7 +6615,7 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 		}
 		return nil
 	}
-	if strings.Contains(strings.ToLower(asset.DisplayName), plain) {
+	if textMatchesSearch(strings.ToLower(asset.DisplayName), plain) {
 		out = append(out, "filename")
 	}
 	if _, ok := searchCtx.tagMatches[token][asset.ID]; ok {
@@ -6380,11 +6654,11 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 	if asset.TakenAt != nil && strings.Contains(asset.TakenAt.Format("2006-01-02 2006-01 2006"), plain) {
 		out = append(out, "date")
 	}
-	if strings.Contains(metadataText, plain) {
+	if textMatchesSearch(metadataText, plain) {
 		out = append(out, "metadata/EXIF")
 	}
 	for _, loc := range asset.Locations {
-		if strings.Contains(strings.ToLower(loc.RelativePath), plain) {
+		if textMatchesSearch(strings.ToLower(loc.RelativePath), plain) {
 			out = append(out, "path")
 		}
 		if strings.TrimPrefix(strings.ToLower(loc.Extension), ".") == strings.TrimPrefix(plain, ".") {
@@ -6393,11 +6667,24 @@ func assetTokenMatches(asset catalog.Asset, token string, searchCtx assetSearchC
 		if strings.HasPrefix(strings.ToLower(loc.SHA512Hex), plain) && plain != "" {
 			out = append(out, "SHA-512 prefix")
 		}
-		if strings.Contains(strings.ToLower(loc.FileName), plain) {
+		if textMatchesSearch(strings.ToLower(loc.FileName), plain) {
 			out = append(out, "filename")
 		}
 	}
 	return uniqueStrings(out)
+}
+
+func textMatchesSearch(text, query string) bool {
+	query = strings.TrimSpace(strings.ToLower(strings.Trim(query, `"`)))
+	if query == "" {
+		return false
+	}
+	if strings.ContainsAny(query, "*?") {
+		needle := strings.ReplaceAll(query, "*", "")
+		needle = strings.ReplaceAll(needle, "?", "")
+		return needle != "" && strings.Contains(text, needle)
+	}
+	return strings.Contains(text, query)
 }
 
 func audioFeatureMatchesToken(features catalog.AudioFeatures, prefix, plain string) bool {

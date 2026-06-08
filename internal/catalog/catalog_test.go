@@ -168,6 +168,64 @@ func TestBuildExplorerViewGroupsFolders(t *testing.T) {
 	}
 }
 
+func TestAssetTimestampCandidatesUseEXIFAndPixelFilename(t *testing.T) {
+	loc := time.FixedZone("AMT", 4*60*60)
+	asset := Asset{
+		ID:          "photo-1",
+		DisplayName: "PXL_20260509_172507172.jpg",
+		MediaKind:   "photo",
+		Metadata: map[string]any{
+			"exif_datetime_original_raw": "2026:05:09 17:25:07",
+		},
+		Locations: []Location{{
+			FileName:     "PXL_20260509_172507172.jpg",
+			RelativePath: "Cartolensia-photos/PXL_20260509_172507172.jpg",
+			MTime:        time.Date(2026, 5, 9, 18, 25, 9, 0, loc),
+		}},
+	}
+	candidates := AssetTimestampCandidates(asset, loc)
+	if len(candidates) < 2 {
+		t.Fatalf("expected EXIF, filename, and mtime timestamp candidates, got %#v", candidates)
+	}
+	if candidates[0].Source != "exif_datetime_original_raw" {
+		t.Fatalf("expected EXIF candidate to rank first, got %#v", candidates[0])
+	}
+	start := time.Date(2026, 5, 9, 15, 44, 24, 0, loc)
+	end := time.Date(2026, 5, 9, 23, 16, 52, 0, loc)
+	candidate, ok := AssetTimestampInRange(asset, start, end, 0, loc)
+	if !ok {
+		t.Fatalf("expected asset to match track time range via timestamp candidate")
+	}
+	if candidate.Source != "exif_datetime_original_raw" {
+		t.Fatalf("unexpected matched source %q", candidate.Source)
+	}
+}
+
+func TestAssetTimestampCandidatesUseVideoFilenameWhenMetadataMissing(t *testing.T) {
+	loc := time.FixedZone("AMT", 4*60*60)
+	asset := Asset{
+		ID:          "video-1",
+		DisplayName: "PXL_20260512_072546131.mp4",
+		MediaKind:   "video",
+		Locations: []Location{{
+			FileName:     "PXL_20260512_072546131.mp4",
+			RelativePath: "Cartolensia-photos/PXL_20260512_072546131.mp4",
+		}},
+	}
+	candidates := AssetTimestampCandidates(asset, loc)
+	if len(candidates) == 0 {
+		t.Fatal("expected filename timestamp candidate")
+	}
+	got := candidates[0]
+	if got.Source != "filename_timestamp" {
+		t.Fatalf("expected filename candidate, got %#v", got)
+	}
+	want := time.Date(2026, 5, 12, 7, 25, 46, 0, loc)
+	if !got.Time.Equal(want) {
+		t.Fatalf("expected %s, got %s", want, got.Time)
+	}
+}
+
 func TestBuildDuplicateGroups(t *testing.T) {
 	now := time.Now().UTC()
 	assets := []Asset{

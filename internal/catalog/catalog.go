@@ -214,6 +214,13 @@ type AssetPage struct {
 	Page   Page    `json:"page"`
 }
 
+type TimestampCandidate struct {
+	Source     string    `json:"source"`
+	Raw        string    `json:"raw,omitempty"`
+	Time       time.Time `json:"time"`
+	Confidence float64   `json:"confidence"`
+}
+
 type DuplicateGroup struct {
 	ContentID  string           `json:"content_id,omitempty"`
 	SHA512Hex  string           `json:"sha512_hex"`
@@ -1537,6 +1544,153 @@ func SearchAssets(assets []Asset, query string) []Asset {
 		}
 	}
 	return out
+}
+
+func AssetTimestampCandidates(asset Asset, loc *time.Location) []TimestampCandidate {
+	if loc == nil {
+		loc = time.Local
+	}
+	var out []TimestampCandidate
+	add := func(source, raw string, ts time.Time, confidence float64) {
+		if ts.IsZero() {
+			return
+		}
+		for _, existing := range out {
+			if existing.Source == source && existing.Time.Equal(ts) {
+				return
+			}
+		}
+		out = append(out, TimestampCandidate{Source: source, Raw: raw, Time: ts, Confidence: confidence})
+	}
+	if asset.TakenAt != nil {
+		add("taken_at", asset.TakenAt.Format(time.RFC3339Nano), *asset.TakenAt, 1.0)
+	}
+	if raw, ok := metadataString(asset.Metadata, "exif_datetime_original_raw"); ok {
+		if ts, ok := parseLooseLocalTime(raw, loc); ok {
+			add("exif_datetime_original_raw", raw, ts, 0.82)
+		}
+	}
+	names := []string{asset.DisplayName}
+	for _, location := range asset.Locations {
+		names = append(names, location.FileName, location.RelativePath)
+		if !location.MTime.IsZero() {
+			add("file_mtime", location.MTime.Format(time.RFC3339Nano), location.MTime, 0.62)
+		}
+	}
+	for _, name := range names {
+		if ts, raw, ok := parsePixelFilenameTime(name, loc); ok {
+			add("filename_timestamp", raw, ts, 0.76)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Confidence == out[j].Confidence {
+			return out[i].Time.Before(out[j].Time)
+		}
+		return out[i].Confidence > out[j].Confidence
+	})
+	return out
+}
+
+func AssetTimestampInRange(asset Asset, start, end time.Time, tolerance time.Duration, loc *time.Location) (TimestampCandidate, bool) {
+	windowStart := start.Add(-tolerance)
+	windowEnd := end.Add(tolerance)
+	for _, candidate := range AssetTimestampCandidates(asset, loc) {
+		if !candidate.Time.Before(windowStart) && !candidate.Time.After(windowEnd) {
+			return candidate, true
+		}
+	}
+	return TimestampCandidate{}, false
+}
+
+func AssetPrimaryTimestamp(asset Asset, loc *time.Location) (TimestampCandidate, bool) {
+	candidates := AssetTimestampCandidates(asset, loc)
+	if len(candidates) == 0 {
+		return TimestampCandidate{}, false
+	}
+	return candidates[0], true
+}
+
+func metadataString(metadata map[string]any, key string) (string, bool) {
+	if metadata == nil {
+		return "", false
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return "", false
+	}
+	switch typed := value.(type) {
+	case string:
+		typed = strings.TrimSpace(typed)
+		return typed, typed != ""
+	default:
+		text := strings.TrimSpace(fmt.Sprint(typed))
+		return text, text != ""
+	}
+}
+
+func parseLooseLocalTime(raw string, loc *time.Location) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{
+		"2006:01:02 15:04:05",
+		"2006-01-02 15:04:05",
+		"20060102_150405",
+		"20060102-150405",
+	} {
+		if ts, err := time.ParseInLocation(layout, raw, loc); err == nil {
+			return ts, true
+		}
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts, true
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts, true
+	}
+	return time.Time{}, false
+}
+
+func parsePixelFilenameTime(name string, loc *time.Location) (time.Time, string, bool) {
+	name = strings.TrimSpace(name)
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"pxl_", "vid_", "img_", "dsc_"} {
+		idx := strings.Index(lower, prefix)
+		if idx < 0 {
+			continue
+		}
+		start := idx + len(prefix)
+		if len(name) < start+15 {
+			continue
+		}
+		raw := name[start : start+15]
+		if raw[8] != '_' && raw[8] != '-' {
+			continue
+		}
+		datePart := raw[:8]
+		timePart := raw[9:15]
+		if !allDigits(datePart) || !allDigits(timePart) {
+			continue
+		}
+		parsedRaw := datePart + "_" + timePart
+		if ts, err := time.ParseInLocation("20060102_150405", parsedRaw, loc); err == nil {
+			return ts, parsedRaw, true
+		}
+	}
+	return time.Time{}, "", false
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func jobKindAllowed(kind string, kinds []string) bool {

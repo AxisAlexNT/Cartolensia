@@ -24,6 +24,7 @@ import {
   type APIToken,
   type Asset,
   type AssetDetail,
+  type AssetRelated,
   type BackendStatus,
   type ComponentEvent,
   type ComponentRecord,
@@ -399,6 +400,12 @@ const videoTrackIds = ref("");
 const videoTrackOffsetSeconds = ref(0);
 const videoTrackTimestampMode = ref("video_start_time");
 const videoTrackPosition = ref<Record<string, unknown> | null>(null);
+const videoTrackVideoSearch = ref("");
+const videoTrackTrackSearch = ref("");
+const videoTrackVideoOptions = ref<Asset[]>([]);
+const videoTrackTrackOptions = ref<TrackSummary[]>([]);
+const videoTrackSelectedTracks = ref<TrackSummary[]>([]);
+const searchPageTotal = ref(0);
 const filePickerOpen = ref(false);
 const filePicker = ref<FileBrowseResponse | null>(null);
 const filePickerRoot = ref("");
@@ -478,9 +485,13 @@ type GalleryItem = {
 
 const galleryItems = ref<GalleryItem[]>([]);
 const galleryIndex = ref(0);
+const assetRelated = ref<AssetRelated | null>(null);
 const failedPreviewIds = ref<Set<string>>(new Set());
 const galleryOpen = computed(() => galleryItems.value.length > 0);
 const galleryCurrent = computed(() => galleryItems.value[galleryIndex.value] ?? null);
+const relatedContextGroups = computed(() =>
+  Object.entries(assetRelated.value?.groups ?? {}).filter(([, rows]) => rows.length > 0)
+);
 
 const activePlugin = computed(() => {
   const id = active.value.toLowerCase().replaceAll(" ", "-");
@@ -515,6 +526,45 @@ function setActive(next: string, updateURL = true) {
     url.searchParams.set("page", pageSlug(route));
     window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }
+}
+
+function assetHref(id: string) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("page", "asset-detail");
+  url.searchParams.set("asset_id", id);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function firstAssetLocation(asset: Asset) {
+  return asset.locations?.[0];
+}
+
+function assetName(asset: Asset) {
+  return asset.display_name || firstAssetLocation(asset)?.file_name || asset.id;
+}
+
+function assetTimestampLabel(asset: Asset) {
+  return (
+    asset.taken_at ||
+    String(asset.metadata?.exif_datetime_original_raw ?? "") ||
+    firstAssetLocation(asset)?.mtime ||
+    ""
+  );
+}
+
+function groupLabel(group: string) {
+  return group
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function openAssetLink(event: MouseEvent, id: string) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  void openAsset(id);
 }
 
 window.addEventListener("popstate", () => {
@@ -1981,6 +2031,11 @@ async function refresh() {
     backendMonthBuckets.value = asArray(monthData);
     backend.value = backendStatus;
     tracks.value = asArray(trackRows);
+    videoTrackTrackOptions.value = tracks.value;
+    if (videoTrackSelectedTracks.value.length === 0) {
+      videoTrackSelectedTracks.value = tracks.value.slice(0, 1);
+      videoTrackIds.value = videoTrackSelectedTracks.value.map((track) => track.track_asset_id).join(", ");
+    }
     mapData.value = geojson;
     mapStatus.value = mapStatusData;
     albums.value = asArray(albumRows);
@@ -2022,6 +2077,7 @@ async function refresh() {
     editablePlaces.value = asArray(editablePlacePayload.places);
     initializePendingConfig(settingsPayload);
     dbExports.value = asArray(exportRows);
+    await loadVideoTrackVideoOptions();
     if (principal.value && backendStatus.auth?.mode === "local") {
       apiTokens.value = await api.tokens().catch(() => []);
     }
@@ -2421,6 +2477,7 @@ async function runUniversalSearch() {
     universalSearchTrackResults.value = [];
     universalSearchPlaceResults.value = [];
     universalSearchBackend.value = "";
+    searchPageTotal.value = 0;
     return;
   }
   universalSearchMessage.value = "Searching indexed media and tracks...";
@@ -2430,7 +2487,8 @@ async function runUniversalSearch() {
   universalSearchPlaceResults.value = asArray(response.places);
   universalSearchWarnings.value = asArray(response.warnings);
   universalSearchBackend.value = `${response.backend ?? "postgres_local"} · ${response.backend_mode ?? "metadata/local"}`;
-  universalSearchMessage.value = `${universalSearchResults.value.length} media results · ${universalSearchTrackResults.value.length} track results · ${universalSearchPlaceResults.value.length} place matches`;
+  searchPageTotal.value = response.page?.total ?? universalSearchResults.value.length;
+  universalSearchMessage.value = `${searchPageTotal.value} media matches (${universalSearchResults.value.length} shown) · ${universalSearchTrackResults.value.length} track results · ${universalSearchPlaceResults.value.length} place matches`;
 }
 
 async function refreshFaceClusters() {
@@ -2472,6 +2530,81 @@ function parsedTrackIds(input: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
   return fromInput.length > 0 ? fromInput : tracks.value.map((track) => track.track_asset_id).slice(0, 4);
+}
+
+async function loadVideoTrackVideoOptions() {
+  const params = new URLSearchParams();
+  params.set("media_kind", "video");
+  params.set("limit", "75");
+  params.set("sort", "mtime");
+  const q = videoTrackVideoSearch.value.trim();
+  if (q) {
+    params.set("q", q);
+  }
+  const rows = await api.assets(params.toString()).catch(() => []);
+  videoTrackVideoOptions.value = rows;
+  if (!videoTrackAssetId.value && rows.length > 0) {
+    selectVideoTrackVideo(rows[0], false);
+  }
+}
+
+function selectVideoTrackVideo(asset: Asset, replaceSearch = true) {
+  videoTrackAssetId.value = asset.id;
+  if (replaceSearch) {
+    videoTrackVideoSearch.value = assetName(asset);
+  }
+}
+
+const selectedVideoTrackAsset = computed(() =>
+  videoTrackVideoOptions.value.find((asset) => asset.id === videoTrackAssetId.value) ?? null
+);
+
+function videoOptionSummary(asset: Asset) {
+  const location = firstAssetLocation(asset);
+  const metadata = asset.metadata ?? {};
+  const bits = [
+    assetTimestampLabel(asset),
+    formatDuration(Number(metadata.duration_seconds ?? 0)),
+    [metadata.codec, metadata.width && metadata.height ? `${metadata.width}×${metadata.height}` : ""].filter(Boolean).join(" "),
+    location?.relative_path ?? ""
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+const filteredVideoTrackTracks = computed(() => {
+  const q = videoTrackTrackSearch.value.trim().toLowerCase();
+  const source = videoTrackTrackOptions.value.length ? videoTrackTrackOptions.value : tracks.value;
+  return source
+    .filter((track) => !videoTrackSelectedTracks.value.some((selected) => selected.track_asset_id === track.track_asset_id))
+    .filter((track) => !q || `${track.name} ${track.source_format ?? ""}`.toLowerCase().includes(q))
+    .slice(0, 12);
+});
+
+function trackOptionSummary(track: TrackSummary) {
+  const bits = [
+    track.source_format,
+    track.point_count ? `${track.point_count} points` : "",
+    track.start_time && track.end_time ? `${track.start_time} → ${track.end_time}` : "",
+    track.distance_m ? formatDistance(track.distance_m) : ""
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+function formatDistance(value: number) {
+  return value >= 1000 ? `${(value / 1000).toFixed(2)} km` : `${Math.round(value)} m`;
+}
+
+function addVideoTrackTrack(track: TrackSummary) {
+  if (!videoTrackSelectedTracks.value.some((selected) => selected.track_asset_id === track.track_asset_id)) {
+    videoTrackSelectedTracks.value.push(track);
+  }
+  videoTrackTrackSearch.value = "";
+  videoTrackIds.value = videoTrackSelectedTracks.value.map((item) => item.track_asset_id).join(", ");
+}
+
+function removeVideoTrackTrack(trackID: string) {
+  videoTrackSelectedTracks.value = videoTrackSelectedTracks.value.filter((track) => track.track_asset_id !== trackID);
+  videoTrackIds.value = videoTrackSelectedTracks.value.map((item) => item.track_asset_id).join(", ");
 }
 
 async function startGeoAlignSession() {
@@ -2599,8 +2732,9 @@ async function applyGeoAlign() {
 }
 
 async function startVideoTrackPlayerSession() {
-  const videoID = videoTrackAssetId.value || indexedVideoRows.value[0]?.asset_id || "";
-  const trackIDs = parsedTrackIds(videoTrackIds.value);
+  const videoID = videoTrackAssetId.value || videoTrackVideoOptions.value[0]?.id || indexedVideoRows.value[0]?.asset_id || "";
+  const selectedTrackIDs = videoTrackSelectedTracks.value.map((track) => track.track_asset_id);
+  const trackIDs = selectedTrackIDs.length ? selectedTrackIDs : parsedTrackIds(videoTrackIds.value);
   if (!videoID || trackIDs.length === 0) {
     videoTrackMessage.value = "Select a video and at least one GPS/KML track.";
     return;
@@ -2613,6 +2747,9 @@ async function startVideoTrackPlayerSession() {
   });
   videoTrackAssetId.value = videoID;
   videoTrackIds.value = trackIDs.join(", ");
+  if (videoTrackSelectedTracks.value.length === 0) {
+    videoTrackSelectedTracks.value = tracks.value.filter((track) => trackIDs.includes(track.track_asset_id));
+  }
   videoTrackMessage.value = `Session ${videoTrackSession.value.id.slice(0, 8)} ready. Playback positions are computed from video time plus offset.`;
   await updateVideoTrackPosition(0);
 }
@@ -3304,10 +3441,15 @@ async function openAsset(id: string) {
   error.value = "";
   try {
     assetDetail.value = await api.asset(id);
+    assetRelated.value = await api.assetRelated(id).catch(() => null);
     assetAIActionStatus.value = {};
     streamOptions.value =
       assetDetail.value.asset.media_kind === "video" ? await api.streamOptions(id).catch(() => null) : null;
     setActive("Asset Detail", false);
+    const url = new URL(window.location.href);
+    url.searchParams.set("page", "asset-detail");
+    url.searchParams.set("asset_id", id);
+    window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -4136,9 +4278,9 @@ onBeforeUnmount(() => {
                   />
                 </td>
                 <td>
-                  <button type="button" class="link-button" @click="openAsset(row.asset_id)">
+                  <a class="link-button" :href="assetHref(row.asset_id)" @click="openAssetLink($event, row.asset_id)">
                     {{ row.name }}
-                  </button>
+                  </a>
                 </td>
                 <td>{{ row.media_kind }}</td>
                 <td>{{ formatBytes(row.size_bytes) }}</td>
@@ -4182,9 +4324,14 @@ onBeforeUnmount(() => {
                   loading="lazy"
                   @error="markPreviewFailed(row.asset_id)"
                 />
+                <span v-else-if="row.media_kind === 'audio'" class="audio-tile-preview">
+                  <i class="bi bi-soundwave" aria-hidden="true"></i>
+                  <audio :src="`/api/v1/media/${row.asset_id}/original`" controls preload="metadata" @click.stop></audio>
+                  <small>{{ row.name }}</small>
+                </span>
                 <span v-else class="media-fallback">{{ row.media_kind }}</span>
               </button>
-              <button type="button" class="tile-title link-button" @click="openAsset(row.asset_id)">{{ row.name }}</button>
+              <a class="tile-title link-button" :href="assetHref(row.asset_id)" @click="openAssetLink($event, row.asset_id)">{{ row.name }}</a>
 	              <small>{{ row.media_kind }} · {{ formatBytes(row.size_bytes) }}</small>
 	              <small v-if="searchExplanation(row)" class="search-match">{{ searchExplanation(row) }}</small>
 	              <small class="tile-badges">
@@ -4613,6 +4760,52 @@ onBeforeUnmount(() => {
               <a v-if="assetDetail.original_url" :href="assetDetail.original_url" target="_blank" rel="noreferrer">Open</a>
             </article>
           </div>
+          <section v-if="assetDetail && assetRelated" class="settings-form settings-wide related-context-panel">
+            <div class="section-title">
+              <div>
+                <h3><i class="bi bi-diagram-3" aria-hidden="true"></i> Related Context</h3>
+                <p class="muted">{{ assetRelated.note }}</p>
+              </div>
+              <button type="button" class="btn btn-sm btn-outline-secondary" @click="universalSearchQ = assetDetail.asset.display_name; setActive('Search'); runUniversalSearch()">
+                Open search
+              </button>
+            </div>
+            <div class="detail-grid compact-detail-grid">
+              <article v-if="assetRelated.device">
+                <strong>{{ assetRelated.device }}</strong>
+                <span>Device</span>
+              </article>
+              <article v-if="assetRelated.folder">
+                <strong>{{ assetRelated.folder }}</strong>
+                <span>Folder</span>
+              </article>
+              <article v-if="assetRelated.timestamp_candidates?.length">
+                <strong>{{ String(assetRelated.timestamp_candidates[0]?.time ?? "") }}</strong>
+                <span>Best timestamp candidate · {{ String(assetRelated.timestamp_candidates[0]?.source ?? "") }}</span>
+              </article>
+            </div>
+            <div class="related-context-grid">
+              <article
+                v-for="entry in relatedContextGroups"
+                :key="entry[0]"
+                class="related-context-group"
+              >
+                <h4>{{ groupLabel(entry[0]) }}</h4>
+                <div class="related-context-list">
+                  <a
+                    v-for="item in entry[1].slice(0, 8)"
+                    :key="item.asset.id"
+                    class="related-context-row"
+                    :href="assetHref(item.asset.id)"
+                    @click="openAssetLink($event, item.asset.id)"
+                  >
+                    <span>{{ assetName(item.asset) }}</span>
+                    <small>{{ item.asset.media_kind }} · {{ item.reason }}</small>
+                  </a>
+                </div>
+              </article>
+            </div>
+          </section>
           <section v-if="assetDetail" class="settings-form settings-wide ai-asset-actions">
             <div class="section-title">
               <div>
@@ -5045,11 +5238,16 @@ onBeforeUnmount(() => {
                       loading="lazy"
                       @error="markPreviewFailed(asset.id)"
                     />
+                    <span v-else-if="asset.media_kind === 'audio'" class="audio-tile-preview">
+                      <i class="bi bi-soundwave" aria-hidden="true"></i>
+                      <audio :src="`/api/v1/media/${asset.id}/original`" controls preload="metadata" @click.stop></audio>
+                      <small>{{ asset.display_name }}</small>
+                    </span>
                     <span v-else class="media-fallback">{{ asset.media_kind }}</span>
                   </button>
-                  <button type="button" class="tile-title link-button" @click="openAsset(asset.id)">
+                  <a class="tile-title link-button" :href="assetHref(asset.id)" @click="openAssetLink($event, asset.id)">
                     {{ asset.display_name }}
-                  </button>
+                  </a>
                   <small>{{ asset.media_kind }} · {{ formatBytes(asset.locations[0]?.size_bytes ?? 0) }}</small>
                   <small class="tile-badges">
                     <span :class="['status-badge', assetHashStatus(asset) === 'hashed' ? 'ok' : 'warn']">{{ assetHashStatus(asset) }}</span>
@@ -5091,7 +5289,7 @@ onBeforeUnmount(() => {
                 </p>
               </div>
               <div class="actions">
-                <button type="button" @click="openAsset(selectedTrack.summary.track_asset_id)">Open source asset</button>
+                <a class="btn btn-outline-secondary" :href="assetHref(selectedTrack.summary.track_asset_id)" @click="openAssetLink($event, selectedTrack.summary.track_asset_id)">Open source asset</a>
                 <button type="button" @click="setActive('Map')">Show on map</button>
               </div>
             </header>
@@ -5194,7 +5392,7 @@ onBeforeUnmount(() => {
               <thead><tr><th>Asset</th><th>Kind</th><th>Taken</th></tr></thead>
               <tbody>
                 <tr v-for="asset in trackAssets" :key="asset.id">
-                  <td><button type="button" class="link-button" @click="openAsset(asset.id)">{{ asset.display_name }}</button></td>
+                  <td><a class="link-button" :href="assetHref(asset.id)" @click="openAssetLink($event, asset.id)">{{ asset.display_name }}</a></td>
                   <td>{{ asset.media_kind }}</td>
                   <td>{{ asset.taken_at ?? "" }}</td>
                 </tr>
@@ -5210,11 +5408,16 @@ onBeforeUnmount(() => {
                     loading="lazy"
                     @error="markPreviewFailed(asset.id)"
                   />
+                  <span v-else-if="asset.media_kind === 'audio'" class="audio-tile-preview">
+                    <i class="bi bi-soundwave" aria-hidden="true"></i>
+                    <audio :src="`/api/v1/media/${asset.id}/original`" controls preload="metadata" @click.stop></audio>
+                    <small>{{ asset.display_name }}</small>
+                  </span>
                   <span v-else class="media-fallback">{{ asset.media_kind }}</span>
                 </button>
-                <button type="button" class="tile-title link-button" @click="openAsset(asset.id)">
+                <a class="tile-title link-button" :href="assetHref(asset.id)" @click="openAssetLink($event, asset.id)">
                   {{ asset.display_name }}
-                </button>
+                </a>
                 <small class="tile-badges">
                   <span :class="['status-badge', assetHashStatus(asset) === 'hashed' ? 'ok' : 'warn']">{{ assetHashStatus(asset) }}</span>
                   <span v-if="assetHasGeo(asset)" class="status-badge ok">geotag</span>
@@ -5400,7 +5603,7 @@ onBeforeUnmount(() => {
                   })), (mapPopup?.assets ?? []).findIndex((item) => item.id === asset.id))">
                     Open viewer
                   </button>
-                  <button type="button" @click="openAsset(asset.id)">Asset detail</button>
+                  <a class="btn btn-sm btn-outline-secondary" :href="assetHref(asset.id)" @click="openAssetLink($event, asset.id)">Asset detail</a>
                 </div>
               </article>
             </div>
@@ -5913,6 +6116,20 @@ onBeforeUnmount(() => {
           <p v-if="universalSearchBackend" class="muted">
             Search backend: {{ universalSearchBackend }}. Elasticsearch/OpenSearch are intentionally not enabled in this run.
           </p>
+          <details class="search-help-panel">
+            <summary>Search syntax</summary>
+            <div class="chip-row">
+              <span class="status-badge">space = AND</span>
+              <span class="status-badge">comma = OR groups</span>
+              <span class="status-badge">* and ? wildcards</span>
+              <span class="status-badge">quoted phrases</span>
+            </div>
+            <p class="muted">
+              Examples: <code>ext:mp4</code>, <code>kind:video filename:PXL_20260512*</code>,
+              <code>ocr:"station"</code>, <code>caption:train</code>, <code>camera:Pixel</code>,
+              <code>place:Armenia</code>, or <code>filename:PXL*, metadata word</code>.
+            </p>
+          </details>
           <div v-if="universalSearchWarnings.length" class="chip-row">
             <span v-for="warning in universalSearchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
           </div>
@@ -5940,12 +6157,17 @@ onBeforeUnmount(() => {
                     <img v-if="result.asset.media_kind === 'photo'" :src="`/api/v1/media/${result.asset.id}/preview`" :alt="result.asset.display_name" loading="lazy" />
                     <video v-else-if="result.asset.media_kind === 'video'" :src="`/api/v1/media/${result.asset.id}/original`" preload="metadata" muted></video>
                     <img v-else-if="result.asset.media_kind === 'track'" :src="`/api/v1/media/${result.asset.id}/track-thumbnail`" :alt="result.asset.display_name" loading="lazy" />
+                    <span v-else-if="result.asset.media_kind === 'audio'" class="audio-tile-preview">
+                      <i class="bi bi-soundwave" aria-hidden="true"></i>
+                      <audio :src="`/api/v1/media/${result.asset.id}/original`" controls preload="metadata" @click.stop></audio>
+                      <small>{{ result.asset.display_name }}</small>
+                    </span>
                     <span v-else class="media-fallback">{{ result.asset.media_kind }}</span>
                   </button>
                   <strong class="tile-title">{{ result.asset.display_name }}</strong>
                   <small>{{ result.asset.media_kind }} · {{ result.asset.taken_at ?? "" }}</small>
                   <small class="search-match">{{ result.explanation }}</small>
-                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(result.asset.id)">Asset detail</button>
+                  <a class="btn btn-sm btn-outline-secondary" :href="assetHref(result.asset.id)" @click="openAssetLink($event, result.asset.id)">Asset detail</a>
                 </article>
               </div>
             </article>
@@ -6028,13 +6250,18 @@ onBeforeUnmount(() => {
                   <article v-for="asset in faceClusterAssets" :key="asset.id" class="asset-tile face-asset-tile">
                     <button type="button" class="tile-media" @click="openAsset(asset.id)">
                       <img v-if="asset.media_kind === 'photo'" :src="`/api/v1/media/${asset.id}/preview`" :alt="asset.display_name" loading="lazy" />
+                      <span v-else-if="asset.media_kind === 'audio'" class="audio-tile-preview">
+                        <i class="bi bi-soundwave" aria-hidden="true"></i>
+                        <audio :src="`/api/v1/media/${asset.id}/original`" controls preload="metadata" @click.stop></audio>
+                        <small>{{ asset.display_name }}</small>
+                      </span>
                       <span v-else class="media-fallback">{{ asset.media_kind }}</span>
                     </button>
                     <div class="tile-meta">
                       <strong class="tile-title">{{ asset.display_name }}</strong>
                       <span>{{ faceClusterDetections.filter((face) => face.asset_id === asset.id && !faceIgnored(face)).length }} faces in this folder</span>
                     </div>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(asset.id)">Asset detail</button>
+                    <a class="btn btn-sm btn-outline-secondary" :href="assetHref(asset.id)" @click="openAssetLink($event, asset.id)">Asset detail</a>
                   </article>
                 </div>
                 <details class="mt-3 face-detection-details">
@@ -6257,16 +6484,57 @@ onBeforeUnmount(() => {
             <article class="settings-form">
               <h3>Inputs</h3>
               <label class="form-label">
-                Video
-                <select v-model="videoTrackAssetId" class="form-select">
-                  <option value="">First indexed video</option>
-                  <option v-for="video in indexedVideoRows" :key="video.asset_id" :value="video.asset_id">{{ video.name }}</option>
-                </select>
+                Search video
+                <input
+                  v-model="videoTrackVideoSearch"
+                  class="form-control"
+                  type="search"
+                  placeholder="Type part of a video filename, e.g. 072546"
+                  @input="loadVideoTrackVideoOptions"
+                  @focus="loadVideoTrackVideoOptions"
+                />
               </label>
+              <div class="selector-suggestions">
+                <button
+                  v-for="video in videoTrackVideoOptions.slice(0, 12)"
+                  :key="video.id"
+                  type="button"
+                  :class="{ active: video.id === videoTrackAssetId }"
+                  @click="selectVideoTrackVideo(video)"
+                >
+                  <span>{{ assetName(video) }}</span>
+                  <small>{{ videoOptionSummary(video) }}</small>
+                </button>
+              </div>
+              <p v-if="selectedVideoTrackAsset" class="muted">
+                Selected video: {{ assetName(selectedVideoTrackAsset) }} · {{ videoOptionSummary(selectedVideoTrackAsset) }}
+              </p>
               <label class="form-label">
-                Track IDs
-                <textarea v-model="videoTrackIds" class="form-control" rows="3" placeholder="Blank uses current parsed tracks"></textarea>
+                Search tracks
+                <input
+                  v-model="videoTrackTrackSearch"
+                  class="form-control"
+                  type="search"
+                  placeholder="Type a GPX/KML name, e.g. 20260512-072610"
+                />
               </label>
+              <div class="selector-pill-list" aria-label="Selected tracks">
+                <span v-for="track in videoTrackSelectedTracks" :key="track.track_asset_id" class="selector-pill">
+                  {{ track.name }}
+                  <button type="button" aria-label="Remove track" @click="removeVideoTrackTrack(track.track_asset_id)">×</button>
+                </span>
+              </div>
+              <div class="selector-suggestions">
+                <button
+                  v-for="track in filteredVideoTrackTracks"
+                  :key="track.track_asset_id"
+                  type="button"
+                  @click="addVideoTrackTrack(track)"
+                >
+                  <span>{{ track.name }}</span>
+                  <small>{{ trackOptionSummary(track) }}</small>
+                </button>
+              </div>
               <label class="form-label">
                 Timestamp mode
                 <select v-model="videoTrackTimestampMode" class="form-select">
@@ -7009,6 +7277,12 @@ onBeforeUnmount(() => {
           controls
           preload="metadata"
         ></video>
+        <div v-else-if="galleryCurrent.media_kind === 'audio'" class="gallery-audio-player">
+          <i class="bi bi-soundwave" aria-hidden="true"></i>
+          <audio :src="galleryCurrent.original_url" controls preload="metadata"></audio>
+          <strong>{{ galleryCurrent.name }}</strong>
+          <span>{{ galleryCurrent.relative_path }}</span>
+        </div>
         <div v-else-if="galleryCurrent.media_kind === 'track'" class="map-shell gallery-track-shell">
           <div
             ref="galleryTrackElement"
@@ -7089,7 +7363,7 @@ onBeforeUnmount(() => {
             <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="resetGalleryZoom">Reset zoom</button>
             <span v-if="galleryCurrent.media_kind === 'photo'">{{ Math.round(galleryScale * 100) }}%</span>
             <a :href="galleryCurrent.original_url" target="_blank" rel="noreferrer">Open Original</a>
-            <button type="button" @click="openGalleryAssetDetail(galleryCurrent.id)">Asset Detail</button>
+            <a class="btn btn-outline-secondary" :href="assetHref(galleryCurrent.id)" @click="openAssetLink($event, galleryCurrent.id)">Asset Detail</a>
           </div>
         </figcaption>
       </figure>

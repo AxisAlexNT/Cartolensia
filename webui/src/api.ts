@@ -213,6 +213,22 @@ export type AssetDetail = {
   document?: DocumentTextRecord;
 };
 
+export type RelatedAssetGroup = {
+  asset: Asset;
+  reason: string;
+  score: number;
+  details?: Record<string, unknown>;
+};
+
+export type AssetRelated = {
+  asset_id: string;
+  timestamp_candidates?: Array<Record<string, unknown>>;
+  device?: string;
+  folder?: string;
+  groups: Record<string, RelatedAssetGroup[]>;
+  note?: string;
+};
+
 export type AssetPlaceRecord = {
   coordinate_source: string;
   geo_source?: string;
@@ -917,6 +933,8 @@ export const api = {
   job: (id: string) => request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}`),
   jobLogs: (id: string) => request<{ logs: Job["logs"]; next_after_id: number }>(`/api/v1/jobs/${encodeURIComponent(id)}/logs`),
   explorer: async (query = "") => asArray(await request<ExplorerRow[] | null>(`/api/v1/explorer${query ? `?${query}` : ""}`)),
+  assets: async (query = "") =>
+    asArray(await request<Asset[] | null>(`/api/v1/assets${query ? `?${query}` : ""}`)).map(normalizeAsset),
   explorerFolders: (path = "", query = "") => {
     const params = new URLSearchParams(query);
     params.set("view", "folders");
@@ -933,6 +951,16 @@ export const api = {
       content: detail.content ?? {},
       timestamps: detail.timestamps ?? {},
       metadata: detail.metadata ?? {}
+    })),
+  assetRelated: (id: string) =>
+    request<AssetRelated>(`/api/v1/assets/${encodeURIComponent(id)}/related`).then((payload) => ({
+      ...payload,
+      groups: Object.fromEntries(
+        Object.entries(payload.groups ?? {}).map(([key, rows]) => [
+          key,
+          asArray(rows).map((row) => ({ ...row, asset: normalizeAsset(row.asset) }))
+        ])
+      )
     })),
   duplicates: (limit = 50, offset = 0) =>
     request<DuplicatePage | null>(`/api/v1/duplicates?limit=${limit}&offset=${offset}`).then(normalizeDuplicatePage),
