@@ -26,6 +26,21 @@ GOOS_VALUE="${CARTOLENSIA_DIST_GOOS:-linux}"
 GOARCH_VALUE="${CARTOLENSIA_DIST_GOARCH:-amd64}"
 RSYNC_ARCHIVE_FLAGS=(-a --no-owner --no-group --no-perms)
 
+prepend_path() {
+  local dir="$1"
+  [ -n "${dir}" ] || return 0
+  [ -d "${dir}" ] || return 0
+  PATH="${dir}:${PATH}"
+}
+
+prepend_path "${CARTOLENSIA_FFMPEG_BIN_DIR:-}"
+prepend_path "${CARTOLENSIA_TESSERACT_BIN_DIR:-}"
+prepend_path "${CARTOLENSIA_PG_BIN_DIR:-}"
+export PATH
+if [ -n "${CARTOLENSIA_TESSDATA_DIR:-}" ] && [ -d "${CARTOLENSIA_TESSDATA_DIR}" ]; then
+  export TESSDATA_PREFIX="${CARTOLENSIA_TESSDATA_DIR}"
+fi
+
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
     printf 'Required tool missing: %s\n' "$1" >&2
@@ -357,7 +372,7 @@ validate_ffmpeg_redistribution() {
 bundle_postgres() {
   [ "${INCLUDE_POSTGRES}" = "1" ] || return 0
   local pg_config_bin
-  pg_config_bin="$(command -v pg_config 2>/dev/null || true)"
+  pg_config_bin="${CARTOLENSIA_PG_CONFIG:-$(command -v pg_config 2>/dev/null || true)}"
   if [ -z "${pg_config_bin}" ]; then
     note "pg_config not found; skipping bundled PostgreSQL"
     return 0

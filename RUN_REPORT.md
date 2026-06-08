@@ -3060,3 +3060,30 @@ Safety confirmation:
 - no missing marking
 - no commit
 - no push
+
+## 2026-06-09 Local Full-Bundle Build Path
+
+Added:
+
+- `config/local-full-build.env.example`
+- `scripts/release/build-local-full.sh`
+
+Purpose:
+
+- provide an Internet-connected staging build path for a complete local 7z archive;
+- let operators point the packager at official, reviewed tool/model/runtime roots before packaging;
+- keep the existing offline/local release path separate from GitHub release publication.
+
+Validated:
+
+- `git diff --check`
+- `bash -n scripts/dist/build-offline-linux.sh scripts/release/build-linux.sh scripts/release/build-local-full.sh scripts/release/check-licenses.sh scripts/release/smoke-release.sh scripts/release/smoke-production-compose.sh`
+- app health at `http://127.0.0.1:18080/api/v1/health`
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no DB reset
+- no missing marking
+- no commit
+- no push

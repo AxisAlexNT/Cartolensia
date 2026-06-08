@@ -16,6 +16,14 @@ Use the release wrapper:
 bash scripts/release/build-linux.sh
 ```
 
+For a local machine build that is intended to bundle everything you already downloaded or installed locally, use:
+
+```bash
+cp config/local-full-build.env.example config/local-full-build.env
+$EDITOR config/local-full-build.env
+bash scripts/release/build-local-full.sh
+```
+
 Common release inputs are environment variables:
 
 - `CARTOLENSIA_RELEASE_INCLUDE_TOOLS`
@@ -25,6 +33,17 @@ Common release inputs are environment variables:
 - `CARTOLENSIA_RELEASE_INCLUDE_OFFLINE_MAPS`
 - `CARTOLENSIA_RELEASE_AI_FLAVOR`
 - `CARTOLENSIA_RELEASE_VERSION`
+
+The local full-bundle config also accepts explicit paths to reviewed tool/model/runtime roots:
+
+- `CARTOLENSIA_FFMPEG_BIN_DIR`
+- `CARTOLENSIA_TESSERACT_BIN_DIR`
+- `CARTOLENSIA_TESSDATA_DIR`
+- `CARTOLENSIA_PG_BIN_DIR`
+- `CARTOLENSIA_PG_CONFIG`
+- `CARTOLENSIA_BUNDLED_PYTHON_ROOT`
+- `CARTOLENSIA_MODELS_DIR`
+- `CARTOLENSIA_OFFLINE_MAPS_DIR`
 
 Build modes:
 

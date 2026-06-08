@@ -111,6 +111,12 @@ For the offline release bundle, extract the archive and start with:
 ./start-cartolensia.sh
 ```
 
+For a local full-bundle build on an Internet-connected machine, copy `config/local-full-build.env.example` to `config/local-full-build.env`, review the source URLs and paths, then run:
+
+```bash
+bash scripts/release/build-local-full.sh
+```
+
 Run with a configured TLS certificate/key:
 
 ```yaml

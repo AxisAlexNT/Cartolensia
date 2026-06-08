@@ -79,6 +79,16 @@ CARTOLENSIA_MODELS_DIR=.cartolensia/models \
 bash scripts/dist/build-offline-linux.sh
 ```
 
+Build a full local bundle from pre-downloaded official tools, runtimes, and model caches:
+
+```bash
+cp config/local-full-build.env.example config/local-full-build.env
+$EDITOR config/local-full-build.env
+bash scripts/release/build-local-full.sh
+```
+
+The local full-bundle config is intended for an Internet-connected staging machine. It points at safe, official source roots and local extraction directories so you can download or unpack reviewed tools first, then create the final 7z archive without relying on GitHub release publication.
+
 The output appears under `dist/`:
 
 - `cartolensia-<version>-linux-x86_64-offline.7z`
