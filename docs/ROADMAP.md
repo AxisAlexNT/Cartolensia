@@ -219,6 +219,23 @@ Next:
 - Add durable media-track player sessions for audio as well as video.
 - Implement persisted zoom-level map cluster cache after the current screen-distance cluster path is fully characterized.
 
+## 2026-06-09 Production Release Preparation
+
+Completed:
+
+- Production config templates for `/originals` deployments.
+- Offline-airgap, production-container, and `.env.production.example` templates.
+- Production compose file for a PostgreSQL-backed container deployment.
+- Release helper scripts for Linux packaging, license checking, and production compose smoke checks.
+- CI workflow for Go/WebUI/build/config validation plus smoke-script checks.
+- Release documentation for installation, air-gapped use, production deployment, offline components, building, user workflow, and release review.
+
+Next:
+
+- Validate the production compose path on a clean host with `/originals` mounted read-only.
+- Confirm the offline bundle layout on a real extracted archive.
+- Decide whether a separate host-based systemd unit template is still needed for non-container deployments.
+
 ## 2026-06-09 Full Prefix Indexing Progress
 
 Completed:

@@ -55,6 +55,13 @@ Current implemented slices:
 * [Operations](docs/OPERATIONS.md)
 * [Security](docs/SECURITY.md)
 * [Offline distribution](docs/DISTRIBUTION.md)
+* [Installation](docs/INSTALLATION.md)
+* [Air-gapped install](docs/AIRGAPPED_INSTALL.md)
+* [Production deployment](docs/PRODUCTION_DEPLOYMENT.md)
+* [Offline components](docs/OFFLINE_COMPONENTS.md)
+* [Building](docs/BUILDING.md)
+* [User manual](docs/USER_MANUAL.md)
+* [Release checklist](docs/RELEASE_CHECKLIST.md)
 * [Real archive dry-run guide](docs/REAL_ARCHIVE_DRY_RUN.md)
 * [Target architecture](docs/ARCHITECTURE_TARGET.md)
 * [AI assistance note](docs/AI_ASSISTANCE.md)
@@ -90,6 +97,18 @@ Run the backend against the development PostgreSQL service:
 
 ```bash
 go run ./cmd/cartolensia -config config/dev-postgres.yaml
+```
+
+Run the production host template against a mounted `/originals` archive:
+
+```bash
+go run ./cmd/cartolensia -config config/production.yaml
+```
+
+For the offline release bundle, extract the archive and start with:
+
+```bash
+./start-cartolensia.sh
 ```
 
 Run with a configured TLS certificate/key:

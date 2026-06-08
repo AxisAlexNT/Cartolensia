@@ -52,6 +52,9 @@ type WalkOptions struct {
 	Prefixes          []string
 	MaxFiles          int
 	MaxBytes          int64
+	MaxFolderWorkers  int
+	MaxFileWorkers    int
+	FolderQueueDepth  int
 	IncludeExtensions []string
 	ExcludePatterns   []string
 }
@@ -71,6 +74,8 @@ func SupportedExtensions() []string {
 }
 
 type WalkReport struct {
+	FoldersQueued  int            `json:"folders_queued"`
+	FoldersScanned int            `json:"folders_scanned"`
 	FilesSeen      int            `json:"files_seen"`
 	FilesReturned  int            `json:"files_returned"`
 	FilesSkipped   int            `json:"files_skipped"`
@@ -285,103 +290,210 @@ func (a *FSAdapter) ListRecursive(ctx context.Context) ([]FileInfo, error) {
 
 func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) ([]FileInfo, WalkReport, error) {
 	report := WalkReport{Complete: true, SkippedReasons: map[string]int{}}
-	maxFilesUnlimited := opts.MaxFiles < 0
-	maxBytesUnlimited := opts.MaxBytes < 0
 	if opts.MaxFiles == 0 {
 		opts.MaxFiles = 50
 	}
 	if opts.MaxBytes == 0 {
 		opts.MaxBytes = 2 << 30
 	}
+	if opts.MaxFolderWorkers <= 0 {
+		opts.MaxFolderWorkers = 4
+	}
+	if opts.MaxFileWorkers <= 0 {
+		opts.MaxFileWorkers = 8
+	}
+	if opts.FolderQueueDepth <= 0 {
+		opts.FolderQueueDepth = 64
+	}
 	include := extensionSet(opts.IncludeExtensions)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	folderTasks := make(chan string, opts.FolderQueueDepth)
+	fileTasks := make(chan string, max(16, opts.FolderQueueDepth*4))
+	var folderWG sync.WaitGroup
+	var fileWG sync.WaitGroup
+	var mu sync.Mutex
 	var files []FileInfo
-	var stopped error = stopWalkError{}
+	limitReached := false
+	addSkipped := func(reason string) {
+		mu.Lock()
+		report.FilesSkipped++
+		report.SkippedReasons[reason]++
+		mu.Unlock()
+	}
+	markLimit := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if limitReached {
+			return true
+		}
+		limitReached = true
+		report.Complete = false
+		report.SkippedReasons["limit"]++
+		cancel()
+		return true
+	}
+	shouldStop := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return limitReached
+	}
+	enqueueFolder := func(rel string) error {
+		if rel == "" {
+			return nil
+		}
+		if shouldStop() {
+			return nil
+		}
+		folderWG.Add(1)
+		mu.Lock()
+		report.FoldersQueued++
+		mu.Unlock()
+		select {
+		case folderTasks <- rel:
+			return nil
+		case <-ctx.Done():
+			folderWG.Done()
+			if shouldStop() {
+				return nil
+			}
+			return ctx.Err()
+		}
+	}
+	processFile := func(relative string) error {
+		defer fileWG.Done()
+		if shouldStop() {
+			return nil
+		}
+		info, err := a.Stat(relative)
+		if err != nil {
+			addSkipped("stat_error")
+			return nil
+		}
+		mu.Lock()
+		report.FilesSeen++
+		mu.Unlock()
+		if !extensionAllowed(info.Extension, include) {
+			addSkipped("extension")
+			return nil
+		}
+		if excludedByPattern(info.RelativePath, opts.ExcludePatterns) {
+			addSkipped("pattern")
+			return nil
+		}
+		mu.Lock()
+		limitHit := (!maxIntUnlimited(opts.MaxFiles) && report.FilesReturned >= opts.MaxFiles) ||
+			(!maxInt64Unlimited(opts.MaxBytes) && report.BytesSeen+info.SizeBytes > opts.MaxBytes)
+		if limitHit {
+			mu.Unlock()
+			markLimit()
+			return nil
+		}
+		files = append(files, info)
+		report.FilesReturned++
+		report.BytesSeen += info.SizeBytes
+		mu.Unlock()
+		return nil
+	}
+	processFolder := func(rel string) error {
+		defer folderWG.Done()
+		if shouldStop() {
+			return nil
+		}
+		full, err := a.safePath(rel)
+		if err != nil {
+			addSkipped("folder_error")
+			return nil
+		}
+		stat, err := os.Stat(full)
+		if err != nil {
+			addSkipped("folder_error")
+			return nil
+		}
+		if !stat.IsDir() {
+			fileWG.Add(1)
+			select {
+			case fileTasks <- rel:
+			case <-ctx.Done():
+				fileWG.Done()
+				if shouldStop() {
+					return nil
+				}
+				return ctx.Err()
+			}
+			return nil
+		}
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			addSkipped("folder_error")
+			return nil
+		}
+		mu.Lock()
+		report.FoldersScanned++
+		mu.Unlock()
+		for _, entry := range entries {
+			if shouldStop() {
+				return nil
+			}
+			childRel := filepath.ToSlash(filepath.Join(rel, entry.Name()))
+			if entry.Type()&fs.ModeSymlink != 0 {
+				addSkipped("symlink")
+				continue
+			}
+			if entry.IsDir() {
+				if err := enqueueFolder(childRel); err != nil {
+					return err
+				}
+				continue
+			}
+			fileWG.Add(1)
+			select {
+			case fileTasks <- childRel:
+			case <-ctx.Done():
+				fileWG.Done()
+				if shouldStop() {
+					return nil
+				}
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	folderWorkerCount := opts.MaxFolderWorkers
+	if folderWorkerCount < 1 {
+		folderWorkerCount = 1
+	}
+	fileWorkerCount := opts.MaxFileWorkers
+	if fileWorkerCount < 1 {
+		fileWorkerCount = 1
+	}
+	for i := 0; i < folderWorkerCount; i++ {
+		go func() {
+			for rel := range folderTasks {
+				_ = processFolder(rel)
+			}
+		}()
+	}
+	for i := 0; i < fileWorkerCount; i++ {
+		go func() {
+			for rel := range fileTasks {
+				_ = processFile(rel)
+			}
+		}()
+	}
 	for _, prefix := range opts.Prefixes {
 		rel, err := NormalizeRelativePath(prefix)
 		if err != nil {
 			return nil, report, err
 		}
-		full, err := a.safePath(rel)
-		if err != nil {
-			return nil, report, err
-		}
-		stat, err := os.Stat(full)
-		if err != nil {
-			return nil, report, err
-		}
-		walkOne := func(current string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if entry.Type()&fs.ModeSymlink != 0 {
-				report.FilesSkipped++
-				report.SkippedReasons["symlink"]++
-				if entry.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if entry.IsDir() {
-				return nil
-			}
-			relative, err := filepath.Rel(a.root, current)
-			if err != nil {
-				return err
-			}
-			relative = filepath.ToSlash(relative)
-			info, err := a.Stat(relative)
-			if err != nil {
-				report.FilesSkipped++
-				report.SkippedReasons["stat_error"]++
-				return nil
-			}
-			report.FilesSeen++
-			if !extensionAllowed(info.Extension, include) {
-				report.FilesSkipped++
-				report.SkippedReasons["extension"]++
-				return nil
-			}
-			if excludedByPattern(info.RelativePath, opts.ExcludePatterns) {
-				report.FilesSkipped++
-				report.SkippedReasons["pattern"]++
-				return nil
-			}
-			if (!maxFilesUnlimited && report.FilesReturned >= opts.MaxFiles) || (!maxBytesUnlimited && report.BytesSeen+info.SizeBytes > opts.MaxBytes) {
-				report.Complete = false
-				report.SkippedReasons["limit"]++
-				return stopped
-			}
-			files = append(files, info)
-			report.FilesReturned++
-			report.BytesSeen += info.SizeBytes
-			return nil
-		}
-		if !stat.IsDir() {
-			parent := filepath.Dir(full)
-			entry, err := os.ReadDir(parent)
-			if err != nil {
-				return nil, report, err
-			}
-			name := filepath.Base(full)
-			for _, item := range entry {
-				if item.Name() == name {
-					err = walkOne(full, item, nil)
-					break
-				}
-			}
-		} else {
-			err = filepath.WalkDir(full, walkOne)
-		}
-		if errors.Is(err, stopped) {
-			break
-		}
-		if err != nil {
+		if err := enqueueFolder(rel); err != nil {
 			return nil, report, err
 		}
 	}
+	folderWG.Wait()
+	close(folderTasks)
+	close(fileTasks)
+	fileWG.Wait()
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].StorageURL < files[j].StorageURL
 	})
@@ -488,6 +600,10 @@ func (a *FSAdapter) Write(_ string, _ io.Reader) error { return ErrReadOnly }
 func (a *FSAdapter) Delete(_ string) error             { return ErrReadOnly }
 func (a *FSAdapter) Move(_, _ string) error            { return ErrReadOnly }
 func (a *FSAdapter) Mkdir(_ string) error              { return ErrReadOnly }
+
+func maxIntUnlimited(value int) bool { return value < 0 }
+
+func maxInt64Unlimited(value int64) bool { return value < 0 }
 
 func (a *FSAdapter) safePath(relativePath string) (string, error) {
 	rel, err := NormalizeRelativePath(relativePath)

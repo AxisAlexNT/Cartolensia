@@ -115,6 +115,18 @@ AI/GPU status distinguishes native workers from Docker profiles. A configured na
 
 Do not copy third-party source into the repository. Add dependencies only through normal package managers and document why they are needed.
 
+## Production And Air-Gapped Deployments
+
+Production deployments must mount originals at `/originals` and keep that mount read-only.
+
+- `/originals` is the archive root, not a cache location.
+- cache, model, component, export, and runtime paths must live outside `/originals`.
+- `dev_no_auth` is development-only and should not be the production default.
+- offline component imports must be reviewed and extracted only under Cartolensia-managed component directories.
+- release builds should not silently assume Internet access for fonts, map tiles, OCR language packs, ffmpeg, PostgreSQL tools, Python dependencies, or model weights.
+
+The production templates and offline release bundle are designed to make missing optional features explicit instead of silently downloading them.
+
 Current added dependency notes:
 
 - `ol` is bundled through npm for OpenLayers map rendering; local package metadata reports `BSD-2-Clause`.

@@ -7,6 +7,8 @@ Cartolensia can build a Linux x86_64 offline archive intended for machines with 
 - Include the Cartolensia Go backend binary.
 - Include the built Vue WebUI.
 - Include launcher scripts and default offline configs.
+- Include production-ready config templates for `/originals` deployments.
+- Include a production compose file and `.env.production.example`.
 - Include optional local runtime tools:
   - ffmpeg and ffprobe;
   - Tesseract OCR and installed language data;
@@ -21,6 +23,26 @@ Cartolensia can build a Linux x86_64 offline archive intended for machines with 
 - Public map tiles, public geocoding data, and paid/proprietary codecs are not bundled automatically.
 - Model weights are bundled only when explicitly requested and when a license-reviewed model cache is available.
 - Elasticsearch/OpenSearch are not bundled.
+- The archive does not assume Internet access for fonts, icons, map tiles, OCR language packs, ffmpeg, Tesseract, PostgreSQL tools, or Python dependencies.
+
+## Production Target
+
+Production deployments are expected to mount the original archive at `/originals` and keep it read-only.
+
+Default writable locations live outside the archive, for example:
+
+- `/var/lib/cartolensia/cache`
+- `/var/lib/cartolensia/models`
+- `/var/lib/cartolensia/components`
+- `/var/lib/cartolensia/exports`
+
+The production templates shipped with the release bundle are:
+
+- `config/production.yaml`
+- `config/production-container.yaml`
+- `config/offline-airgap.yaml`
+- `.env.production.example`
+- `docker-compose.production.yml`
 
 ## Local Build
 
@@ -82,7 +104,9 @@ Workflow inputs:
 - `ai_flavor`: `none`, `runtime`, `cpu`, or `cuda128`.
 - `include_postgres`: include PostgreSQL binaries.
 - `include_tools`: include ffmpeg/ffprobe/Tesseract.
+- `include_python_runtime`: include the Python sidecar runtime without model weights.
 - `include_models`: copy `.cartolensia/models` if a reviewed cache exists in the runner workspace.
+- `include_offline_maps`: copy a reviewed offline map bundle if an operator-provided cache is present.
 
 Use `runtime` for an OCR-capable sidecar without heavy PyTorch model packages. Use `cpu` for a package that can run approved local AI models on CPU after weights are bundled. Use `cuda128` only after reviewing PyTorch CUDA wheel and NVIDIA component redistribution terms.
 
@@ -92,6 +116,11 @@ Use `runtime` for an OCR-capable sidecar without heavy PyTorch model packages. U
 cartolensia-.../
   bin/cartolensia
   webui/dist/
+  config/production.yaml
+  config/production-container.yaml
+  config/offline-airgap.yaml
+  .env.production.example
+  docker-compose.production.yml
   config/offline-memory.yaml
   config/offline-postgres.yaml
   start-cartolensia.sh
@@ -156,6 +185,7 @@ Audio/document/ASR features are component-managed in offline packages.
 - Audio feature labels are currently heuristic when no reviewed genre model is bundled; do not advertise offline packages as having a production genre classifier unless a reviewed model is included.
 
 The current Linux package flow can include the application, WebUI, OCR/media tools, PostgreSQL runtime, Python runtime, and reviewed model cache. It does not bundle host GPU drivers, public map data, online geocoders, or unreviewed model weights.
+Production containers should use the shipped compose file plus a user-provided `.env.production` or shell environment. The app should remain in `strict_read_only` mode for the archive storage unless a separate tested write path exists.
 
 ## 2026-06-09 Offline Dependency Placement Notes
 

@@ -142,6 +142,29 @@ DB-backed worker stress remains gated:
 CARTOLENSIA_RUN_DB_TESTS=1 CARTOLENSIA_TEST_DATABASE_URL=postgres://... bash scripts/worker-stress-test.sh
 ```
 
+## Production Deployment
+
+For a production archive mounted at `/originals`:
+
+- keep storage mode `strict_read_only`;
+- keep cache/model/component/export directories outside `/originals`;
+- use `config/production.yaml` for a VM or bare-metal host;
+- use `config/production-container.yaml` with `docker-compose.production.yml` for containers;
+- bootstrap auth from `CARTOLENSIA_ADMIN_PASSWORD` or `CARTOLENSIA_ADMIN_PASSWORD_FILE`;
+- do not leave `dev_no_auth` active in production.
+
+For large archives, set `max_files = -1` only for normal indexing jobs. Dry-run and preview reports remain capped and are explicitly preview-only.
+
+Recommended container startup:
+
+```bash
+cp .env.production.example .env.production
+$EDITOR .env.production
+docker compose -f docker-compose.production.yml --env-file .env.production up -d
+```
+
+For million-file archives, keep preview generation optional and scope discovery to the explicit storage and prefix you intend to index.
+
 ## Dry-Run Reports
 
 Scoped discovery dry runs are report-only and require non-empty prefixes. Defaults are conservative: `max_files <= 50`, `max_bytes` defaults to 2 GiB, and missing marking is rejected.

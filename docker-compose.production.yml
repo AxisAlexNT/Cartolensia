@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cartolensia}
+      POSTGRES_USER: ${POSTGRES_USER:-cartolensia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cartolensia} -d ${POSTGRES_DB:-cartolensia}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cartolensia:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cartolensia:production
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CARTOLENSIA_CONFIG: /app/config/production-container.yaml
+      CARTOLENSIA_HTTP_ADDR: ${CARTOLENSIA_HTTP_ADDR:-:8080}
+      CARTOLENSIA_DATABASE_URL: ${CARTOLENSIA_DATABASE_URL:-postgres://cartolensia:CHANGE_ME@postgres:5432/cartolensia?sslmode=disable}
+      CARTOLENSIA_CACHE_DIR: /var/lib/cartolensia/cache
+      CARTOLENSIA_MIGRATIONS_DIR: ${CARTOLENSIA_MIGRATIONS_DIR:-/app/migrations}
+      CARTOLENSIA_AUTH_MODE: ${CARTOLENSIA_AUTH_MODE:-local}
+      CARTOLENSIA_ADMIN_EMAIL: ${CARTOLENSIA_ADMIN_EMAIL:-admin@example.local}
+      CARTOLENSIA_ADMIN_DISPLAY_NAME: ${CARTOLENSIA_ADMIN_DISPLAY_NAME:-Cartolensia Admin}
+      CARTOLENSIA_ADMIN_PASSWORD_ENV: ${CARTOLENSIA_ADMIN_PASSWORD_ENV:-CARTOLENSIA_ADMIN_PASSWORD}
+      CARTOLENSIA_ADMIN_PASSWORD_FILE: ${CARTOLENSIA_ADMIN_PASSWORD_FILE:-}
+      CARTOLENSIA_WORKERS_ENABLED: ${CARTOLENSIA_WORKERS_ENABLED:-true}
+      CARTOLENSIA_WORKER_ID: ${CARTOLENSIA_WORKER_ID:-production}
+    volumes:
+      - type: bind
+        source: /originals
+        target: /originals
+        read_only: true
+      - cartolensia-data:/var/lib/cartolensia
+      - cartolensia-components:/var/lib/cartolensia/components
+      - cartolensia-models:/var/lib/cartolensia/models
+      - cartolensia-exports:/var/lib/cartolensia/exports
+    ports:
+      - "127.0.0.1:18080:8080"
+    user: "0:0"
+
+volumes:
+  cartolensia-data:
+  cartolensia-components:
+  cartolensia-models:
+  cartolensia-exports:
+  postgres-data:

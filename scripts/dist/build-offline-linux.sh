@@ -15,6 +15,8 @@ AI_FLAVOR="${CARTOLENSIA_DIST_AI_FLAVOR:-runtime}" # none, runtime, cpu, cuda128
 INCLUDE_TOOLS="${CARTOLENSIA_DIST_INCLUDE_TOOLS:-1}"
 INCLUDE_POSTGRES="${CARTOLENSIA_DIST_INCLUDE_POSTGRES:-1}"
 INCLUDE_MODELS="${CARTOLENSIA_DIST_INCLUDE_MODELS:-0}"
+INCLUDE_PYTHON_RUNTIME="${CARTOLENSIA_DIST_INCLUDE_PYTHON_RUNTIME:-1}"
+INCLUDE_OFFLINE_MAPS="${CARTOLENSIA_DIST_INCLUDE_OFFLINE_MAPS:-0}"
 INCLUDE_SOURCE="${CARTOLENSIA_DIST_INCLUDE_SOURCE:-1}"
 ALLOW_NONFREE_FFMPEG="${CARTOLENSIA_DIST_ALLOW_NONFREE_FFMPEG:-0}"
 MODELS_DIR="${CARTOLENSIA_MODELS_DIR:-${ROOT_DIR}/.cartolensia/models}"
@@ -51,6 +53,13 @@ copy_file() {
     mkdir -p "$(dirname "${dst}")"
     cp -a "${src}" "${dst}"
   fi
+}
+
+stage_generated_note() {
+  local path="$1"
+  local message="$2"
+  mkdir -p "$(dirname "${path}")"
+  printf '%s\n' "${message}" > "${path}"
 }
 
 copy_tree() {
@@ -242,10 +251,16 @@ Put media to index under \`media/\` or edit \`config/offline-*.yaml\` to point a
 
 - \`bin/cartolensia\`: Go backend binary.
 - \`webui/dist\`: bundled Vue WebUI assets.
+- \`config/production.yaml\`: host / VM production template targeting \`/originals\`.
+- \`config/production-container.yaml\`: container production template.
+- \`config/offline-airgap.yaml\`: offline air-gapped production template.
+- \`.env.production.example\`: shell/env bootstrap template for container deployments.
+- \`docker-compose.production.yml\`: production container orchestration example.
 - \`external/bin\`: optional bundled tools such as ffmpeg, ffprobe, and tesseract.
 - \`external/postgres\`: optional bundled PostgreSQL runtime.
 - \`python\` and \`ai/python-site\`: optional Python runtime and AI sidecar environment.
 - \`.cartolensia/models\`: optional local AI model cache copied into the archive when explicitly enabled.
+- \`offline-maps\`: optional reviewed offline map bundle when included by the operator.
 - \`runtime\`, \`logs\`, and \`.cartolensia/cache\`: generated runtime data. Do not place originals here.
 
 ## Offline AI
@@ -368,6 +383,10 @@ bundle_postgres() {
 }
 
 bundle_python_ai() {
+  if [ "${INCLUDE_PYTHON_RUNTIME}" != "1" ]; then
+    note "Python runtime bundle disabled; skipping AI sidecar environment"
+    return 0
+  fi
   if [ "${AI_FLAVOR}" = "none" ]; then
     note "AI flavor none; skipping Python sidecar environment"
     return 0
@@ -410,11 +429,11 @@ bundle_python_ai() {
         ;;
     esac
   } > "${req_file}"
-  "${PYTHON_BIN}" -m pip install --upgrade pip
+  "${PYTHON_BIN}" -m pip install --break-system-packages --upgrade pip
   if [ "${AI_FLAVOR}" = "cuda128" ]; then
-    "${PYTHON_BIN}" -m pip install --target "${STAGE}/ai/python-site" torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    "${PYTHON_BIN}" -m pip install --break-system-packages --target "${STAGE}/ai/python-site" torch torchvision --index-url https://download.pytorch.org/whl/cu128
   fi
-  "${PYTHON_BIN}" -m pip install --target "${STAGE}/ai/python-site" -r "${req_file}"
+  "${PYTHON_BIN}" -m pip install --break-system-packages --target "${STAGE}/ai/python-site" -r "${req_file}"
   rm -f "${req_file}"
   "${PYTHON_BIN}" -m pip freeze > "${STAGE}/licenses/python-packages.txt" || true
 }
@@ -532,6 +551,8 @@ write_manifests() {
     printf 'include_tools=%s\n' "${INCLUDE_TOOLS}"
     printf 'include_postgres=%s\n' "${INCLUDE_POSTGRES}"
     printf 'include_models=%s\n' "${INCLUDE_MODELS}"
+    printf 'include_python_runtime=%s\n' "${INCLUDE_PYTHON_RUNTIME}"
+    printf 'include_offline_maps=%s\n' "${INCLUDE_OFFLINE_MAPS}"
     printf 'built_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "${STAGE}/licenses/build-manifest.env"
 }
@@ -569,11 +590,25 @@ copy_file docs/AI_MODEL_APPROVALS.md "${STAGE}/docs/AI_MODEL_APPROVALS.md"
 write_launcher_scripts
 write_distribution_docs
 write_manifests
+copy_file config/production.yaml "${STAGE}/config/production.yaml"
+copy_file config/production-container.yaml "${STAGE}/config/production-container.yaml"
+copy_file config/offline-airgap.yaml "${STAGE}/config/offline-airgap.yaml"
+copy_file .env.production.example "${STAGE}/.env.production.example"
+copy_file docker-compose.production.yml "${STAGE}/docker-compose.production.yml"
+copy_tree scripts/release "${STAGE}/scripts/release"
 bundle_external_tools
 validate_ffmpeg_redistribution
 bundle_postgres
 bundle_python_ai
 bundle_models
+if [ "${INCLUDE_OFFLINE_MAPS}" = "1" ]; then
+  if [ -n "${CARTOLENSIA_OFFLINE_MAPS_DIR:-}" ] && [ -d "${CARTOLENSIA_OFFLINE_MAPS_DIR}" ]; then
+    note "copying offline map bundle from ${CARTOLENSIA_OFFLINE_MAPS_DIR}"
+    copy_tree "${CARTOLENSIA_OFFLINE_MAPS_DIR}" "${STAGE}/offline-maps"
+  else
+    stage_generated_note "${STAGE}/offline-maps/README.txt" "Offline map tiles were not bundled with this archive. Provide PMTiles/MBTiles or a self-hosted tile bundle after extraction, or place the files under offline-maps/ and point Settings -> Map/Tiles at that source."
+  fi
+fi
 write_components_manifest
 write_source_snapshot
 

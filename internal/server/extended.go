@@ -616,7 +616,7 @@ func (s *Server) handleDiscoveryDryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.deps.SyncJobs {
-		runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
+		runner := s.discoveryRunner()
 		if err := runner.DryRun(r.Context(), &createdJob); err != nil && !errors.Is(err, jobs.ErrCanceled) {
 			writeError(w, http.StatusInternalServerError, err)
 			return

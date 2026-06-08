@@ -1,0 +1,43 @@
+http:
+  addr: "127.0.0.1:18080"
+
+database:
+  url: "postgres://cartolensia:CHANGE_ME@127.0.0.1:5432/cartolensia?sslmode=disable"
+
+cache:
+  dir: "/var/lib/cartolensia/cache"
+
+storages:
+  - name: originals
+    kind: fs
+    root: "/originals"
+    mode: strict_read_only
+
+plugins:
+  enabled:
+    - albums
+    - mapview
+    - gpstracks
+    - transcoding
+    - ai-base
+    - ai-classification
+
+workers:
+  enabled: true
+  poll_interval: "1s"
+  lease_duration: "30s"
+  heartbeat_interval: "10s"
+  max_concurrency: 4
+
+auth:
+  mode: local
+  admin_email: admin@example.local
+  admin_display_name: Cartolensia Admin
+  admin_password_env: CARTOLENSIA_ADMIN_PASSWORD
+  admin_password_file: /var/lib/cartolensia/secrets/admin-password.txt
+  rotate_bootstrap_password: false
+  session_ttl: "24h"
+  api_token_ttl: "2160h"
+  cookie_name: cartolensia_session
+  cookie_secure: false
+  csrf_header: X-CSRF-Token

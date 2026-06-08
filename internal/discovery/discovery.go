@@ -19,10 +19,13 @@ import (
 )
 
 type Runner struct {
-	Registry      *storage.Registry
-	Store         catalog.Store
-	WorkerID      string
-	LeaseDuration time.Duration
+	Registry         *storage.Registry
+	Store            catalog.Store
+	WorkerID         string
+	LeaseDuration    time.Duration
+	MaxFolderWorkers int
+	MaxFileWorkers   int
+	FolderQueueDepth int
 }
 
 type ScanPayload struct {
@@ -255,6 +258,9 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 				Prefixes:          prefixes,
 				MaxFiles:          payload.MaxFiles,
 				MaxBytes:          payload.MaxBytes,
+				MaxFolderWorkers:  r.MaxFolderWorkers,
+				MaxFileWorkers:    r.MaxFileWorkers,
+				FolderQueueDepth:  r.FolderQueueDepth,
 				IncludeExtensions: payload.IncludeExtensions,
 				ExcludePatterns:   payload.ExcludePatterns,
 			})

@@ -36,8 +36,18 @@ on:
         required: true
         type: boolean
         default: true
+      include_python_runtime:
+        description: "Bundle the Python AI runtime environment"
+        required: true
+        type: boolean
+        default: true
       include_models:
         description: "Bundle .cartolensia/models if a reviewed cache is present"
+        required: true
+        type: boolean
+        default: false
+      include_offline_maps:
+        description: "Bundle reviewed offline map tiles when an operator-provided cache is present"
         required: true
         type: boolean
         default: false
@@ -116,15 +126,20 @@ jobs:
 
       - name: Build offline archive
         env:
-          CARTOLENSIA_DIST_VERSION: ${{ inputs.tag_name }}
-          CARTOLENSIA_DIST_AI_FLAVOR: ${{ inputs.ai_flavor }}
-          CARTOLENSIA_DIST_INCLUDE_POSTGRES: ${{ inputs.include_postgres && '1' || '0' }}
-          CARTOLENSIA_DIST_INCLUDE_TOOLS: ${{ inputs.include_tools && '1' || '0' }}
-          CARTOLENSIA_DIST_INCLUDE_MODELS: ${{ inputs.include_models && '1' || '0' }}
+          CARTOLENSIA_RELEASE_VERSION: ${{ inputs.tag_name }}
+          CARTOLENSIA_RELEASE_AI_FLAVOR: ${{ inputs.ai_flavor }}
+          CARTOLENSIA_RELEASE_INCLUDE_POSTGRES: ${{ inputs.include_postgres && '1' || '0' }}
+          CARTOLENSIA_RELEASE_INCLUDE_TOOLS: ${{ inputs.include_tools && '1' || '0' }}
+          CARTOLENSIA_RELEASE_INCLUDE_PYTHON_RUNTIME: ${{ inputs.include_python_runtime && '1' || '0' }}
+          CARTOLENSIA_RELEASE_INCLUDE_MODELS: ${{ inputs.include_models && '1' || '0' }}
+          CARTOLENSIA_RELEASE_INCLUDE_OFFLINE_MAPS: ${{ inputs.include_offline_maps && '1' || '0' }}
         run: |
           set -euxo pipefail
           export CARTOLENSIA_BUNDLED_PYTHON_ROOT="${pythonLocation}"
-          bash scripts/dist/build-offline-linux.sh
+          bash scripts/release/build-linux.sh
+
+      - name: Validate release license bundle
+        run: bash scripts/release/check-licenses.sh
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

@@ -899,7 +899,7 @@ func (s *Server) handleDiscoveryStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.deps.SyncJobs {
-		runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
+		runner := s.discoveryRunner()
 		if err := runner.Scan(r.Context(), &job); err != nil && !errors.Is(err, jobs.ErrCanceled) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -1001,6 +1001,22 @@ func (s *Server) handleIndexingStart(w http.ResponseWriter, r *http.Request) {
 		},
 		"note": "Discovery is queued first. The WebUI runs following stages sequentially after the current scope is known.",
 	})
+}
+
+func (s *Server) discoveryRunner() discovery.Runner {
+	leaseDuration, err := time.ParseDuration(s.deps.Config.Workers.LeaseDuration)
+	if err != nil || leaseDuration <= 0 {
+		leaseDuration = 30 * time.Second
+	}
+	return discovery.Runner{
+		Registry:         s.deps.Registry,
+		Store:            s.deps.Store,
+		WorkerID:         s.deps.Config.Workers.WorkerID,
+		LeaseDuration:    leaseDuration,
+		MaxFolderWorkers: runtimeIntSetting("discovery.max_folder_workers", 4),
+		MaxFileWorkers:   runtimeIntSetting("discovery.max_file_workers", 8),
+		FolderQueueDepth: runtimeIntSetting("discovery.folder_queue_depth", 64),
+	}
 }
 
 func (s *Server) handleIndexingLatest(w http.ResponseWriter, r *http.Request) {
@@ -1107,7 +1123,7 @@ func (s *Server) handleHashStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.deps.SyncJobs {
-		runner := discovery.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
+		runner := s.discoveryRunner()
 		if err := runner.HashUnhashed(r.Context(), &job); err != nil && !errors.Is(err, jobs.ErrCanceled) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -4565,29 +4581,40 @@ func (s *Server) handleVideoTrackPlayerSessionCreate(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, errors.New("video-track player requires a video asset"))
 		return
 	}
-	if len(req.TrackIDs) == 0 {
-		writeError(w, http.StatusBadRequest, errors.New("select at least one GPS/KML track"))
-		return
-	}
 	mode := req.TimestampMode
 	if mode != "video_end_time" {
 		mode = "video_start_time"
 	}
+	trackIDs := compactStrings(req.TrackIDs)
+	var autoSelectionNote string
+	if len(trackIDs) == 0 && runtimeBoolSetting("video_track_player.auto_select_overlapping_tracks", true) {
+		if selected, note, ok := s.autoSelectVideoTrackIDs(r.Context(), asset); ok {
+			trackIDs = selected
+			autoSelectionNote = note
+		}
+	}
+	if len(trackIDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("select at least one GPS/KML track"))
+		return
+	}
 	session := &videoTrackPlayerSession{
 		ID:            id.NewUUID(),
 		VideoAssetID:  asset.ID,
-		TrackIDs:      req.TrackIDs,
+		TrackIDs:      trackIDs,
 		TimestampMode: mode,
 		OffsetSeconds: req.OffsetSeconds,
 		CreatedAt:     time.Now().UTC(),
 		Metadata:      map[string]any{"video_name": asset.DisplayName},
 	}
-	if candidate, ok := s.bestVideoTimestampCandidate(r.Context(), asset, req.TrackIDs); ok {
+	if candidate, ok := s.bestVideoTimestampCandidate(r.Context(), asset, trackIDs); ok {
 		session.VideoStartAt = &candidate.Time
 		session.TimeSource = candidate.Source
 		session.Metadata["video_time_candidate"] = candidate
 	} else {
 		session.Warnings = append(session.Warnings, "Video has no usable timestamp candidate; map synchronization requires manual offset/time settings.")
+	}
+	if autoSelectionNote != "" {
+		session.Warnings = append([]string{autoSelectionNote}, session.Warnings...)
 	}
 	s.sessionMu.Lock()
 	s.videoTrackSessions[session.ID] = session
@@ -4694,6 +4721,35 @@ func (s *Server) bestVideoTimestampCandidate(ctx context.Context, asset catalog.
 		}
 	}
 	return candidates[0], true
+}
+
+func (s *Server) autoSelectVideoTrackIDs(ctx context.Context, asset catalog.Asset) ([]string, string, bool) {
+	candidates, err := s.deps.Store.ListTracks(ctx)
+	if err != nil || len(candidates) == 0 {
+		return nil, "", false
+	}
+	best := catalog.AssetTimestampCandidates(asset, time.Local)
+	if len(best) == 0 {
+		return nil, "", false
+	}
+	for _, candidate := range best {
+		var selected []string
+		for _, track := range candidates {
+			if track.StartTime == nil || track.EndTime == nil {
+				continue
+			}
+			start := track.StartTime.Add(-30 * time.Minute)
+			end := track.EndTime.Add(30 * time.Minute)
+			if candidate.Time.Before(start) || candidate.Time.After(end) {
+				continue
+			}
+			selected = append(selected, track.TrackAssetID)
+		}
+		if len(selected) > 0 {
+			return uniqueStrings(selected), fmt.Sprintf("Auto-selected %d overlapping track(s) from timestamp candidates.", len(selected)), true
+		}
+	}
+	return nil, "", false
 }
 
 func mediaDuration(metadata map[string]any) time.Duration {

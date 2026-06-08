@@ -107,6 +107,9 @@ func (r Runner) DryRun(ctx context.Context, job *jobs.Job) error {
 		Prefixes:          payload.Prefixes,
 		MaxFiles:          payload.MaxFiles,
 		MaxBytes:          payload.MaxBytes,
+		MaxFolderWorkers:  r.MaxFolderWorkers,
+		MaxFileWorkers:    r.MaxFileWorkers,
+		FolderQueueDepth:  r.FolderQueueDepth,
 		IncludeExtensions: payload.IncludeExtensions,
 		ExcludePatterns:   payload.ExcludePatterns,
 	})

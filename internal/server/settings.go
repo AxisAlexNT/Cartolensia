@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,22 +21,30 @@ var runtimeSettings = struct {
 	sync.RWMutex
 	values map[string]any
 }{values: map[string]any{
-	"indexing.default_max_files":    -1,
-	"indexing.supported_extensions": strings.Join(storage.SupportedExtensions(), ","),
-	"indexing.hash_after_index":     true,
-	"indexing.metadata_after_index": true,
-	"indexing.previews_after_index": false,
-	"gps.track_arrow_interval_m":    500,
-	"map.cluster_radius_px":         64,
-	"map.tiles_enabled":             true,
-	"preview.cache_max_bytes":       int64(10 * 1024 * 1024 * 1024),
-	"gallery.default_view":          "tile",
-	"search.default_limit":          100,
-	"search.geocoder_mode":          "cache_only",
-	"search.online_geocoding":       false,
-	"search.geocoder_provider":      "local_place_cache",
-	"search.geocoder_provider_url":  "https://nominatim.openstreetmap.org",
-	"transcode.session_ttl":         "2h",
+	"indexing.default_max_files":                        -1,
+	"indexing.supported_extensions":                     strings.Join(storage.SupportedExtensions(), ","),
+	"indexing.hash_after_index":                         true,
+	"indexing.metadata_after_index":                     true,
+	"indexing.previews_after_index":                     false,
+	"discovery.max_folder_workers":                      4,
+	"discovery.max_file_workers":                        8,
+	"discovery.folder_queue_depth":                      64,
+	"gps.track_arrow_interval_m":                        500,
+	"video_track_player.sync_mode":                      "interval",
+	"video_track_player.interval_seconds":               3,
+	"video_track_player.marker_throttle_ms":             250,
+	"video_track_player.auto_select_overlapping_tracks": true,
+	"video_track_player.show_debug_overlay":             false,
+	"map.cluster_radius_px":                             64,
+	"map.tiles_enabled":                                 true,
+	"preview.cache_max_bytes":                           int64(10 * 1024 * 1024 * 1024),
+	"gallery.default_view":                              "tile",
+	"search.default_limit":                              100,
+	"search.geocoder_mode":                              "cache_only",
+	"search.online_geocoding":                           false,
+	"search.geocoder_provider":                          "local_place_cache",
+	"search.geocoder_provider_url":                      "https://nominatim.openstreetmap.org",
+	"transcode.session_ttl":                             "2h",
 }}
 
 var pluginSettings = struct {
@@ -222,10 +231,12 @@ func (s *Server) settingsPayload() map[string]any {
 			{"id": "server", "label": "Server/HTTP/HTTPS", "runtime": false},
 			{"id": "storage", "label": "Storage", "runtime": false},
 			{"id": "indexing", "label": "Indexing/Discovery", "runtime": true},
+			{"id": "discovery", "label": "Discovery Workers", "runtime": true},
 			{"id": "metadata", "label": "Metadata/EXIF", "runtime": true},
 			{"id": "preview", "label": "Preview Cache", "runtime": true},
 			{"id": "map", "label": "Map/Tiles", "runtime": true},
 			{"id": "gps", "label": "GPS/KML Tracks", "runtime": true},
+			{"id": "video-track-player", "label": "Video Track Player", "runtime": true},
 			{"id": "search", "label": "Search/Places", "runtime": true},
 			{"id": "transcoding", "label": "Transcoding", "runtime": true},
 			{"id": "ai", "label": "AI/Vector", "runtime": false},
@@ -321,6 +332,26 @@ func runtimeSettingsSnapshot() map[string]any {
 	return cloneMap(runtimeSettings.values)
 }
 
+func runtimeIntSetting(key string, fallback int) int {
+	runtimeSettings.RLock()
+	defer runtimeSettings.RUnlock()
+	if value, ok := runtimeSettings.values[key]; ok {
+		switch typed := value.(type) {
+		case int:
+			return typed
+		case int64:
+			return int(typed)
+		case float64:
+			return int(typed)
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+				return parsed
+			}
+		}
+	}
+	return fallback
+}
+
 func cloneMap(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
 	for key, value := range in {
@@ -357,7 +388,15 @@ func runtimeSettingsSchema() []map[string]any {
 		{"tab": "indexing", "key": "indexing.hash_after_index", "type": "boolean", "label": "Hash after indexing"},
 		{"tab": "indexing", "key": "indexing.metadata_after_index", "type": "boolean", "label": "Extract metadata after indexing"},
 		{"tab": "indexing", "key": "indexing.previews_after_index", "type": "boolean", "label": "Generate previews after indexing"},
+		{"tab": "discovery", "key": "discovery.max_folder_workers", "type": "number", "label": "Folder workers", "help": "Bounded folder-worker pool for million-file discovery runs."},
+		{"tab": "discovery", "key": "discovery.max_file_workers", "type": "number", "label": "File workers", "help": "Bounded file-processing worker pool."},
+		{"tab": "discovery", "key": "discovery.folder_queue_depth", "type": "number", "label": "Folder queue depth", "help": "Upper bound for queued folder tasks in discovery."},
 		{"tab": "gps", "key": "gps.track_arrow_interval_m", "type": "number", "label": "Track direction arrow interval (m)", "help": "Direction arrows are drawn on GPS track visualizations at this interval. Set 0 to hide arrows."},
+		{"tab": "video-track-player", "key": "video_track_player.sync_mode", "type": "text", "label": "Sync mode", "help": "interval or smooth marker updates."},
+		{"tab": "video-track-player", "key": "video_track_player.interval_seconds", "type": "number", "label": "Sync interval seconds", "help": "Default 3 seconds for interval mode."},
+		{"tab": "video-track-player", "key": "video_track_player.marker_throttle_ms", "type": "number", "label": "Marker throttle ms", "help": "Limit marker refresh frequency to avoid UI freezes."},
+		{"tab": "video-track-player", "key": "video_track_player.auto_select_overlapping_tracks", "type": "boolean", "label": "Auto-select overlapping tracks", "help": "Use timestamp candidates to suggest tracks automatically."},
+		{"tab": "video-track-player", "key": "video_track_player.show_debug_overlay", "type": "boolean", "label": "Show debug overlay", "help": "Keep JSON debug hidden by default."},
 		{"tab": "preview", "key": "preview.cache_max_bytes", "type": "number", "label": "Preview cache max bytes"},
 		{"tab": "map", "key": "map.cluster_radius_px", "type": "number", "label": "Cluster radius px"},
 		{"tab": "map", "key": "map.tiles_enabled", "type": "boolean", "label": "OSM tiles enabled"},

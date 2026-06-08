@@ -198,6 +198,20 @@ td {
   min-width: 0;
 }
 
+.discovery-note {
+  margin: 0 18px 8px;
+}
+
+.discovery-grid {
+  align-items: stretch;
+  padding-top: 12px;
+}
+
+.discovery-grid .settings-form {
+  display: grid;
+  gap: 10px;
+}
+
 .control-grid label,
 .inline-label {
   color: #57606a;
@@ -221,6 +235,21 @@ td {
   color: #57606a;
   font-size: 13px;
   margin: 0;
+}
+
+.form-check.form-switch {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-height: 34px;
+  width: 100%;
+}
+
+.form-check.form-switch .form-check-input {
+  flex: 0 0 auto;
+  height: 1.5rem;
+  margin-left: 0;
+  width: 3.25rem;
 }
 
 .checkbox-label {
@@ -1545,9 +1574,10 @@ td {
 
 .geo-align-sidebar .form-switch .form-check-input,
 .layer-menu .form-switch .form-check-input {
-  height: 1.25rem;
+  height: 1.5rem;
   margin-left: 0;
-  width: 2.5rem;
+  min-width: 3.25rem;
+  width: 3.25rem;
 }
 
 .geo-align-sidebar .form-check span,
@@ -1723,6 +1753,11 @@ td {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+.video-track-page .settings-grid {
+  align-items: start;
+  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
+}
+
 .video-track-video,
 .video-track-map {
   background: #0d1117;
@@ -1735,6 +1770,17 @@ td {
 
 .video-track-video {
   object-fit: contain;
+}
+
+.video-track-map-shell {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  position: relative;
+}
+
+.video-track-map {
+  min-height: 480px;
 }
 
 .video-track-map .alignment-map-preview {

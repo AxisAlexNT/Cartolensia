@@ -3003,3 +3003,60 @@ Added tests cover:
 - No new discovery or missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-09 Production Release Preparation
+
+Completed:
+
+- Production config templates added for host, container, and air-gapped deployments:
+  - `config/production.yaml`
+  - `config/production-container.yaml`
+  - `config/offline-airgap.yaml`
+  - `.env.production.example`
+  - `docker-compose.production.yml`
+- Production/offline docs added:
+  - `docs/INSTALLATION.md`
+  - `docs/AIRGAPPED_INSTALL.md`
+  - `docs/PRODUCTION_DEPLOYMENT.md`
+  - `docs/OFFLINE_COMPONENTS.md`
+  - `docs/BUILDING.md`
+  - `docs/USER_MANUAL.md`
+  - `docs/RELEASE_CHECKLIST.md`
+- Release scripts added:
+  - `scripts/release/build-linux.sh`
+  - `scripts/release/check-licenses.sh`
+  - `scripts/release/smoke-release.sh`
+  - `scripts/release/smoke-production-compose.sh`
+- GitHub Actions updated:
+  - new `.github/workflows/ci.yml`
+  - extended `.github/workflows/offline-release.yml`
+- Offline packager now stages production configs, compose files, release helpers, and optional offline map bundles.
+
+Validated:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `docker compose -f docker-compose.production.yml config`
+- `bash scripts/release/check-licenses.sh`
+- `bash scripts/release/smoke-release.sh`
+- `bash scripts/release/smoke-production-compose.sh`
+- `bash scripts/test-db.sh`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+
+Artifact produced:
+
+- `dist/cartolensia-af917c5-dirty-linux-x86_64-offline.7z`
+
+Known limitation:
+
+- The minimal release mode was validated locally. AI-runtime packaging still depends on a networked or preprovisioned Python wheel source for the optional Python sidecar dependencies; the release scripts support that path, but it was not exercised in this environment.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no DB reset
+- no missing marking
+- no commit
+- no push

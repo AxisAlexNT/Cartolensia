@@ -291,10 +291,12 @@ const mapElement = ref<HTMLDivElement | null>(null);
 const mapPopupElement = ref<HTMLDivElement | null>(null);
 const galleryTrackElement = ref<HTMLDivElement | null>(null);
 const selectedTrackMapElement = ref<HTMLDivElement | null>(null);
+const videoTrackMapElement = ref<HTMLDivElement | null>(null);
 const geoAlignMapElement = ref<HTMLDivElement | null>(null);
 const assetVideoElement = ref<HTMLVideoElement | null>(null);
 const assetAudioElement = ref<HTMLAudioElement | null>(null);
 const galleryVideoElement = ref<HTMLVideoElement | null>(null);
+const galleryAudioElement = ref<HTMLAudioElement | null>(null);
 const showMapDebug = ref(localStorage.getItem("cartolensia.map.showDebug") === "true");
 const showMapLayerMenu = ref(false);
 const showSelectedTrackLayerMenu = ref(false);
@@ -342,6 +344,17 @@ const mapTrackSource = new VectorSource();
 let mapTileLayer: TileLayer<XYZ> | null = null;
 let mapAssetLayer: VectorLayer<VectorSource> | null = null;
 let mapTrackLayer: VectorLayer<VectorSource> | null = null;
+let videoTrackMap: OLMap | null = null;
+let videoTrackTileLayer: TileLayer<XYZ> | null = null;
+let videoTrackTrackLayer: VectorLayer<VectorSource> | null = null;
+let videoTrackMarkerLayer: VectorLayer<VectorSource> | null = null;
+const videoTrackTrackSource = new VectorSource();
+const videoTrackMarkerSource = new VectorSource();
+let videoTrackMarkerFeature: Feature<Point> | null = null;
+let videoTrackRafId = 0;
+let videoTrackTicker: number | null = null;
+let videoTrackMarkerThrottleAt = 0;
+let videoTrackPositionPending = false;
 const transcodingCapabilities = ref<TranscodingCapabilities | null>(null);
 const transcodePresets = ref<TranscodingPreset[]>([]);
 const transcodeMetricsPayload = ref<Record<string, unknown> | null>(null);
@@ -400,11 +413,13 @@ const videoTrackIds = ref("");
 const videoTrackOffsetSeconds = ref(0);
 const videoTrackTimestampMode = ref("video_start_time");
 const videoTrackPosition = ref<Record<string, unknown> | null>(null);
+const videoTrackSyncTimeMs = ref(0);
 const videoTrackVideoSearch = ref("");
 const videoTrackTrackSearch = ref("");
 const videoTrackVideoOptions = ref<Asset[]>([]);
 const videoTrackTrackOptions = ref<TrackSummary[]>([]);
 const videoTrackSelectedTracks = ref<TrackSummary[]>([]);
+const assetDetailSeekMs = ref<number | null>(null);
 const searchPageTotal = ref(0);
 const filePickerOpen = ref(false);
 const filePicker = ref<FileBrowseResponse | null>(null);
@@ -559,12 +574,29 @@ function groupLabel(group: string) {
     .join(" ");
 }
 
-function openAssetLink(event: MouseEvent, id: string) {
+function captureCurrentPlaybackTimeMs(): number | null {
+  const currentGallery = galleryCurrent.value;
+  const galleryMedia =
+    currentGallery?.media_kind === "video"
+      ? galleryVideoElement.value
+      : currentGallery?.media_kind === "audio"
+        ? galleryAudioElement.value
+        : null;
+  const media = galleryMedia ?? assetVideoElement.value ?? assetAudioElement.value;
+  if (!media || !Number.isFinite(media.currentTime)) return null;
+  return Math.max(0, Math.round(media.currentTime * 1000));
+}
+
+function openAssetLink(event: MouseEvent, id: string, options: { closeOverlay?: boolean; preservePlayback?: boolean } = {}) {
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
   }
   event.preventDefault();
-  void openAsset(id);
+  const seekMs = options.preservePlayback ? captureCurrentPlaybackTimeMs() : null;
+  if (options.closeOverlay) {
+    closeGallery();
+  }
+  void openAsset(id, { seekMs });
 }
 
 window.addEventListener("popstate", () => {
@@ -938,6 +970,24 @@ function numericRuntimeSetting(key: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function runtimeTextSetting(key: string, fallback: string): string {
+  const value = settings.value?.runtime_settings?.[key];
+  if (value === undefined || value === null) return fallback;
+  const text = String(value).trim();
+  return text || fallback;
+}
+
+function boolRuntimeSetting(key: string, fallback: boolean): boolean {
+  const value = settings.value?.runtime_settings?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const lowered = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(lowered)) return true;
+    if (["0", "false", "no", "off"].includes(lowered)) return false;
+  }
+  return fallback;
+}
+
 function trackArrowIntervalM(): number {
   return Math.max(0, numericRuntimeSetting("gps.track_arrow_interval_m", 500));
 }
@@ -1195,6 +1245,185 @@ async function loadSelectedTrackPointInfo(coordinate: number[]) {
     selectedTrackPointMessage.value = "";
   } catch (err) {
     selectedTrackPointMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function destroyVideoTrackMap() {
+  stopVideoTrackPlaybackLoop();
+  videoTrackMarkerFeature = null;
+  videoTrackMarkerSource.clear();
+  videoTrackTrackSource.clear();
+  if (videoTrackMap) {
+    videoTrackMap.setTarget(undefined);
+    videoTrackMap.dispose();
+  }
+  videoTrackMap = null;
+  videoTrackTileLayer = null;
+  videoTrackTrackLayer = null;
+  videoTrackMarkerLayer = null;
+}
+
+function videoTrackMarkerStyle(feature: FeatureLike) {
+  const label = String(feature.get("name") ?? feature.get("track_name") ?? "");
+  return new Style({
+    image: new CircleStyle({
+      radius: 8,
+      fill: new Fill({ color: "#0969da" }),
+      stroke: new Stroke({ color: "#ffffff", width: 2 })
+    }),
+    text: label
+      ? new Text({
+          text: label.slice(0, 10),
+          offsetY: -18,
+          fill: new Fill({ color: "#ffffff" }),
+          stroke: new Stroke({ color: "#0d1117", width: 3 }),
+          font: "700 11px system-ui, sans-serif"
+        })
+      : undefined
+  });
+}
+
+function updateVideoTrackMarkerLayer() {
+  const positions = asArray(videoTrackPosition.value?.positions as unknown[]);
+  videoTrackMarkerSource.clear();
+  videoTrackMarkerFeature = null;
+  if (positions.length === 0) return;
+  for (const position of positions) {
+    const lat = Number((position as Record<string, unknown>).lat);
+    const lon = Number((position as Record<string, unknown>).lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const feature = new Feature({
+      geometry: new Point(fromLonLat([lon, lat])),
+      kind: "video-track-marker",
+      name: String((position as Record<string, unknown>).name ?? (position as Record<string, unknown>).track_id ?? "track")
+    });
+    feature.set("track_id", String((position as Record<string, unknown>).track_id ?? ""));
+    feature.set("time", String((position as Record<string, unknown>).time ?? ""));
+    videoTrackMarkerSource.addFeature(feature);
+    if (!videoTrackMarkerFeature) {
+      videoTrackMarkerFeature = feature as Feature<Point>;
+    }
+  }
+  videoTrackMap?.updateSize();
+}
+
+function fitVideoTrackMap() {
+  fitTrackMap(videoTrackMap, videoTrackTrackSource, 16);
+}
+
+async function renderVideoTrackMap() {
+  const session = videoTrackSession.value;
+  if (!session || !videoTrackMapElement.value) {
+    destroyVideoTrackMap();
+    return;
+  }
+  if (!videoTrackMap) {
+    videoTrackTileLayer = createLocalOSMLayer(() => {
+      tileStatus.value = "Video track tiles are unavailable; the vector track remains visible.";
+    });
+    videoTrackTileLayer.setVisible(true);
+    videoTrackTrackLayer = new VectorLayer({
+      source: videoTrackTrackSource,
+      style: (feature) => {
+        const kind = String(feature.get("kind") ?? feature.get("asset_type") ?? "");
+        return kind === "track" ? greenTrackStyle(feature as Feature) : undefined;
+      }
+    });
+    videoTrackTrackLayer.setZIndex(5);
+    videoTrackMarkerLayer = new VectorLayer({
+      source: videoTrackMarkerSource,
+      style: videoTrackMarkerStyle
+    });
+    videoTrackMarkerLayer.setZIndex(15);
+    videoTrackMap = new OLMap({
+      target: videoTrackMapElement.value,
+      layers: [videoTrackTileLayer, videoTrackTrackLayer, videoTrackMarkerLayer],
+      view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
+    });
+  } else {
+    videoTrackMap.setTarget(videoTrackMapElement.value);
+  }
+  videoTrackTrackSource.clear();
+  const trackSelection = videoTrackSelectedTracks.value.length
+    ? videoTrackSelectedTracks.value
+    : tracks.value.filter((track) => session.track_ids.includes(track.track_asset_id));
+  for (const track of trackSelection) {
+    const preview = await api.trackPreview(track.track_asset_id, 2000).catch(() => null);
+    if (!preview || videoTrackSession.value?.id !== session.id) continue;
+    const features = new GeoJSON().readFeatures(preview, { featureProjection: "EPSG:3857" });
+    for (const feature of features) {
+      feature.set("track_id", track.track_asset_id);
+      feature.set("name", track.name);
+      videoTrackTrackSource.addFeature(feature);
+    }
+  }
+  updateVideoTrackMarkerLayer();
+  if (videoTrackTrackSource.getFeatures().length > 0) {
+    fitVideoTrackMap();
+  }
+  videoTrackMap?.updateSize();
+}
+
+function stopVideoTrackPlaybackLoop() {
+  if (videoTrackRafId) {
+    window.cancelAnimationFrame(videoTrackRafId);
+    videoTrackRafId = 0;
+  }
+  if (videoTrackTicker !== null) {
+    window.clearInterval(videoTrackTicker);
+    videoTrackTicker = null;
+  }
+}
+
+function startVideoTrackPlaybackLoop(video: HTMLVideoElement) {
+  const mode = runtimeTextSetting("video_track_player.sync_mode", "interval");
+  stopVideoTrackPlaybackLoop();
+  const throttleMs = Math.max(0, numericRuntimeSetting("video_track_player.marker_throttle_ms", 250));
+  const tick = () => {
+    if (!videoTrackSession.value || video.paused || video.ended) {
+      stopVideoTrackPlaybackLoop();
+      return;
+    }
+    const now = performance.now();
+    if (now - videoTrackMarkerThrottleAt < throttleMs || videoTrackPositionPending) {
+      videoTrackRafId = window.requestAnimationFrame(tick);
+      return;
+    }
+    videoTrackMarkerThrottleAt = now;
+    void updateVideoTrackPosition(video.currentTime * 1000);
+    videoTrackRafId = window.requestAnimationFrame(tick);
+  };
+  if (mode === "smooth") {
+    videoTrackRafId = window.requestAnimationFrame(tick);
+    return;
+  }
+  const intervalMs = Math.max(500, numericRuntimeSetting("video_track_player.interval_seconds", 3) * 1000);
+  videoTrackTicker = window.setInterval(() => {
+    if (!videoTrackSession.value || video.paused || video.ended) return;
+    const now = performance.now();
+    if (now - videoTrackMarkerThrottleAt < throttleMs || videoTrackPositionPending) return;
+    videoTrackMarkerThrottleAt = now;
+    void updateVideoTrackPosition(video.currentTime * 1000);
+  }, intervalMs);
+}
+
+function handleVideoTrackPlaybackEvent(event: Event) {
+  const video = event.currentTarget as HTMLVideoElement | null;
+  if (!video || !videoTrackSession.value) return;
+  if (event.type === "pause" || event.type === "ended") {
+    stopVideoTrackPlaybackLoop();
+    return;
+  }
+  if (event.type === "play") {
+    startVideoTrackPlaybackLoop(video);
+    return;
+  }
+  if (event.type === "loadedmetadata" || event.type === "seeked" || event.type === "timeupdate") {
+    const now = performance.now();
+    const throttleMs = Math.max(0, numericRuntimeSetting("video_track_player.marker_throttle_ms", 250));
+    if (videoTrackPositionPending || now - videoTrackMarkerThrottleAt < throttleMs) return;
+    videoTrackMarkerThrottleAt = now;
+    void updateVideoTrackPosition(video.currentTime * 1000);
   }
 }
 
@@ -1913,6 +2142,49 @@ function seekAssetMedia(timeMs: number) {
   media.play().catch(() => undefined);
 }
 
+function seekMediaElement(media: HTMLMediaElement | null, timeMs: number) {
+  if (!media) return false;
+  const seconds = Math.max(0, timeMs / 1000);
+  const applySeek = () => {
+    try {
+      media.currentTime = seconds;
+      media.play().catch(() => undefined);
+    } catch {
+      // Ignore browsers that briefly reject seeks before metadata is loaded.
+    }
+  };
+  if (media.readyState >= 1) {
+    applySeek();
+    return true;
+  }
+  media.addEventListener("loadedmetadata", applySeek, { once: true });
+  return false;
+}
+
+async function applyAssetDetailSeek() {
+  if (assetDetailSeekMs.value === null) return;
+  const seekMs = assetDetailSeekMs.value;
+  const asset = assetDetail.value?.asset;
+  if (!asset) return;
+  const media =
+    asset.media_kind === "video"
+      ? assetVideoElement.value
+      : asset.media_kind === "audio"
+        ? assetAudioElement.value
+        : null;
+  if (seekMediaElement(media, seekMs)) {
+    assetDetailSeekMs.value = null;
+    return;
+  }
+  if (asset.media_kind === "video" || asset.media_kind === "audio") {
+    window.setTimeout(() => {
+      if (assetDetailSeekMs.value === seekMs) {
+        void applyAssetDetailSeek();
+      }
+    }, 120);
+  }
+}
+
 function terminalJobStatus(status: string): boolean {
   return ["succeeded", "failed", "canceled", "cancelled"].includes(status);
 }
@@ -2032,8 +2304,10 @@ async function refresh() {
     backend.value = backendStatus;
     tracks.value = asArray(trackRows);
     videoTrackTrackOptions.value = tracks.value;
-    if (videoTrackSelectedTracks.value.length === 0) {
-      videoTrackSelectedTracks.value = tracks.value.slice(0, 1);
+    if (videoTrackSelectedTracks.value.length === 0 && videoTrackSession.value?.track_ids?.length) {
+      videoTrackSelectedTracks.value = tracks.value.filter((track) =>
+        videoTrackSession.value?.track_ids.includes(track.track_asset_id)
+      );
       videoTrackIds.value = videoTrackSelectedTracks.value.map((track) => track.track_asset_id).join(", ");
     }
     mapData.value = geojson;
@@ -2529,19 +2803,25 @@ function parsedTrackIds(input: string): string[] {
     .split(/[,\n\s]+/)
     .map((item) => item.trim())
     .filter(Boolean);
-  return fromInput.length > 0 ? fromInput : tracks.value.map((track) => track.track_asset_id).slice(0, 4);
+  return fromInput;
 }
 
 async function loadVideoTrackVideoOptions() {
   const params = new URLSearchParams();
   params.set("media_kind", "video");
-  params.set("limit", "75");
+  params.set("limit", "200");
   params.set("sort", "mtime");
   const q = videoTrackVideoSearch.value.trim();
   if (q) {
     params.set("q", q);
   }
-  const rows = await api.assets(params.toString()).catch(() => []);
+  const rows: Asset[] = await api.assets(params.toString()).catch(() => [] as Asset[]);
+  if (videoTrackAssetId.value && !rows.some((asset) => asset.id === videoTrackAssetId.value)) {
+    const selected = await api.asset(videoTrackAssetId.value).catch(() => null);
+    if (selected?.asset.media_kind === "video") {
+      rows.unshift(selected.asset);
+    }
+  }
   videoTrackVideoOptions.value = rows;
   if (!videoTrackAssetId.value && rows.length > 0) {
     selectVideoTrackVideo(rows[0], false);
@@ -2577,7 +2857,7 @@ const filteredVideoTrackTracks = computed(() => {
   return source
     .filter((track) => !videoTrackSelectedTracks.value.some((selected) => selected.track_asset_id === track.track_asset_id))
     .filter((track) => !q || `${track.name} ${track.source_format ?? ""}`.toLowerCase().includes(q))
-    .slice(0, 12);
+    .slice(0, 20);
 });
 
 function trackOptionSummary(track: TrackSummary) {
@@ -2735,8 +3015,8 @@ async function startVideoTrackPlayerSession() {
   const videoID = videoTrackAssetId.value || videoTrackVideoOptions.value[0]?.id || indexedVideoRows.value[0]?.asset_id || "";
   const selectedTrackIDs = videoTrackSelectedTracks.value.map((track) => track.track_asset_id);
   const trackIDs = selectedTrackIDs.length ? selectedTrackIDs : parsedTrackIds(videoTrackIds.value);
-  if (!videoID || trackIDs.length === 0) {
-    videoTrackMessage.value = "Select a video and at least one GPS/KML track.";
+  if (!videoID) {
+    videoTrackMessage.value = "Select a video. Tracks can be auto-selected from timestamp overlap when enabled.";
     return;
   }
   videoTrackSession.value = await api.createVideoTrackPlayerSession({
@@ -2746,19 +3026,40 @@ async function startVideoTrackPlayerSession() {
     offset_seconds: videoTrackOffsetSeconds.value
   });
   videoTrackAssetId.value = videoID;
-  videoTrackIds.value = trackIDs.join(", ");
-  if (videoTrackSelectedTracks.value.length === 0) {
-    videoTrackSelectedTracks.value = tracks.value.filter((track) => trackIDs.includes(track.track_asset_id));
+  videoTrackIds.value = videoTrackSession.value.track_ids.join(", ");
+  if (videoTrackSelectedTracks.value.length === 0 || trackIDs.length === 0) {
+    videoTrackSelectedTracks.value = tracks.value.filter((track) =>
+      videoTrackSession.value?.track_ids.includes(track.track_asset_id)
+    );
   }
-  videoTrackMessage.value = `Session ${videoTrackSession.value.id.slice(0, 8)} ready. Playback positions are computed from video time plus offset.`;
+  const warnings = asArray(videoTrackSession.value.warnings);
+  videoTrackMessage.value = [
+    `Session ${videoTrackSession.value.id.slice(0, 8)} ready.`,
+    selectedTrackIDs.length === 0 ? "Tracks were auto-selected from overlap." : "Playback positions are computed from video time plus offset.",
+    ...warnings
+  ].join(" ");
   await updateVideoTrackPosition(0);
+  await nextTick();
+  await renderVideoTrackMap();
 }
 
 async function updateVideoTrackPosition(timeMS: number) {
   if (!videoTrackSession.value) return;
-  videoTrackPosition.value = await api.videoTrackPlayerPosition(videoTrackSession.value.id, timeMS).catch((err) => ({
-    error: err instanceof Error ? err.message : String(err)
-  }));
+  if (videoTrackPositionPending) return;
+  const throttleMs = Math.max(0, numericRuntimeSetting("video_track_player.marker_throttle_ms", 250));
+  const now = performance.now();
+  if (videoTrackMarkerThrottleAt && now - videoTrackMarkerThrottleAt < throttleMs && timeMS !== 0) return;
+  videoTrackMarkerThrottleAt = now;
+  videoTrackPositionPending = true;
+  videoTrackSyncTimeMs.value = timeMS;
+  try {
+    videoTrackPosition.value = await api.videoTrackPlayerPosition(videoTrackSession.value.id, timeMS).catch((err) => ({
+      error: err instanceof Error ? err.message : String(err)
+    }));
+    updateVideoTrackMarkerLayer();
+  } finally {
+    videoTrackPositionPending = false;
+  }
 }
 
 async function startDryRun() {
@@ -3211,8 +3512,20 @@ const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
     { key: "indexing.metadata_after_index", label: "Extract metadata after indexing", help: "Default pipeline stage.", kind: "boolean" },
     { key: "indexing.previews_after_index", label: "Generate previews after indexing", help: "Default pipeline stage.", kind: "boolean" }
   ],
+  discovery: [
+    { key: "discovery.max_folder_workers", label: "Folder workers", help: "Bounded folder-worker pool for million-file discovery.", kind: "number" },
+    { key: "discovery.max_file_workers", label: "File workers", help: "Bounded file-processing worker pool.", kind: "number" },
+    { key: "discovery.folder_queue_depth", label: "Folder queue depth", help: "Upper bound for queued folder tasks.", kind: "number" }
+  ],
   gps: [
     { key: "gps.track_arrow_interval_m", label: "Track direction arrow interval (m)", help: "Default 500 m. Set 0 to hide direction arrows.", kind: "number" }
+  ],
+  "video-track-player": [
+    { key: "video_track_player.sync_mode", label: "Sync mode", help: "interval or smooth marker updates.", kind: "text" },
+    { key: "video_track_player.interval_seconds", label: "Sync interval seconds", help: "Default 3 seconds for interval mode.", kind: "number" },
+    { key: "video_track_player.marker_throttle_ms", label: "Marker throttle ms", help: "Limit marker refresh frequency to avoid UI freezes.", kind: "number" },
+    { key: "video_track_player.auto_select_overlapping_tracks", label: "Auto-select overlapping tracks", help: "Use timestamp candidates to suggest tracks automatically.", kind: "boolean" },
+    { key: "video_track_player.show_debug_overlay", label: "Show debug overlay", help: "Keep JSON debug hidden by default.", kind: "boolean" }
   ],
   preview: [
     { key: "preview.cache_max_bytes", label: "Preview cache max bytes", help: "Cleanup target for generated previews and thumbnails.", kind: "number" },
@@ -3436,10 +3749,11 @@ async function openFolder(path: string) {
   await refresh();
 }
 
-async function openAsset(id: string) {
+async function openAsset(id: string, options: { seekMs?: number | null } = {}) {
   loading.value = true;
   error.value = "";
   try {
+    assetDetailSeekMs.value = options.seekMs ?? null;
     assetDetail.value = await api.asset(id);
     assetRelated.value = await api.assetRelated(id).catch(() => null);
     assetAIActionStatus.value = {};
@@ -3450,6 +3764,8 @@ async function openAsset(id: string) {
     url.searchParams.set("page", "asset-detail");
     url.searchParams.set("asset_id", id);
     window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    await nextTick();
+    await applyAssetDetailSeek();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -3466,8 +3782,9 @@ async function openAssetOCR(assetID: string, blockID: string) {
 }
 
 async function openGalleryAssetDetail(id: string) {
+  const seekMs = captureCurrentPlaybackTimeMs();
   closeGallery();
-  await openAsset(id);
+  await openAsset(id, { seekMs });
 }
 
 function canCancel(job: Job): boolean {
@@ -4069,6 +4386,21 @@ watch([trackPreviewTilesEnabled, selectedTrackLayerVisible, galleryTrackLayerVis
   persistLayerPreference("cartolensia.trackPreview.tilesVisible", trackPreviewTilesEnabled.value);
 });
 
+watch(
+  [() => active.value, () => videoTrackSession.value?.id ?? "", () => videoTrackSelectedTracks.value.map((track) => track.track_asset_id).join(",")],
+  async () => {
+    if (active.value === "Video Track Player" && videoTrackSession.value) {
+      await nextTick();
+      await renderVideoTrackMap();
+      return;
+    }
+    if (active.value !== "Video Track Player") {
+      stopVideoTrackPlaybackLoop();
+      destroyVideoTrackMap();
+    }
+  }
+);
+
 watch([geoAlignTilesVisible, geoAlignTrackLayerVisible, geoAlignMarkerLayerVisible], () => {
   geoAlignTileLayer?.setVisible(geoAlignTilesVisible.value);
   geoAlignTrackLayer?.setVisible(geoAlignTrackLayerVisible.value);
@@ -4118,6 +4450,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeydown);
+  stopVideoTrackPlaybackLoop();
+  destroyVideoTrackMap();
   destroyGalleryTrackMap();
   selectedTrackMap?.setTarget(undefined);
   geoAlignMap?.setTarget(undefined);
@@ -4360,83 +4694,104 @@ onBeforeUnmount(() => {
             <span>{{ selectedPipelineStorage?.root ?? "unknown root" }}</span>
             <span>{{ selectedPipelineStorage?.mode ?? "unknown mode" }}</span>
           </div>
-          <form class="control-grid pipeline-settings" @submit.prevent="startDryRun">
-            <h3>Shared scan scope and pipeline stages</h3>
-            <p class="form-note">These settings apply to the indexing pipeline. Use -1 for no file or byte limit. Preview scan reports stay capped at 50 files unless explicitly over-limit in the API.</p>
-            <label>
-              Storage
-              <select v-model="dryRunStorage">
-                <option value="">Configured default</option>
-                <option v-for="storage in storages" :key="storage.name" :value="storage.name">
-                  {{ storage.name }} · {{ storage.root }} · {{ storage.mode }}
-                </option>
-              </select>
-            </label>
-            <label>
-              Scan subpath
-              <input v-model="dryRunPrefix" type="text" />
-            </label>
-            <label>
-              Max files
-              <input v-model.number="dryRunMaxFiles" type="number" min="-1" />
-            </label>
-            <label>
-              Max bytes
-              <input v-model.number="dryRunMaxBytes" type="number" min="-1" />
-            </label>
-            <label>
-              Include extensions
-              <input v-model="dryRunExtensions" type="text" />
-              <small>Defaults include photos, videos, GPS tracks, audio, PDFs, and text/Markdown documents.</small>
-            </label>
-            <label class="checkbox-label">
-              <input v-model="pipelineIndexFiles" type="checkbox" />
-              Discover/index files
-            </label>
-            <label class="checkbox-label">
-              <input v-model="hashAfterIndex" type="checkbox" />
-              Hash after indexing
-            </label>
-            <label class="checkbox-label">
-              <input v-model="metadataAfterIndex" type="checkbox" />
-              Extract metadata/EXIF
-            </label>
-            <label class="checkbox-label">
-              <input v-model="previewsAfterIndex" type="checkbox" />
-              Generate previews
-            </label>
-            <label class="checkbox-label">
-              <input v-model="pipelineParseTracks" type="checkbox" />
-              Parse GPS/KML/KMZ tracks
-            </label>
-            <label class="checkbox-label">
-              <input v-model="pipelineGeotagExif" type="checkbox" />
-              Geotag from EXIF
-            </label>
-            <label class="checkbox-label">
-              <input v-model="pipelineSnapToTracks" type="checkbox" />
-              Snap media to tracks if safe
-            </label>
-            <label class="checkbox-label">
-              <input v-model="pipelineRefreshMap" type="checkbox" />
-              Refresh map/clusters
-            </label>
-            <p class="form-note">
-              Prefix is storage-relative, for example <code>Cartolensia-photos</code>. Missing marking is disabled.
-            </p>
-            <div class="actions">
-              <button type="submit">Preview scan report (does not index)</button>
-              <button type="button" :disabled="pipelineRunning" @click="startIndexingPipeline">Start indexing pipeline</button>
-              <button type="button" :disabled="!pipelineRunning" @click="stopIndexingPipeline">Stop current pipeline</button>
-            </div>
-          </form>
-          <div class="metrics">
-            <article><strong>{{ indexingStatus?.scope.assets ?? stats?.assets ?? 0 }}</strong><span>Scoped assets</span></article>
-            <article><strong>{{ indexingStatus?.scope.hashed ?? stats?.hashed ?? 0 }}</strong><span>Hashed</span></article>
-            <article><strong>{{ indexingStatus?.scope.unhashed ?? stats?.unhashed ?? 0 }}</strong><span>Unhashed</span></article>
-            <article><strong>{{ indexingStatus?.scope.geotagged ?? 0 }}</strong><span>Geotagged</span></article>
-            <article><strong>{{ indexingStatus?.scope.preview_ready ?? previewCacheStats?.ready ?? 0 }}</strong><span>Previews ready</span></article>
-            <article><strong>{{ indexingStatus?.scope.tracks ?? tracks.length }}</strong><span>GPS/KML tracks</span></article>
+          <p class="form-note discovery-note">
+            Max files = <strong>-1</strong> means unlimited for normal indexing. Preview and dry-run reports stay conservatively capped at 50 files unless the API explicitly overrides that safeguard.
+          </p>
+          <div class="settings-grid discovery-grid">
+            <article class="settings-form settings-wide">
+              <h3>Scope</h3>
+              <label>
+                Storage
+                <select v-model="dryRunStorage">
+                  <option value="">Configured default</option>
+                  <option v-for="storage in storages" :key="storage.name" :value="storage.name">
+                    {{ storage.name }} · {{ storage.root }} · {{ storage.mode }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                Scan subpath
+                <input v-model="dryRunPrefix" type="text" />
+              </label>
+              <label>
+                Max files
+                <input v-model.number="dryRunMaxFiles" type="number" min="-1" />
+              </label>
+              <label>
+                Max bytes
+                <input v-model.number="dryRunMaxBytes" type="number" min="-1" />
+              </label>
+              <p class="muted">Prefix is storage-relative, for example <code>Cartolensia-photos</code>. Missing marking is disabled.</p>
+            </article>
+            <article class="settings-form">
+              <h3>Extensions</h3>
+              <label>
+                Include extensions
+                <input v-model="dryRunExtensions" type="text" />
+              </label>
+              <p class="form-note">Default list includes photos, videos, GPS tracks, audio, PDFs, and text/Markdown documents.</p>
+              <div class="actions">
+                <button type="button" @click="dryRunExtensions = supportedDiscoveryExtensions">Reset supported defaults</button>
+              </div>
+            </article>
+            <article class="settings-form">
+              <h3>Pipeline stages</h3>
+              <label class="checkbox-label">
+                <input v-model="pipelineIndexFiles" type="checkbox" />
+                Discover/index files
+              </label>
+              <label class="checkbox-label">
+                <input v-model="hashAfterIndex" type="checkbox" />
+                Hash after indexing
+              </label>
+              <label class="checkbox-label">
+                <input v-model="metadataAfterIndex" type="checkbox" />
+                Extract metadata/EXIF
+              </label>
+              <label class="checkbox-label">
+                <input v-model="previewsAfterIndex" type="checkbox" />
+                Generate previews
+              </label>
+              <label class="checkbox-label">
+                <input v-model="pipelineParseTracks" type="checkbox" />
+                Parse GPS/KML/KMZ tracks
+              </label>
+              <label class="checkbox-label">
+                <input v-model="pipelineGeotagExif" type="checkbox" />
+                Geotag from EXIF
+              </label>
+              <label class="checkbox-label">
+                <input v-model="pipelineSnapToTracks" type="checkbox" />
+                Snap media to tracks if safe
+              </label>
+              <label class="checkbox-label">
+                <input v-model="pipelineRefreshMap" type="checkbox" />
+                Refresh map/clusters
+              </label>
+            </article>
+            <article class="settings-form">
+              <h3>Safety</h3>
+              <p class="muted">Real archive discovery remains read-only, scoped, and bounded. Dry-run output stays capped unless explicitly over-limited by the API.</p>
+            </article>
+            <article class="settings-form">
+              <h3>Actions</h3>
+              <div class="actions">
+                <button type="button" @click="startDryRun">Preview scan report (does not index)</button>
+                <button type="button" :disabled="pipelineRunning" @click="startIndexingPipeline">Start indexing pipeline</button>
+                <button type="button" :disabled="!pipelineRunning" @click="stopIndexingPipeline">Stop current pipeline</button>
+              </div>
+            </article>
+            <article class="settings-form">
+              <h3>Stats</h3>
+              <div class="metrics">
+                <article><strong>{{ indexingStatus?.scope.assets ?? stats?.assets ?? 0 }}</strong><span>Scoped assets</span></article>
+                <article><strong>{{ indexingStatus?.scope.hashed ?? stats?.hashed ?? 0 }}</strong><span>Hashed</span></article>
+                <article><strong>{{ indexingStatus?.scope.unhashed ?? stats?.unhashed ?? 0 }}</strong><span>Unhashed</span></article>
+                <article><strong>{{ indexingStatus?.scope.geotagged ?? 0 }}</strong><span>Geotagged</span></article>
+                <article><strong>{{ indexingStatus?.scope.preview_ready ?? previewCacheStats?.ready ?? 0 }}</strong><span>Previews ready</span></article>
+                <article><strong>{{ indexingStatus?.scope.tracks ?? tracks.length }}</strong><span>GPS/KML tracks</span></article>
+              </div>
+            </article>
           </div>
           <div v-if="pipelineRunning || pipelineLog.length > 0" class="pipeline-panel">
             <strong>{{ pipelineRunning ? `Running: ${pipelineStage}` : "Pipeline status" }}</strong>
@@ -6472,7 +6827,7 @@ onBeforeUnmount(() => {
           <header class="panel-head">
             <div>
               <h2>Video + GPS/KML Track Player</h2>
-              <span>Synchronize a selected video with one or more parsed tracks using video time plus offset.</span>
+              <span>Synchronize a selected video with one or more parsed tracks using inferred timestamps, OpenLayers, and a moving marker.</span>
             </div>
             <button type="button" class="btn btn-primary" @click="startVideoTrackPlayerSession">
               <i class="bi bi-play-btn" aria-hidden="true"></i>
@@ -6496,7 +6851,7 @@ onBeforeUnmount(() => {
               </label>
               <div class="selector-suggestions">
                 <button
-                  v-for="video in videoTrackVideoOptions.slice(0, 12)"
+                  v-for="video in videoTrackVideoOptions.slice(0, 20)"
                   :key="video.id"
                   type="button"
                   :class="{ active: video.id === videoTrackAssetId }"
@@ -6546,6 +6901,12 @@ onBeforeUnmount(() => {
                 Offset seconds
                 <input v-model.number="videoTrackOffsetSeconds" class="form-control" type="number" step="0.1" />
               </label>
+              <p class="muted">
+                Sync mode: <strong>{{ runtimeTextSetting("video_track_player.sync_mode", "interval") }}</strong> ·
+                Interval: <strong>{{ runtimeTextSetting("video_track_player.interval_seconds", "3") }} s</strong> ·
+                Throttle: <strong>{{ runtimeTextSetting("video_track_player.marker_throttle_ms", "250") }} ms</strong> ·
+                Auto-select overlapping tracks: <strong>{{ boolRuntimeSetting("video_track_player.auto_select_overlapping_tracks", true) ? "on" : "off" }}</strong>
+              </p>
             </article>
             <article class="settings-form settings-wide">
               <h3>Player</h3>
@@ -6556,20 +6917,23 @@ onBeforeUnmount(() => {
                   :src="`/api/v1/media/${videoTrackSession.video_asset_id}/original`"
                   controls
                   preload="metadata"
-                  @timeupdate="updateVideoTrackPosition(($event.target as HTMLVideoElement).currentTime * 1000)"
+                  @loadedmetadata="handleVideoTrackPlaybackEvent"
+                  @play="handleVideoTrackPlaybackEvent"
+                  @pause="handleVideoTrackPlaybackEvent"
+                  @seeked="handleVideoTrackPlaybackEvent"
+                  @ended="handleVideoTrackPlaybackEvent"
+                  @timeupdate="handleVideoTrackPlaybackEvent"
                 ></video>
-                <div class="video-track-map">
-                  <div class="alignment-map-preview">
-                    <span
-                      v-for="position in asArray(videoTrackPosition?.positions as unknown[])"
-                      :key="String((position as Record<string, unknown>).track_id)"
-                      class="alignment-marker track_candidate modified"
-                      :style="{ left: '50%', top: '50%' }"
-                    >
-                      <i class="bi bi-geo-alt-fill" aria-hidden="true"></i>
-                    </span>
+                <div class="video-track-map-shell">
+                  <div ref="videoTrackMapElement" class="video-track-map" role="img" aria-label="OpenLayers synchronized video track map"></div>
+                  <div class="map-status-overlay">
+                    <i class="bi bi-signpost-split" aria-hidden="true"></i>
+                    {{ videoTrackPosition?.warning || videoTrackSession.warnings?.[0] || videoTrackMessage || "Open the player to synchronize the marker." }}
                   </div>
-                  <pre class="compact-json">{{ JSON.stringify(videoTrackPosition ?? videoTrackSession, null, 2) }}</pre>
+                  <div class="map-layer-control">
+                    <small class="muted">OSM tiles are on-demand through the local proxy.</small>
+                  </div>
+                  <pre v-if="boolRuntimeSetting('video_track_player.show_debug_overlay', false)" class="compact-json">{{ JSON.stringify(videoTrackPosition ?? videoTrackSession, null, 2) }}</pre>
                 </div>
               </div>
             </article>
@@ -7279,7 +7643,7 @@ onBeforeUnmount(() => {
         ></video>
         <div v-else-if="galleryCurrent.media_kind === 'audio'" class="gallery-audio-player">
           <i class="bi bi-soundwave" aria-hidden="true"></i>
-          <audio :src="galleryCurrent.original_url" controls preload="metadata"></audio>
+          <audio ref="galleryAudioElement" :src="galleryCurrent.original_url" controls preload="metadata"></audio>
           <strong>{{ galleryCurrent.name }}</strong>
           <span>{{ galleryCurrent.relative_path }}</span>
         </div>
@@ -7363,7 +7727,13 @@ onBeforeUnmount(() => {
             <button v-if="galleryCurrent.media_kind === 'photo'" type="button" @click="resetGalleryZoom">Reset zoom</button>
             <span v-if="galleryCurrent.media_kind === 'photo'">{{ Math.round(galleryScale * 100) }}%</span>
             <a :href="galleryCurrent.original_url" target="_blank" rel="noreferrer">Open Original</a>
-            <a class="btn btn-outline-secondary" :href="assetHref(galleryCurrent.id)" @click="openAssetLink($event, galleryCurrent.id)">Asset Detail</a>
+            <a
+              class="btn btn-outline-secondary"
+              :href="assetHref(galleryCurrent.id)"
+              @click="openAssetLink($event, galleryCurrent.id, { closeOverlay: true, preservePlayback: true })"
+            >
+              Asset Detail
+            </a>
           </div>
         </figcaption>
       </figure>

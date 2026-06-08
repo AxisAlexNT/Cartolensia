@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go / WebUI / Compose validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "webui/package-lock.json"
+
+      - name: Install WebUI dependencies
+        run: npm --prefix webui ci
+
+      - name: Go tests
+        env:
+          GOCACHE: /tmp/cartolensia-go-build
+          GOTOOLCHAIN: local
+        run: go test ./...
+
+      - name: WebUI build
+        run: npm --prefix webui run build
+
+      - name: Production compose config
+        run: docker compose -f docker-compose.production.yml config
+
+      - name: Smoke scripts
+        run: |
+          bash scripts/release/check-licenses.sh
+          bash scripts/smoke-test.sh
