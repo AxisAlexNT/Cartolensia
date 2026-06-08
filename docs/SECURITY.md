@@ -167,3 +167,11 @@ Current added dependency notes:
 - Bundled ffmpeg, Tesseract, PostgreSQL, Python packages, and CUDA wheels must be reviewed before public redistribution. The packager records manifests and Debian copyright files where available, but those records do not replace legal review.
 - GPU drivers are intentionally not bundled. CUDA-capable packages still depend on compatible host drivers and must not attempt to install kernel or system GPU components on the target host.
 - GitHub release builds are manual. Release operators should use prerelease mode until the package has been tested on a clean offline host.
+
+## Component Manager Security
+
+- Component records are metadata only until an operator explicitly checks, provides, imports, enables, or disables a component.
+- Component imports are restricted to `.cartolensia/components/<component-key>`. Archives with absolute paths, `..` traversal, symlinks, hardlinks, or unsupported entry types are rejected.
+- Component paths and archive sources under `/mnt/Models/rclone` are rejected. The real archive remains strict read-only and is never used as a component cache or extraction target.
+- Component download jobs are provenance-gated. The current handler records a job and actionable message rather than silently downloading binaries without a reviewed source URL/license note.
+- FFmpeg redistributability is checked during offline package assembly. `--enable-nonfree` fails packaging by default, while `--enable-gpl` is recorded so release operators can label the package appropriately.

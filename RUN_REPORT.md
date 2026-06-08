@@ -2515,3 +2515,104 @@ Passed:
 - No missing-file marking was run.
 - PostgreSQL was not reset.
 - No commit and no push were done.
+
+## 2026-06-08 Component Manager And Asset AI Actions Run
+
+This run implemented a first-class component registry and connected asset-detail AI actions to the existing bounded AI job path. It did not download unreviewed binaries, scan new real data, reset PostgreSQL, or write to `/mnt/Models/rclone`.
+
+### Implemented
+
+- Added persistent component management:
+  - migration `010_components.sql` for `components` and `component_events`;
+  - memory and PostgreSQL store support;
+  - default records for FFmpeg/FFprobe, Tesseract/language packs, VMAF, Python AI runtime, PyTorch/torchvision, OpenCV YuNet, EfficientNet-B0, MobileNetV3, Falconsai NSFW, OpenCLIP, BLIP, and facenet-pytorch.
+- Added component APIs:
+  - `GET /api/v1/components`;
+  - `GET /api/v1/components/status`;
+  - `GET /api/v1/components/{key}`;
+  - `POST /api/v1/components/{key}/check`;
+  - `POST /api/v1/components/{key}/download`;
+  - `POST /api/v1/components/{key}/provide-path`;
+  - `POST /api/v1/components/{key}/provide-archive`;
+  - `POST /api/v1/components/{key}/enable|disable`;
+  - `GET /api/v1/components/{key}/events`.
+- Added safe component operator inputs:
+  - archives extract only under `.cartolensia/components/<key>`;
+  - absolute paths, `..`, symlinks, hardlinks, and unsupported archive entry types are rejected;
+  - expected files are validated before accepting an archive/path;
+  - `/mnt/Models/rclone` is rejected as component path or archive source.
+- Added Settings -> Components UI:
+  - grouped component cards for media tools, metrics, OCR, AI runtime, and AI models;
+  - status, path/version, license, provenance, checksum, errors, check/download/provide/enable controls, and event logs;
+  - uses the existing allowlisted file/folder picker for component paths and archives.
+- Added asset-detail AI actions:
+  - Run classification, face detection, OCR, safety, embedding, short caption, long caption, and all enabled AI functions for a single photo asset;
+  - inline status and job links;
+  - videos/tracks show clear scoped limitations;
+  - existing AI job endpoints receive direct `asset_id` payloads and jobs remain visible on Jobs/Base AI.
+- Added asset AI metadata APIs:
+  - `GET /api/v1/assets/{id}/ai`;
+  - `GET /api/v1/assets/{id}/faces`;
+  - `GET /api/v1/assets/{id}/captions`;
+  - `GET /api/v1/assets/{id}/classification`;
+  - `GET /api/v1/assets/{id}/safety`.
+- Added global AI metadata pages:
+  - OCR page with text filtering and asset-detail highlight links;
+  - Captions page with caption filtering and asset links;
+  - Safety Review page listing loaded safety candidates and review links.
+- Updated offline distribution tooling:
+  - writes `components-manifest.json` in the archive root and `licenses/components-manifest.json`;
+  - records FFmpeg configure flags to `licenses/ffmpeg-configure.txt`;
+  - fails packaging by default for `--enable-nonfree` FFmpeg;
+  - records `--enable-gpl` in `licenses/build-manifest.env` for GPL-tools bundle labeling.
+
+### Verification
+
+Passed during this run:
+
+- `gofmt -w internal/server/settings.go internal/server/server_test.go internal/server/components.go internal/catalog/catalog.go internal/catalog/extended_store.go internal/database/extended.go internal/server/server.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `bash -n scripts/dist/build-offline-linux.sh`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+
+Added tests cover:
+
+- component default records and list API;
+- user-provided component path validation;
+- archive traversal rejection;
+- component check job/event visibility;
+- per-asset AI aggregate/faces/captions/classification/safety metadata endpoints.
+
+Live validation after restart:
+
+- App restarted with `.cartolensia/runtime/realpeek.yaml` and remained available at `http://127.0.0.1:18080`.
+- `/api/v1/stats`: `54` assets, `54` hashed, `48` photos, `2` videos, `4` tracks.
+- `/api/v1/components/status`: `17` installed components and `2` missing components.
+- Installed components include FFmpeg/FFprobe, Tesseract, English/Russian/Armenian/Chinese tessdata, Python AI venv, PyTorch CUDA, torchvision, facenet-pytorch, EfficientNet-B0, YuNet, Falconsai NSFW, OpenCLIP, and BLIP base.
+- Missing components are VMAF/libvmaf (`ffmpeg libvmaf filter is unavailable`) and MobileNetV3 fallback weights.
+- FFmpeg configure flags were captured from the system build; it is GPL-enabled and `nonfree=false`.
+- `/api/v1/assets/e8ba8b1b-2266-48a6-ba6d-a9171d2693ae/ai` returned classification, caption, OCR, face, safety, embedding, tag, and prediction records.
+- `/api/v1/search?q=ocr:test` returned a valid PostgreSQL/local search response with no matches, as expected for that token.
+- `/api/v1/ai/status` showed the AI sidecar healthy with OCR languages available and existing AI metadata counts.
+
+### Known Limitations
+
+- Component download/install is intentionally provenance-gated. The current handler creates a job and actionable message but does not silently fetch binaries without a reviewed source URL and license path.
+- Long-caption action currently uses the existing `describe` job route; model quality depends on the configured sidecar model.
+- OCR/Captions pages currently use the latest loaded AI prediction payload limit; deeper pagination can be added when collections grow.
+- Component Manager import-from-offline-package UI remains future work; the package manifest is now produced for that flow.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was not modified.
+- No components, models, caches, OCR data, transcodes, exports, packages, or DB files were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"strconv"
@@ -1202,6 +1203,116 @@ func (s *MemoryStore) VectorSearch(_ context.Context, modelID string, vector []f
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func (s *MemoryStore) UpsertComponent(_ context.Context, component Component) (Component, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	component.Key = strings.TrimSpace(component.Key)
+	if component.Key == "" {
+		return Component{}, errors.New("component key is required")
+	}
+	if existing, ok := s.components[component.Key]; ok && component.ID == "" {
+		component.ID = existing.ID
+	}
+	if component.ID == "" {
+		component.ID = id.NewUUID()
+	}
+	if component.Status == "" {
+		component.Status = "missing"
+	}
+	if component.SourceType == "" {
+		component.SourceType = "system_path"
+	}
+	if component.Metadata == nil {
+		component.Metadata = map[string]any{}
+	}
+	s.components[component.Key] = component
+	return component, nil
+}
+
+func (s *MemoryStore) ListComponents(_ context.Context, query ComponentQuery) ([]Component, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	limit, offset := normalizePage(query.Limit, query.Offset)
+	q := strings.ToLower(strings.TrimSpace(query.Q))
+	out := []Component{}
+	for _, component := range s.components {
+		if query.Category != "" && component.Category != query.Category {
+			continue
+		}
+		if query.Status != "" && component.Status != query.Status {
+			continue
+		}
+		if q != "" {
+			text := strings.ToLower(strings.Join([]string{component.Key, component.Name, component.Category, component.Version, component.Status, component.SourceType, component.LicenseName}, " "))
+			if !strings.Contains(text, q) {
+				continue
+			}
+		}
+		out = append(out, component)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Category == out[j].Category {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].Category < out[j].Category
+	})
+	if offset > len(out) {
+		return []Component{}, nil
+	}
+	end := offset + limit
+	if end > len(out) {
+		end = len(out)
+	}
+	return append([]Component{}, out[offset:end]...), nil
+}
+
+func (s *MemoryStore) GetComponent(_ context.Context, key string) (Component, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	component, ok := s.components[strings.TrimSpace(key)]
+	if !ok {
+		return Component{}, ErrNotFound
+	}
+	return component, nil
+}
+
+func (s *MemoryStore) AddComponentEvent(_ context.Context, event ComponentEvent) (ComponentEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	event.ComponentKey = strings.TrimSpace(event.ComponentKey)
+	if event.ComponentKey == "" {
+		return ComponentEvent{}, errors.New("component key is required")
+	}
+	if event.ID == "" {
+		event.ID = id.NewUUID()
+	}
+	if event.Level == "" {
+		event.Level = "info"
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if event.Metadata == nil {
+		event.Metadata = map[string]any{}
+	}
+	s.componentEvents[event.ComponentKey] = append(s.componentEvents[event.ComponentKey], event)
+	return event, nil
+}
+
+func (s *MemoryStore) ListComponentEvents(_ context.Context, key string, limit int) ([]ComponentEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	events := append([]ComponentEvent{}, s.componentEvents[strings.TrimSpace(key)]...)
+	sort.Slice(events, func(i, j int) bool { return events[i].CreatedAt.After(events[j].CreatedAt) })
+	if len(events) > limit {
+		events = events[:limit]
+	}
+	return events, nil
 }
 
 func cosineSimilarity(a, b []float64) float64 {

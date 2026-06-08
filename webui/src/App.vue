@@ -23,6 +23,8 @@ import {
   type Asset,
   type AssetDetail,
   type BackendStatus,
+  type ComponentEvent,
+  type ComponentRecord,
   type DuplicatePage,
   type ExplorerRow,
   type ExplorerView,
@@ -77,7 +79,10 @@ const nav = [
   "Transcoding",
   "Base AI",
   "AI Classification",
+  "OCR",
+  "Captions",
   "Face Gallery",
+  "Safety Review",
   "Search",
   "Geo Align",
   "Video Track Player"
@@ -102,8 +107,11 @@ const navPageAliases: Record<string, string> = {
   "asset-detail": "Asset Detail",
   ai: "Base AI",
   "ai-classification": "AI Classification",
+  ocr: "OCR",
+  captions: "Captions",
   faces: "Face Gallery",
   "face-gallery": "Face Gallery",
+  "safety-review": "Safety Review",
   search: "Search",
   "universal-search": "Search",
   "geo-align": "Geo Align",
@@ -146,7 +154,10 @@ function navIcon(label: string): string {
     Transcoding: "bi-film",
     "Base AI": "bi-cpu",
     "AI Classification": "bi-tags",
+    OCR: "bi-body-text",
+    Captions: "bi-chat-square-text",
     "Face Gallery": "bi-person-bounding-box",
+    "Safety Review": "bi-shield-exclamation",
     Search: "bi-search-heart",
     "Geo Align": "bi-crosshair",
     "Video Track Player": "bi-play-btn"
@@ -218,6 +229,14 @@ const settings = ref<SettingsPayload | null>(null);
 const settingsTab = ref("general");
 const settingsMessage = ref("");
 const pendingConfig = ref<Record<string, unknown>>({});
+const components = ref<ComponentRecord[]>([]);
+const componentRoot = ref("");
+const componentCounts = ref<Record<string, number>>({});
+const componentPathDrafts = ref<Record<string, string>>({});
+const componentArchiveDrafts = ref<Record<string, string>>({});
+const componentEvents = ref<Record<string, ComponentEvent[]>>({});
+const componentMessage = ref("");
+const componentBusyKey = ref("");
 const pluginSettingText = ref<Record<string, string>>({});
 const selectedPluginSettingsId = ref("");
 const pluginSettingsMode = ref<"ui" | "yaml">("ui");
@@ -328,6 +347,7 @@ const aiMessage = ref("");
 const aiBusyKind = ref<AIJobKind | "">("");
 const aiLastResult = ref<Record<string, unknown> | null>(null);
 const aiActionHistory = ref<Array<{ id: string; kind: AIJobKind; status: string; summary: string; created_at: string }>>([]);
+const assetAIActionStatus = ref<Record<string, { status: string; summary: string; job_id?: string }>>({});
 const aiSummary = ref<Record<string, unknown> | null>(null);
 const aiTagPayload = ref<Record<string, unknown> | null>(null);
 const aiPredictionPayload = ref<Record<string, unknown> | null>(null);
@@ -335,6 +355,8 @@ const aiFacePayload = ref<Record<string, unknown> | null>(null);
 const aiSafetyPayload = ref<Record<string, unknown> | null>(null);
 const aiVectorQuery = ref("brick path");
 const aiVectorResults = ref<Record<string, unknown>[]>([]);
+const ocrPageQuery = ref("");
+const captionsPageQuery = ref("");
 const vectorConfigHighlight = ref(false);
 const vectorStatus = ref<Record<string, unknown> | null>(null);
 const faceClustersPayload = ref<{ clusters: FaceCluster[]; total: number; provisional_note?: string } | null>(null);
@@ -564,6 +586,31 @@ const aiModelCards = computed(() => [
 ]);
 const aiTags = computed(() => asArray((aiTagPayload.value?.tags as unknown[]) ?? []));
 const aiPredictions = computed(() => asArray((aiPredictionPayload.value?.predictions as unknown[]) ?? []));
+const ocrPredictionRows = computed(() => {
+  const query = ocrPageQuery.value.trim().toLowerCase();
+  return aiPredictions.value.filter((raw) => {
+    const row = raw as Record<string, unknown>;
+    const task = String(row.task ?? "");
+    if (!["ocr_image", "ocr", "ocr_text"].includes(task)) return false;
+    if (!query) return true;
+    return [row.label, row.asset_id, row.model_name, (row.metadata as Record<string, unknown> | undefined)?.language]
+      .map((value) => String(value ?? "").toLowerCase())
+      .some((value) => value.includes(query));
+  });
+});
+const captionPredictionRows = computed(() => {
+  const query = captionsPageQuery.value.trim().toLowerCase();
+  return aiPredictions.value.filter((raw) => {
+    const row = raw as Record<string, unknown>;
+    const task = String(row.task ?? "");
+    const isCaption = ["describe_image", "caption", "caption_short", "caption_long"].includes(task) || String(row.label ?? "").startsWith("caption:");
+    if (!isCaption) return false;
+    if (!query) return true;
+    return [row.label, row.asset_id, row.model_name, task]
+      .map((value) => String(value ?? "").toLowerCase())
+      .some((value) => value.includes(query));
+  });
+});
 const aiFaces = computed(() => asArray((aiFacePayload.value?.faces as unknown[]) ?? []));
 const aiSafetyCandidates = computed(() => asArray((aiSafetyPayload.value?.candidates as unknown[]) ?? []));
 const faceClusters = computed(() => asArray(faceClustersPayload.value?.clusters));
@@ -587,6 +634,26 @@ const visibleAssetFaces = computed(() => {
   return faces.filter((face) => !faceIgnored(face));
 });
 const filePickerRoots = computed(() => Object.values(filePicker.value?.roots ?? {}));
+const componentCategories = computed(() => {
+  const labels: Record<string, string> = {
+    tool: "Media tools",
+    metric: "Metrics",
+    ocr: "OCR",
+    python: "AI runtime",
+    model: "AI models",
+    database: "Database"
+  };
+  const groups = new Map<string, { key: string; label: string; items: ComponentRecord[] }>();
+  for (const component of components.value) {
+    const key = component.category || "other";
+    if (!groups.has(key)) groups.set(key, { key, label: labels[key] ?? key, items: [] });
+    groups.get(key)?.items.push(component);
+  }
+  return Array.from(groups.values()).map((group) => ({
+    ...group,
+    items: group.items.slice().sort((a, b) => a.key.localeCompare(b.key))
+  }));
+});
 
 const selectedAlbumItems = computed(() => asArray(albumItems.value?.items));
 const selectedAlbumAssets = computed(() => selectedAlbumItems.value.map((item) => item.asset));
@@ -1743,6 +1810,7 @@ async function refresh() {
 	      aiSafetyData,
 	      faceClusterPayload,
 	      settingsPayload,
+	      componentStatusPayload,
 	      placeCachePayload,
 	      editablePlacePayload,
 	      exportRows
@@ -1776,6 +1844,7 @@ async function refresh() {
 	      api.aiSafety(),
 	      api.faceClusters(),
 	      api.settings(),
+	      api.componentStatus(),
 	      api.searchPlaces(),
 	      api.places(placeCacheQuery.value),
       api.dbExports()
@@ -1837,6 +1906,9 @@ async function refresh() {
 	    aiSafetyPayload.value = aiSafetyData;
     faceClustersPayload.value = faceClusterPayload;
     settings.value = settingsPayload;
+    components.value = asArray(componentStatusPayload.components);
+    componentRoot.value = componentStatusPayload.root;
+    componentCounts.value = componentStatusPayload.counts ?? {};
     searchPlaceCache.value = placeCachePayload;
     editablePlaces.value = asArray(editablePlacePayload.places);
     initializePendingConfig(settingsPayload);
@@ -2119,6 +2191,78 @@ async function requestAIJob(kind: AIJobKind) {
 function requestAIModelAction(action: string) {
   if (["classify", "faces", "describe", "safety", "embed", "ocr"].includes(action)) {
     void requestAIJob(action as AIJobKind);
+  }
+}
+
+function componentByKey(key: string): ComponentRecord | undefined {
+  return components.value.find((component) => component.key === key);
+}
+
+function missingComponentsForAIAction(kind: AIJobKind): string[] {
+  const requirements: Record<AIJobKind, string[]> = {
+    classify: ["python-ai-venv", "torch-cuda", "torchvision", "efficientnet-b0"],
+    faces: ["python-ai-venv", "opencv-yunet"],
+    describe: ["python-ai-venv", "blip-base"],
+    safety: ["python-ai-venv", "falconsai-nsfw"],
+    embed: ["python-ai-venv", "openclip-vit-b32"],
+    ocr: ["tesseract", "tessdata-eng"]
+  };
+  return requirements[kind].filter((key) => {
+    const component = componentByKey(key);
+    if (!component) return false;
+    if (["installed", "user_provided"].includes(component.status)) return false;
+    if (["failed", "disabled"].includes(component.status)) return true;
+    return component.status === "missing" && Boolean(component.last_checked_at);
+  });
+}
+
+async function runAssetAIAction(kind: AIJobKind, label: string, extra: Record<string, unknown> = {}) {
+  if (!assetDetail.value) return;
+  if (assetDetail.value.asset.media_kind !== "photo") {
+    assetAIActionStatus.value[label] = { status: "skipped", summary: "This action currently runs on photo assets only." };
+    return;
+  }
+  const missing = missingComponentsForAIAction(kind);
+  if (missing.length > 0) {
+    assetAIActionStatus.value[label] = {
+      status: "missing",
+      summary: `Missing component(s): ${missing.join(", ")}. Open Settings -> Components to check or provide them.`
+    };
+    settingsTab.value = "components";
+    return;
+  }
+  assetAIActionStatus.value[label] = { status: "running", summary: "Starting bounded asset job..." };
+  try {
+    const result = await api.aiJob(kind, {
+      scope: "selected",
+      asset_id: assetDetail.value.asset.id,
+      asset_ids: [assetDetail.value.asset.id],
+      limit: 1,
+      ...extra
+    });
+    const status = String(result.status ?? "completed");
+    const summary = `${status} · processed ${String(result.processed ?? 0)} / ${String(result.targets ?? 1)} · stored ${String(result.stored ?? 0)}`;
+    assetAIActionStatus.value[label] = { status, summary, job_id: String(result.job_id ?? "") };
+    aiActionHistory.value = [{ id: `${label}-${Date.now()}`, kind, status, summary, created_at: new Date().toLocaleTimeString() }]
+      .concat(aiActionHistory.value)
+      .slice(0, 8);
+    assetDetail.value = await api.asset(assetDetail.value.asset.id);
+    jobs.value = await api.jobs();
+  } catch (err) {
+    assetAIActionStatus.value[label] = { status: "failed", summary: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function runAllAssetAIActions() {
+  for (const action of [
+    { kind: "classify" as AIJobKind, label: "classification" },
+    { kind: "faces" as AIJobKind, label: "faces" },
+    { kind: "ocr" as AIJobKind, label: "ocr" },
+    { kind: "safety" as AIJobKind, label: "safety" },
+    { kind: "embed" as AIJobKind, label: "embedding" },
+    { kind: "describe" as AIJobKind, label: "short_caption" }
+  ]) {
+    await runAssetAIAction(action.kind, action.label);
   }
 }
 
@@ -2589,7 +2733,7 @@ async function openFilePicker(target: string, kind: "file" | "folder" = "folder"
     filePickerMessage.value = err instanceof Error ? err.message : String(err);
     return null;
   });
-  const preferredRoot = target.includes("model") || target.includes("cache") || target.includes("export") ? "cartolensia" : "tmp";
+  const preferredRoot = target.includes("model") || target.includes("cache") || target.includes("export") || target.startsWith("component:") ? "cartolensia" : "tmp";
   if (filePicker.value?.roots?.[preferredRoot]) {
     await chooseFilePickerRoot(preferredRoot);
   }
@@ -2637,8 +2781,117 @@ function selectFilePickerPath(path = filePickerPath.value) {
     setPendingStorageField(0, "root", selected);
   } else if (filePickerTarget.value.startsWith("pending:")) {
     setPendingValue(filePickerTarget.value.slice("pending:".length), selected);
+  } else if (filePickerTarget.value.startsWith("component:path:")) {
+    componentPathDrafts.value[filePickerTarget.value.slice("component:path:".length)] = selected;
+  } else if (filePickerTarget.value.startsWith("component:archive:")) {
+    componentArchiveDrafts.value[filePickerTarget.value.slice("component:archive:".length)] = selected;
   }
   filePickerOpen.value = false;
+}
+
+async function refreshComponents() {
+  const payload = await api.componentStatus();
+  components.value = asArray(payload.components);
+  componentRoot.value = payload.root;
+  componentCounts.value = payload.counts ?? {};
+}
+
+function componentStatusClass(status: string): string {
+  if (["installed", "user_provided"].includes(status)) return "ok";
+  if (["downloading", "disabled"].includes(status)) return "warn";
+  if (["failed", "missing"].includes(status)) return "bad";
+  return "";
+}
+
+function componentSourceLabel(component: ComponentRecord): string {
+  return [component.source_type, component.version].filter(Boolean).join(" · ") || "not checked";
+}
+
+async function runComponentCheck(key: string) {
+  componentBusyKey.value = key;
+  componentMessage.value = `Checking ${key}...`;
+  try {
+    const result = await api.checkComponent(key);
+    componentMessage.value = `${key}: ${result.status}${result.error ? ` · ${result.error}` : ""}`;
+    await refreshComponents();
+    await loadComponentEvents(key);
+  } catch (err) {
+    componentMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    componentBusyKey.value = "";
+  }
+}
+
+async function requestComponentDownload(key: string) {
+  componentBusyKey.value = key;
+  componentMessage.value = `Creating reviewed-download job for ${key}...`;
+  try {
+    const result = await api.downloadComponent(key);
+    componentMessage.value = `${key}: ${result.status}${result.error ? ` · ${result.error}` : ""}`;
+    await refreshComponents();
+    await loadComponentEvents(key);
+  } catch (err) {
+    componentMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    componentBusyKey.value = "";
+  }
+}
+
+async function provideComponentPath(key: string) {
+  const path = componentPathDrafts.value[key]?.trim();
+  if (!path) {
+    componentMessage.value = `Choose or enter a local path for ${key}.`;
+    return;
+  }
+  componentBusyKey.value = key;
+  try {
+    await api.provideComponentPath(key, path);
+    componentMessage.value = `${key}: accepted user-provided path.`;
+    await refreshComponents();
+    await loadComponentEvents(key);
+  } catch (err) {
+    componentMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    componentBusyKey.value = "";
+  }
+}
+
+async function provideComponentArchive(key: string) {
+  const path = componentArchiveDrafts.value[key]?.trim();
+  if (!path) {
+    componentMessage.value = `Choose or enter a local archive for ${key}.`;
+    return;
+  }
+  componentBusyKey.value = key;
+  try {
+    await api.provideComponentArchive(key, path);
+    componentMessage.value = `${key}: archive imported under ${componentRoot.value}.`;
+    await refreshComponents();
+    await loadComponentEvents(key);
+  } catch (err) {
+    componentMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    componentBusyKey.value = "";
+  }
+}
+
+async function setComponentEnabled(key: string, enabled: boolean) {
+  componentBusyKey.value = key;
+  try {
+    await api.setComponentEnabled(key, enabled);
+    componentMessage.value = `${key}: ${enabled ? "enabled" : "disabled"}.`;
+    await refreshComponents();
+    await loadComponentEvents(key);
+  } catch (err) {
+    componentMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    componentBusyKey.value = "";
+  }
+}
+
+async function loadComponentEvents(key: string) {
+  const payload = await api.componentEvents(key);
+  componentEvents.value[key] = asArray(payload.events);
 }
 
 type RuntimeSettingSpec = { key: string; label: string; help: string; kind?: "text" | "number" | "boolean" };
@@ -2876,6 +3129,7 @@ async function openAsset(id: string) {
   error.value = "";
   try {
     assetDetail.value = await api.asset(id);
+    assetAIActionStatus.value = {};
     streamOptions.value =
       assetDetail.value.asset.media_kind === "video" ? await api.streamOptions(id).catch(() => null) : null;
     setActive("Asset Detail", false);
@@ -2883,6 +3137,14 @@ async function openAsset(id: string) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     loading.value = false;
+  }
+}
+
+async function openAssetOCR(assetID: string, blockID: string) {
+  await openAsset(assetID);
+  if (blockID) {
+    selectedAssetOCRId.value = blockID;
+    showAssetOCRBoxes.value = true;
   }
 }
 
@@ -4128,6 +4390,72 @@ onBeforeUnmount(() => {
               <a v-if="assetDetail.original_url" :href="assetDetail.original_url" target="_blank" rel="noreferrer">Open</a>
             </article>
           </div>
+          <section v-if="assetDetail" class="settings-form settings-wide ai-asset-actions">
+            <div class="section-title">
+              <div>
+                <h3><i class="bi bi-stars" aria-hidden="true"></i> AI Actions</h3>
+                <p class="muted">
+                  Actions run only on this asset and are recorded in Jobs. Originals stay read-only; AI outputs are local metadata.
+                </p>
+              </div>
+              <button type="button" class="btn btn-outline-secondary btn-sm" @click="setActive('Jobs')">
+                <i class="bi bi-list-task" aria-hidden="true"></i>
+                Jobs
+              </button>
+            </div>
+            <div v-if="assetDetail.asset.media_kind === 'photo'" class="ai-action-grid">
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('classify', 'classification')">
+                <i class="bi bi-tags" aria-hidden="true"></i>
+                Run classification
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('faces', 'faces')">
+                <i class="bi bi-person-bounding-box" aria-hidden="true"></i>
+                Run face detection
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('ocr', 'ocr')">
+                <i class="bi bi-body-text" aria-hidden="true"></i>
+                Run OCR
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('safety', 'safety')">
+                <i class="bi bi-shield-check" aria-hidden="true"></i>
+                Run NSFW/safety check
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('embed', 'embedding')">
+                <i class="bi bi-diagram-3" aria-hidden="true"></i>
+                Generate embedding
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('describe', 'short_caption', { caption_type: 'short_caption' })">
+                <i class="bi bi-chat-square-text" aria-hidden="true"></i>
+                Generate short caption
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('describe', 'long_caption', { caption_type: 'long_caption' })">
+                <i class="bi bi-text-paragraph" aria-hidden="true"></i>
+                Generate long caption
+              </button>
+              <button type="button" class="btn btn-primary" @click="runAllAssetAIActions">
+                <i class="bi bi-play-circle" aria-hidden="true"></i>
+                Run all enabled AI functions
+              </button>
+            </div>
+            <div v-else-if="assetDetail.asset.media_kind === 'video'" class="empty-state compact-empty">
+              Frame AI for videos is planned. Use the poster/frame workflows when implemented; current live AI functions are photo-scoped.
+            </div>
+            <div v-else class="empty-state compact-empty">
+              AI image actions are not relevant for GPS/KML track assets.
+            </div>
+            <div v-if="Object.keys(assetAIActionStatus).length" class="ai-action-status-list">
+              <article v-for="(state, key) in assetAIActionStatus" :key="key">
+                <span :class="['status-badge', state.status === 'completed' ? 'ok' : state.status === 'running' ? 'warn' : state.status === 'missing' || state.status === 'failed' ? 'bad' : '']">
+                  <span v-if="state.status === 'running'" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                  {{ state.status }}
+                </span>
+                <strong>{{ key }}</strong>
+                <span>{{ state.summary }}</span>
+                <button v-if="state.status === 'missing'" type="button" class="btn btn-sm btn-outline-primary" @click="settingsTab = 'components'; setActive('Settings')">Open Components</button>
+                <button v-if="state.job_id" type="button" class="btn btn-sm btn-outline-secondary" @click="setActive('Jobs')">Job {{ state.job_id.slice(0, 8) }}</button>
+              </article>
+            </div>
+          </section>
           <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.ocr_blocks?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0)" class="settings-form settings-wide">
             <h3>AI Results</h3>
             <div v-if="assetDetail.ai_tags?.length" class="chip-row">
@@ -5108,6 +5436,118 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
+        <section v-else-if="active === 'OCR'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>OCR Text</h2>
+              <span>Search and inspect OCR text blocks stored as local metadata with bounding boxes.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" @click="requestAIJob('ocr')">
+              <i class="bi bi-body-text" aria-hidden="true"></i>
+              OCR current scope
+            </button>
+          </header>
+          <div class="search-hero compact-search">
+            <label>
+              <span>Filter OCR records</span>
+              <input v-model="ocrPageQuery" type="search" placeholder="text, language, model, asset id..." />
+            </label>
+          </div>
+          <article class="settings-form settings-wide">
+            <div v-if="ocrPredictionRows.length === 0" class="empty-state">No OCR records match this filter.</div>
+            <table v-else>
+              <thead><tr><th>Text</th><th>Language</th><th>Confidence</th><th>Model</th><th>Created</th><th>Asset</th></tr></thead>
+              <tbody>
+                <tr v-for="row in ocrPredictionRows" :key="String((row as Record<string, unknown>).id)">
+                  <td>{{ (row as Record<string, unknown>).label }}</td>
+                  <td>{{ ((row as Record<string, unknown>).metadata as Record<string, unknown> | undefined)?.language ?? '' }}</td>
+                  <td>{{ typeof (row as Record<string, unknown>).confidence === 'number' ? Number((row as Record<string, unknown>).confidence).toFixed(2) : '' }}</td>
+                  <td>{{ (row as Record<string, unknown>).model_name }}</td>
+                  <td>{{ (row as Record<string, unknown>).created_at }}</td>
+                  <td>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="openAssetOCR(String((row as Record<string, unknown>).asset_id), String((row as Record<string, unknown>).id))">
+                      Open + highlight
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </section>
+
+        <section v-else-if="active === 'Captions'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Captions</h2>
+              <span>Browse generated short and long captions. Captions are suggestions and remain user-reviewable.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" @click="requestAIJob('describe')">
+              <i class="bi bi-chat-square-text" aria-hidden="true"></i>
+              Caption current scope
+            </button>
+          </header>
+          <div class="search-hero compact-search">
+            <label>
+              <span>Filter captions</span>
+              <input v-model="captionsPageQuery" type="search" placeholder="caption text, task, model, asset id..." />
+            </label>
+          </div>
+          <article class="settings-form settings-wide">
+            <div v-if="captionPredictionRows.length === 0" class="empty-state">No captions match this filter.</div>
+            <table v-else>
+              <thead><tr><th>Caption</th><th>Task</th><th>Model</th><th>Created</th><th>Asset</th></tr></thead>
+              <tbody>
+                <tr v-for="row in captionPredictionRows" :key="String((row as Record<string, unknown>).id)">
+                  <td>{{ (row as Record<string, unknown>).label }}</td>
+                  <td>{{ (row as Record<string, unknown>).task }}</td>
+                  <td>{{ (row as Record<string, unknown>).model_name }}</td>
+                  <td>{{ (row as Record<string, unknown>).created_at }}</td>
+                  <td><button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(String((row as Record<string, unknown>).asset_id))">Open asset</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </section>
+
+        <section v-else-if="active === 'Safety Review'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Safety Review</h2>
+              <span>Review local NSFW/safety predictions. Nothing is moved, hidden, or deleted by this page.</span>
+            </div>
+            <button type="button" class="btn btn-outline-danger" @click="requestAIJob('safety')">
+              <i class="bi bi-shield-exclamation" aria-hidden="true"></i>
+              Safety scan current scope
+            </button>
+          </header>
+          <div class="settings-grid">
+            <article class="settings-form">
+              <h3>Summary</h3>
+              <div class="detail-grid compact-detail">
+                <article><strong>{{ aiCounts.safety_candidates ?? 0 }}</strong><span>Candidates</span></article>
+                <article><strong>{{ aiSafetyCandidates.length }}</strong><span>Loaded rows</span></article>
+                <article><strong>{{ (aiSafetyPayload?.review_album as Record<string, unknown> | undefined)?.title ?? 'Potentially Unsafe' }}</strong><span>Virtual album</span></article>
+              </div>
+            </article>
+            <article class="settings-form settings-wide">
+              <h3>Needs Review / Unsafe Candidates</h3>
+              <div v-if="aiSafetyCandidates.length === 0" class="empty-state">No safety candidates require review.</div>
+              <table v-else>
+                <thead><tr><th>Asset</th><th>Tag</th><th>Source</th><th>Confidence</th><th>Action</th></tr></thead>
+                <tbody>
+                  <tr v-for="candidate in aiSafetyCandidates" :key="`${String((candidate as Record<string, unknown>).asset_id)}-${String((candidate as Record<string, unknown>).tag)}`">
+                    <td>{{ String((candidate as Record<string, unknown>).asset_id).slice(0, 8) }}</td>
+                    <td>{{ (candidate as Record<string, unknown>).tag }}</td>
+                    <td>{{ (candidate as Record<string, unknown>).source }}</td>
+                    <td>{{ typeof (candidate as Record<string, unknown>).confidence === 'number' ? Number((candidate as Record<string, unknown>).confidence).toFixed(3) : '' }}</td>
+                    <td><button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(String((candidate as Record<string, unknown>).asset_id))">Review asset</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+          </div>
+        </section>
+
         <section v-else-if="active === 'Search'" class="panel universal-search-page">
           <header class="panel-head">
             <div>
@@ -5963,6 +6403,109 @@ onBeforeUnmount(() => {
                 <button type="button" class="btn btn-outline-secondary" @click="setActive('Base AI')">
                   Back to AI dashboard
                 </button>
+              </div>
+            </article>
+          </div>
+
+          <div v-else-if="settingsTab === 'components'" class="settings-grid">
+            <article class="settings-form settings-wide">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-box-seam" aria-hidden="true"></i> Component Manager</h3>
+                  <p class="muted">Tools, OCR language packs, Python runtime, and AI models are tracked with source and license provenance. No component is installed at startup.</p>
+                </div>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(componentBusyKey)" @click="refreshComponents">
+                  <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+                  Refresh
+                </button>
+              </div>
+              <div class="detail-grid compact-detail">
+                <article><strong>{{ componentCounts.installed ?? 0 }}</strong><span>Installed</span></article>
+                <article><strong>{{ componentCounts.user_provided ?? 0 }}</strong><span>User provided</span></article>
+                <article><strong>{{ componentCounts.missing ?? 0 }}</strong><span>Missing</span></article>
+                <article><strong>{{ componentCounts.failed ?? 0 }}</strong><span>Failed</span></article>
+              </div>
+              <p class="muted">Component root: <code>{{ componentRoot || '.cartolensia/components' }}</code>. Archives are extracted only there after traversal and expected-file validation.</p>
+              <div v-if="componentMessage" class="alert">{{ componentMessage }}</div>
+            </article>
+
+            <article v-for="group in componentCategories" :key="group.key" class="settings-form settings-wide">
+              <h3>{{ group.label }}</h3>
+              <div class="component-grid">
+                <article v-for="component in group.items" :key="component.key" class="component-card">
+                  <div class="section-title compact-title">
+                    <div>
+                      <h4>{{ component.name }}</h4>
+                      <code>{{ component.key }}</code>
+                    </div>
+                    <span :class="['status-badge', componentStatusClass(component.status)]">
+                      <span v-if="componentBusyKey === component.key" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                      {{ component.status }}
+                    </span>
+                  </div>
+                  <p>{{ componentSourceLabel(component) }}</p>
+                  <dl class="component-facts">
+                    <div><dt>License</dt><dd>{{ component.license_name || 'review required' }}</dd></div>
+                    <div><dt>Source</dt><dd>{{ component.provenance_url || component.source_url || 'operator supplied' }}</dd></div>
+                    <div><dt>Install path</dt><dd><code>{{ component.install_path || component.executable_path || 'not configured' }}</code></dd></div>
+                    <div v-if="component.checksum"><dt>Checksum</dt><dd><code>{{ component.checksum.slice(0, 16) }}...</code></dd></div>
+                  </dl>
+                  <p v-if="component.error" class="alert alert-warning">{{ component.error }}</p>
+                  <div class="component-actions">
+                    <button type="button" class="btn btn-sm btn-outline-primary" :disabled="Boolean(componentBusyKey)" @click="runComponentCheck(component.key)">
+                      <i class="bi bi-search" aria-hidden="true"></i>
+                      Check
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload(component.key)">
+                      <i class="bi bi-cloud-download" aria-hidden="true"></i>
+                      Download/Install
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :class="component.status === 'disabled' ? 'btn-outline-success' : 'btn-outline-warning'"
+                      :disabled="Boolean(componentBusyKey)"
+                      @click="setComponentEnabled(component.key, component.status === 'disabled')"
+                    >
+                      <i class="bi" :class="component.status === 'disabled' ? 'bi-toggle-on' : 'bi-toggle-off'" aria-hidden="true"></i>
+                      {{ component.status === 'disabled' ? 'Enable' : 'Disable' }}
+                    </button>
+                  </div>
+                  <div class="component-provide">
+                    <label>
+                      <span>Provide path</span>
+                      <span class="input-with-button">
+                        <input v-model="componentPathDrafts[component.key]" type="text" placeholder="/usr/bin/ffmpeg or extracted directory" />
+                        <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker(`component:path:${component.key}`, 'folder')">
+                          <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                          Browse
+                        </button>
+                      </span>
+                    </label>
+                    <button type="button" class="btn btn-sm btn-primary" :disabled="Boolean(componentBusyKey)" @click="provideComponentPath(component.key)">Use path</button>
+                    <label>
+                      <span>Provide archive</span>
+                      <span class="input-with-button">
+                        <input v-model="componentArchiveDrafts[component.key]" type="text" placeholder="/tmp/component.zip or .tar.gz" />
+                        <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker(`component:archive:${component.key}`, 'file')">
+                          <i class="bi bi-file-earmark-zip" aria-hidden="true"></i>
+                          Browse
+                        </button>
+                      </span>
+                    </label>
+                    <button type="button" class="btn btn-sm btn-primary" :disabled="Boolean(componentBusyKey)" @click="provideComponentArchive(component.key)">Import archive</button>
+                  </div>
+                  <details @toggle="($event.target as HTMLDetailsElement).open && loadComponentEvents(component.key)">
+                    <summary>Events</summary>
+                    <ul class="component-events">
+                      <li v-for="event in componentEvents[component.key] ?? []" :key="event.id">
+                        <span :class="['status-badge', event.level === 'error' ? 'bad' : event.level === 'warn' ? 'warn' : 'ok']">{{ event.level }}</span>
+                        <span>{{ event.created_at }}</span>
+                        <span>{{ event.message }}</span>
+                      </li>
+                    </ul>
+                  </details>
+                </article>
               </div>
             </article>
           </div>

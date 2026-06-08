@@ -183,6 +183,7 @@ Completed:
 - Durable `place_cache` migration/store/API is implemented for local/cache-only place search.
 - Settings Search/Places now provides an operator place-cache editor.
 - Linux x86_64 offline distribution packaging is implemented with a local `7z` packager, manual GitHub Actions release workflow, launcher scripts, optional OCR/media/PostgreSQL/Python runtime bundling, dependency manifests, and release checksums.
+- Component Manager MVP is implemented with persistent component records/events, Settings UI, safe user path/archive import, component checks, and distribution component manifests. Direct downloader implementations remain provenance-gated future work.
 
 Next:
 

@@ -459,6 +459,44 @@ type VectorSearchResult struct {
 	Match string  `json:"match"`
 }
 
+type Component struct {
+	ID             string         `json:"id"`
+	Key            string         `json:"key"`
+	Name           string         `json:"name"`
+	Category       string         `json:"category"`
+	Version        string         `json:"version,omitempty"`
+	Status         string         `json:"status"`
+	SourceType     string         `json:"source_type"`
+	SourceURL      string         `json:"source_url,omitempty"`
+	LicenseName    string         `json:"license_name,omitempty"`
+	ProvenanceURL  string         `json:"provenance_url,omitempty"`
+	InstallPath    string         `json:"install_path,omitempty"`
+	ExecutablePath string         `json:"executable_path,omitempty"`
+	Checksum       string         `json:"checksum,omitempty"`
+	SizeBytes      int64          `json:"size_bytes,omitempty"`
+	LastCheckedAt  *time.Time     `json:"last_checked_at,omitempty"`
+	InstalledAt    *time.Time     `json:"installed_at,omitempty"`
+	Error          string         `json:"error,omitempty"`
+	Metadata       map[string]any `json:"metadata_json,omitempty"`
+}
+
+type ComponentEvent struct {
+	ID           string         `json:"id"`
+	ComponentKey string         `json:"component_key"`
+	Level        string         `json:"level"`
+	Message      string         `json:"message"`
+	CreatedAt    time.Time      `json:"created_at"`
+	Metadata     map[string]any `json:"metadata_json,omitempty"`
+}
+
+type ComponentQuery struct {
+	Category string
+	Status   string
+	Q        string
+	Limit    int
+	Offset   int
+}
+
 type Store interface {
 	UpsertDiscoveredFile(context.Context, storage.FileInfo) (UpsertResult, error)
 	ListAssets(context.Context) ([]Asset, error)
@@ -521,6 +559,11 @@ type Store interface {
 	UpsertAssetEmbedding(context.Context, AssetEmbedding) (AssetEmbedding, error)
 	ListAssetEmbeddings(context.Context, string) ([]AssetEmbedding, error)
 	VectorSearch(context.Context, string, []float64, int) ([]VectorSearchResult, error)
+	UpsertComponent(context.Context, Component) (Component, error)
+	ListComponents(context.Context, ComponentQuery) ([]Component, error)
+	GetComponent(context.Context, string) (Component, error)
+	AddComponentEvent(context.Context, ComponentEvent) (ComponentEvent, error)
+	ListComponentEvents(context.Context, string, int) ([]ComponentEvent, error)
 	EnqueueJob(context.Context, jobs.Job) (jobs.Job, error)
 	UpdateJob(context.Context, jobs.Job) error
 	ListJobs(context.Context) ([]jobs.Job, error)
@@ -556,6 +599,8 @@ type MemoryStore struct {
 	faceClusters     map[string]FaceCluster
 	embeddingModels  map[string]EmbeddingModel
 	assetEmbeddings  map[string]AssetEmbedding
+	components       map[string]Component
+	componentEvents  map[string][]ComponentEvent
 	jobs             map[string]jobs.Job
 }
 
@@ -580,6 +625,8 @@ func NewMemoryStore() *MemoryStore {
 		faceClusters:     make(map[string]FaceCluster),
 		embeddingModels:  make(map[string]EmbeddingModel),
 		assetEmbeddings:  make(map[string]AssetEmbedding),
+		components:       make(map[string]Component),
+		componentEvents:  make(map[string][]ComponentEvent),
 		jobs:             make(map[string]jobs.Job),
 	}
 }

@@ -136,6 +136,7 @@ func New(deps Dependencies) *Server {
 		videoTrackSessions: map[string]*videoTrackPlayerSession{},
 	}
 	s.seedDefaultPlaces()
+	s.seedDefaultComponents()
 	s.routes()
 	return s
 }
@@ -169,6 +170,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.handleAuthTokenByID)
 	s.mux.HandleFunc("/api/v1/storages", s.handleStorages)
 	s.mux.HandleFunc("/api/v1/storages/", s.handleStorageByName)
+	s.mux.HandleFunc("/api/v1/components/status", s.handleComponentsStatus)
+	s.mux.HandleFunc("/api/v1/components", s.handleComponents)
+	s.mux.HandleFunc("/api/v1/components/", s.handleComponentByKey)
 	s.mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	s.mux.HandleFunc("/api/v1/plugins/", s.handlePluginByID)
 	s.mux.HandleFunc("/api/v1/plugins/rescan", s.handlePluginsRescan)
@@ -1757,6 +1761,21 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 {
 		switch parts[1] {
+		case "ai":
+			writeJSON(w, http.StatusOK, s.assetAIRecord(r.Context(), asset))
+		case "faces":
+			faces, err := s.deps.Store.ListFaceDetections(r.Context(), asset.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "faces": faces, "total": len(faces)})
+		case "captions":
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "captions": s.assetCaptionRecords(r.Context(), asset.ID)})
+		case "classification":
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "predictions": s.assetClassificationRecords(r.Context(), asset.ID)})
+		case "safety":
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "safety": s.assetSafetyRecords(r.Context(), asset.ID)})
 		case "ocr":
 			writeJSON(w, http.StatusOK, map[string]any{
 				"asset_id": asset.ID,
@@ -4785,6 +4804,150 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 	}
 	detail["places"] = s.assetPlaceRecords(ctx, asset)
 	return detail
+}
+
+func (s *Server) assetAIRecord(ctx context.Context, asset catalog.Asset) map[string]any {
+	predictions, _ := s.deps.Store.ListAIPredictions(ctx, asset.ID)
+	tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
+	faces, _ := s.deps.Store.ListFaceDetections(ctx, asset.ID)
+	embeddings, _ := s.deps.Store.ListAssetEmbeddings(ctx, asset.ID)
+	return map[string]any{
+		"asset_id":        asset.ID,
+		"tags":            tags,
+		"predictions":     predictions,
+		"classification":  s.classificationRecordsFrom(predictions, tags),
+		"captions":        s.captionRecordsFrom(predictions, tags),
+		"ocr_blocks":      ocrBlocksFromPredictions(predictions),
+		"faces":           faces,
+		"safety":          s.safetyRecordsFrom(predictions, tags),
+		"embeddings":      summarizeAssetEmbeddings(embeddings),
+		"generated_truth": "AI/OCR/caption outputs are local predictions or suggestions, not ground truth.",
+	}
+}
+
+func (s *Server) assetCaptionRecords(ctx context.Context, assetID string) []map[string]any {
+	predictions, _ := s.deps.Store.ListAIPredictions(ctx, assetID)
+	tags, _ := s.deps.Store.ListAssetTags(ctx, assetID)
+	return s.captionRecordsFrom(predictions, tags)
+}
+
+func (s *Server) captionRecordsFrom(predictions []catalog.AIPrediction, tags []catalog.AssetTag) []map[string]any {
+	out := []map[string]any{}
+	for _, prediction := range predictions {
+		if prediction.Task != "describe_image" && prediction.Task != "caption_short" && prediction.Task != "caption_long" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":         prediction.ID,
+			"asset_id":   prediction.AssetID,
+			"text":       prediction.Label,
+			"task":       prediction.Task,
+			"model":      prediction.ModelName,
+			"confidence": prediction.Confidence,
+			"created_at": prediction.CreatedAt,
+			"metadata":   prediction.Metadata,
+		})
+	}
+	for _, tag := range tags {
+		if tag.Source != "ai_caption" && !strings.HasPrefix(tag.Tag, "caption:") {
+			continue
+		}
+		text := strings.TrimPrefix(tag.Tag, "caption:")
+		if metadataCaption := stringFromMap(tag.Metadata, "caption"); metadataCaption != "" {
+			text = metadataCaption
+		}
+		out = append(out, map[string]any{
+			"id":         fmt.Sprintf("%s:%s:%s", tag.AssetID, tag.Source, tag.Tag),
+			"asset_id":   tag.AssetID,
+			"text":       text,
+			"task":       "caption",
+			"model":      stringFromMap(tag.Metadata, "model"),
+			"created_at": tag.CreatedAt,
+			"metadata":   tag.Metadata,
+		})
+	}
+	return out
+}
+
+func (s *Server) assetClassificationRecords(ctx context.Context, assetID string) []map[string]any {
+	predictions, _ := s.deps.Store.ListAIPredictions(ctx, assetID)
+	tags, _ := s.deps.Store.ListAssetTags(ctx, assetID)
+	return s.classificationRecordsFrom(predictions, tags)
+}
+
+func (s *Server) classificationRecordsFrom(predictions []catalog.AIPrediction, tags []catalog.AssetTag) []map[string]any {
+	out := []map[string]any{}
+	for _, prediction := range predictions {
+		switch prediction.Task {
+		case "classify_image", "classification", "classify":
+			out = append(out, map[string]any{
+				"id":         prediction.ID,
+				"asset_id":   prediction.AssetID,
+				"label":      prediction.Label,
+				"task":       prediction.Task,
+				"model":      prediction.ModelName,
+				"confidence": prediction.Confidence,
+				"created_at": prediction.CreatedAt,
+				"metadata":   prediction.Metadata,
+			})
+		}
+	}
+	for _, tag := range tags {
+		if tag.Source != "ai_classification" && tag.Source != "ai_classifier" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":         fmt.Sprintf("%s:%s:%s", tag.AssetID, tag.Source, tag.Tag),
+			"asset_id":   tag.AssetID,
+			"label":      tag.Tag,
+			"task":       "tag",
+			"source":     tag.Source,
+			"confidence": tag.Confidence,
+			"created_at": tag.CreatedAt,
+			"metadata":   tag.Metadata,
+		})
+	}
+	return out
+}
+
+func (s *Server) assetSafetyRecords(ctx context.Context, assetID string) []map[string]any {
+	predictions, _ := s.deps.Store.ListAIPredictions(ctx, assetID)
+	tags, _ := s.deps.Store.ListAssetTags(ctx, assetID)
+	return s.safetyRecordsFrom(predictions, tags)
+}
+
+func (s *Server) safetyRecordsFrom(predictions []catalog.AIPrediction, tags []catalog.AssetTag) []map[string]any {
+	out := []map[string]any{}
+	for _, prediction := range predictions {
+		if prediction.Task != "safety_nsfw" && prediction.Task != "nsfw" && prediction.Task != "safety" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":         prediction.ID,
+			"asset_id":   prediction.AssetID,
+			"label":      prediction.Label,
+			"task":       prediction.Task,
+			"model":      prediction.ModelName,
+			"score":      prediction.Confidence,
+			"created_at": prediction.CreatedAt,
+			"metadata":   prediction.Metadata,
+		})
+	}
+	for _, tag := range tags {
+		if tag.Source != "ai_safety" && tag.Source != "manual_safety_review" && !strings.HasPrefix(tag.Tag, "safety:") {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":         fmt.Sprintf("%s:%s:%s", tag.AssetID, tag.Source, tag.Tag),
+			"asset_id":   tag.AssetID,
+			"label":      tag.Tag,
+			"source":     tag.Source,
+			"score":      tag.Confidence,
+			"created_at": tag.CreatedAt,
+			"metadata":   tag.Metadata,
+		})
+	}
+	return out
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

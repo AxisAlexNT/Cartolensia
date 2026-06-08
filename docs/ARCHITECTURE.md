@@ -232,6 +232,14 @@ AI actions currently create visible job records and then execute bounded work th
 
 Settings path fields use `GET /api/v1/files/browse` for an allowlisted file/folder picker. The picker lists only configured roots such as `.cartolensia`, `/tmp`, `/mnt`, `/media`, `/srv`, home, and configured storage roots. It rejects traversal, returns readability/selectability metadata, and performs no writes. Real archive roots are marked read-only with warnings.
 
+## Component Manager
+
+The Component Manager persists tool/model/runtime records in `components` and `component_events`. It exposes `/api/v1/components`, `/api/v1/components/{key}/check`, `/provide-path`, `/provide-archive`, `/enable`, `/disable`, and `/events`. Downloads are represented as jobs but are intentionally gated unless a reviewed source is configured; user-provided paths and archives are the active workflow in this slice.
+
+Component archives are extracted only below `.cartolensia/components/<component-key>`. The extractor rejects absolute paths, `..` traversal, symlinks, hardlinks, and unsupported archive formats, then validates expected files before accepting the component. System-path components are checked in place and never copied unless the user imports an archive. `/mnt/Models/rclone` is rejected as a component path or archive source.
+
+Settings -> Components groups media tools, OCR language packs, AI runtime packages, and AI models with status, version/path, license/provenance, check/import controls, and event logs. Component records are also used by asset-detail AI actions to provide actionable missing-component messages.
+
 ## Future Interfaces
 
 - Vector search is implemented through a local JSON/PostgreSQL fallback using stored float arrays and bounded brute-force cosine search for small local collections. pgvector remains optional for later scaling.
@@ -255,6 +263,8 @@ Optional bundled components are isolated by directory:
 The launcher prefers bundled PostgreSQL when available and falls back to the memory config otherwise. It starts the AI sidecar only when a bundled Python runtime and sidecar site-packages are present. Runtime state is kept under the extracted package's `runtime`, `logs`, and `.cartolensia/cache` directories; media defaults to a `strict_read_only` local `media` directory.
 
 The GitHub Actions offline release workflow is manual. It verifies Go/WebUI builds, assembles the package, uploads workflow artifacts, and attaches the archive/checksum to a GitHub release. GPU drivers and public map/geocoder data are not bundled.
+
+The packager also writes `components-manifest.json` into the archive root and `licenses/components-manifest.json` for release review. FFmpeg configure flags are captured when FFmpeg is bundled; `--enable-nonfree` fails the package by default, and `--enable-gpl` is recorded so the archive can be labeled as a GPL-tools bundle.
 
 ## 2026-06-07 Update
 

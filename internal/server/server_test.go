@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"image"
@@ -227,6 +228,70 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	}
 }
 
+func TestComponentManagerAPIsAndSafeOperatorInputs(t *testing.T) {
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{Version: "test", Config: cfg, Plugins: plugins.BuiltIns(), Registry: registry, Store: store, StoreBackend: "memory"})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/components", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ffmpeg"`) || !strings.Contains(rec.Body.String(), `"tesseract"`) {
+		t.Fatalf("components list status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	toolDir := t.TempDir()
+	toolPath := filepath.Join(toolDir, "ffmpeg")
+	if err := os.WriteFile(toolPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/components/ffmpeg/provide-path", strings.NewReader(`{"path":"`+filepath.ToSlash(toolPath)+`"}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"user_provided"`) || !strings.Contains(rec.Body.String(), toolPath) {
+		t.Fatalf("provide path status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "bad.zip")
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(archive)
+	entry, err := zw.Create("../escape/ffmpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("bad")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/components/ffmpeg/provide-archive", strings.NewReader(`{"path":"`+filepath.ToSlash(archivePath)+`"}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "archive traversal rejected") {
+		t.Fatalf("traversal archive status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/components/ffmpeg/check", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"job_id"`) {
+		t.Fatalf("component check status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/components/ffmpeg/events", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"events"`) {
+		t.Fatalf("component events status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	ctx := context.Background()
 	store := catalog.NewMemoryStore()
@@ -391,6 +456,31 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ocr", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Laboratory sample label"`) || !strings.Contains(rec.Body.String(), `"blocks"`) {
 		t.Fatalf("asset OCR status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/ai", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ocr_blocks"`) || !strings.Contains(rec.Body.String(), `"faces"`) || !strings.Contains(rec.Body.String(), `"generated_truth"`) {
+		t.Fatalf("asset AI aggregate status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/faces", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"total":1`) {
+		t.Fatalf("asset faces status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/captions", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"captions"`) {
+		t.Fatalf("asset captions status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/classification", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"predictions"`) {
+		t.Fatalf("asset classification status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+photo.Asset.ID+"/safety", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"safety"`) {
+		t.Fatalf("asset safety status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/assets/"+photo.Asset.ID+"/ocr/"+ocrPrediction.ID, nil))

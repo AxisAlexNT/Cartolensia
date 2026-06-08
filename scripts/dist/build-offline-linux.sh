@@ -16,6 +16,7 @@ INCLUDE_TOOLS="${CARTOLENSIA_DIST_INCLUDE_TOOLS:-1}"
 INCLUDE_POSTGRES="${CARTOLENSIA_DIST_INCLUDE_POSTGRES:-1}"
 INCLUDE_MODELS="${CARTOLENSIA_DIST_INCLUDE_MODELS:-0}"
 INCLUDE_SOURCE="${CARTOLENSIA_DIST_INCLUDE_SOURCE:-1}"
+ALLOW_NONFREE_FFMPEG="${CARTOLENSIA_DIST_ALLOW_NONFREE_FFMPEG:-0}"
 MODELS_DIR="${CARTOLENSIA_MODELS_DIR:-${ROOT_DIR}/.cartolensia/models}"
 BUNDLED_PYTHON_ROOT="${CARTOLENSIA_BUNDLED_PYTHON_ROOT:-}"
 PYTHON_BIN="${CARTOLENSIA_DIST_PYTHON:-python3}"
@@ -32,6 +33,15 @@ need() {
 
 note() {
   printf '[dist] %s\n' "$*"
+}
+
+json_escape() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  printf '%s' "${value}"
 }
 
 copy_file() {
@@ -304,6 +314,31 @@ bundle_external_tools() {
   fi
 }
 
+ffmpeg_configure_line() {
+  local ffmpeg_bin="${STAGE}/external/bin/ffmpeg"
+  [ -x "${ffmpeg_bin}" ] || return 0
+  LD_LIBRARY_PATH="${STAGE}/external/lib:${LD_LIBRARY_PATH:-}" "${ffmpeg_bin}" -hide_banner -version 2>/dev/null \
+    | awk '/^configuration:/ { sub(/^configuration:[[:space:]]*/, ""); print; exit }'
+}
+
+validate_ffmpeg_redistribution() {
+  [ "${INCLUDE_TOOLS}" = "1" ] || return 0
+  local configure
+  configure="$(ffmpeg_configure_line || true)"
+  [ -n "${configure}" ] || return 0
+  printf '%s\n' "${configure}" > "${STAGE}/licenses/ffmpeg-configure.txt"
+  if printf '%s\n' "${configure}" | grep -q -- '--enable-nonfree'; then
+    if [ "${ALLOW_NONFREE_FFMPEG}" != "1" ]; then
+      printf 'Bundled ffmpeg was built with --enable-nonfree; refusing redistributable offline package. Set CARTOLENSIA_DIST_ALLOW_NONFREE_FFMPEG=1 only for private/internal packaging after legal review.\n' >&2
+      exit 1
+    fi
+    printf 'ffmpeg_nonfree=true\n' >> "${STAGE}/licenses/build-manifest.env"
+  fi
+  if printf '%s\n' "${configure}" | grep -q -- '--enable-gpl'; then
+    printf 'ffmpeg_gpl=true\n' >> "${STAGE}/licenses/build-manifest.env"
+  fi
+}
+
 bundle_postgres() {
   [ "${INCLUDE_POSTGRES}" = "1" ] || return 0
   local pg_config_bin
@@ -401,6 +436,66 @@ EOF
   rsync "${RSYNC_ARCHIVE_FLAGS[@]}" --delete "${MODELS_DIR}/" "${STAGE}/.cartolensia/models/"
 }
 
+component_version() {
+  local binary="$1"
+  [ -x "${binary}" ] || return 0
+  LD_LIBRARY_PATH="${STAGE}/external/lib:${LD_LIBRARY_PATH:-}" "${binary}" --version 2>/dev/null | head -n 1 \
+    || LD_LIBRARY_PATH="${STAGE}/external/lib:${LD_LIBRARY_PATH:-}" "${binary}" -version 2>/dev/null | head -n 1 \
+    || true
+}
+
+write_components_manifest() {
+  note "writing component manifest"
+  local manifest="${STAGE}/components-manifest.json"
+  local first=1
+  {
+    printf '{\n'
+    printf '  "package_name": "%s",\n' "$(json_escape "${PACKAGE_NAME}")"
+    printf '  "version": "%s",\n' "$(json_escape "${VERSION}")"
+    printf '  "target": "%s",\n' "$(json_escape "${TARGET}")"
+    printf '  "generated_at_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "policy": "All bundled components are staged inside the offline package. Original media storage is never used as a component source or destination.",\n'
+    printf '  "components": [\n'
+  } > "${manifest}"
+
+  append_component() {
+    local key="$1" name="$2" category="$3" source_type="$4" path="$5" license="$6" provenance="$7" version="$8" note="${9:-}"
+    [ -e "${STAGE}/${path}" ] || return 0
+    if [ "${first}" = "0" ]; then
+      printf ',\n' >> "${manifest}"
+    fi
+    first=0
+    {
+      printf '    {\n'
+      printf '      "key": "%s",\n' "$(json_escape "${key}")"
+      printf '      "name": "%s",\n' "$(json_escape "${name}")"
+      printf '      "category": "%s",\n' "$(json_escape "${category}")"
+      printf '      "source_type": "%s",\n' "$(json_escape "${source_type}")"
+      printf '      "path": "%s",\n' "$(json_escape "${path}")"
+      printf '      "version": "%s",\n' "$(json_escape "${version}")"
+      printf '      "license_name": "%s",\n' "$(json_escape "${license}")"
+      printf '      "provenance_url": "%s",\n' "$(json_escape "${provenance}")"
+      printf '      "note": "%s"\n' "$(json_escape "${note}")"
+      printf '    }'
+    } >> "${manifest}"
+  }
+
+  append_component "ffmpeg" "FFmpeg" "tool" "package_manager" "external/bin/ffmpeg" "GPL/LGPL depending on configure flags" "https://ffmpeg.org" "$(component_version "${STAGE}/external/bin/ffmpeg")" "See licenses/ffmpeg-configure.txt and Debian copyright files when available."
+  append_component "ffprobe" "FFprobe" "tool" "package_manager" "external/bin/ffprobe" "GPL/LGPL depending on configure flags" "https://ffmpeg.org" "$(component_version "${STAGE}/external/bin/ffprobe")" "Bundled with FFmpeg package when present."
+  append_component "tesseract" "Tesseract OCR" "ocr" "package_manager" "external/bin/tesseract" "Apache-2.0" "https://github.com/tesseract-ocr/tesseract" "$(component_version "${STAGE}/external/bin/tesseract")" "Language data is recorded as tessdata components when present."
+  append_component "tessdata" "Tesseract language data" "ocr" "package_manager" "external/share/tessdata" "Apache-2.0" "https://github.com/tesseract-ocr/tessdata" "installed" "Includes only language files present on the build host."
+  append_component "postgres" "PostgreSQL runtime" "database" "package_manager" "external/postgres/bin/postgres" "PostgreSQL License" "https://www.postgresql.org" "$(component_version "${STAGE}/external/postgres/bin/postgres")" "Optional local metadata database runtime."
+  append_component "python-runtime" "Python runtime" "python" "user_provided_or_system" "python" "Python Software Foundation License plus bundled package licenses" "https://www.python.org" "bundled" "Only present when a Python runtime root was provided."
+  append_component "ai-python-site" "Cartolensia AI Python site-packages" "python" "package_manager" "ai/python-site" "Package licenses vary" "https://pypi.org" "${AI_FLAVOR}" "See licenses/python-packages.txt."
+  append_component "ai-model-cache" "AI model cache" "model" "user_reviewed_cache" ".cartolensia/models" "Model licenses/provenance vary" "docs/AI_MODEL_APPROVALS.md" "optional" "Included only when CARTOLENSIA_DIST_INCLUDE_MODELS=1."
+
+  {
+    printf '\n  ]\n'
+    printf '}\n'
+  } >> "${manifest}"
+  cp "${manifest}" "${STAGE}/licenses/components-manifest.json"
+}
+
 write_source_snapshot() {
   [ "${INCLUDE_SOURCE}" = "1" ] || return 0
   note "creating AGPL source snapshot"
@@ -475,9 +570,11 @@ write_launcher_scripts
 write_distribution_docs
 write_manifests
 bundle_external_tools
+validate_ffmpeg_redistribution
 bundle_postgres
 bundle_python_ai
 bundle_models
+write_components_manifest
 write_source_snapshot
 
 note "creating archive ${ARCHIVE}"

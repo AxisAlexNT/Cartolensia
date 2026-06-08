@@ -1722,6 +1722,174 @@ func (db *DB) VectorSearch(ctx context.Context, modelID string, vector []float64
 	return out, nil
 }
 
+func (db *DB) UpsertComponent(ctx context.Context, component catalog.Component) (catalog.Component, error) {
+	if component.ID == "" {
+		component.ID = id.NewUUID()
+	}
+	if strings.TrimSpace(component.Key) == "" {
+		return catalog.Component{}, errors.New("component key is required")
+	}
+	if component.Status == "" {
+		component.Status = "missing"
+	}
+	if component.SourceType == "" {
+		component.SourceType = "system_path"
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(component.Metadata))
+	if err != nil {
+		return catalog.Component{}, err
+	}
+	var metadataOut []byte
+	err = db.pool.QueryRow(ctx, `
+		insert into components(id, key, name, category, version, status, source_type, source_url, license_name, provenance_url, install_path, executable_path, checksum, size_bytes, last_checked_at, installed_at, error, metadata_json)
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
+		on conflict(key) do update set
+			name=excluded.name,
+			category=excluded.category,
+			version=excluded.version,
+			status=excluded.status,
+			source_type=excluded.source_type,
+			source_url=excluded.source_url,
+			license_name=excluded.license_name,
+			provenance_url=excluded.provenance_url,
+			install_path=excluded.install_path,
+			executable_path=excluded.executable_path,
+			checksum=excluded.checksum,
+			size_bytes=excluded.size_bytes,
+			last_checked_at=excluded.last_checked_at,
+			installed_at=excluded.installed_at,
+			error=excluded.error,
+			metadata_json=excluded.metadata_json
+		returning id, key, name, category, version, status, source_type, source_url, license_name, provenance_url, install_path, executable_path, checksum, size_bytes, last_checked_at, installed_at, error, metadata_json`,
+		component.ID, component.Key, component.Name, component.Category, component.Version, component.Status, component.SourceType, component.SourceURL, component.LicenseName, component.ProvenanceURL, component.InstallPath, component.ExecutablePath, component.Checksum, component.SizeBytes, component.LastCheckedAt, component.InstalledAt, component.Error, metadata,
+	).Scan(&component.ID, &component.Key, &component.Name, &component.Category, &component.Version, &component.Status, &component.SourceType, &component.SourceURL, &component.LicenseName, &component.ProvenanceURL, &component.InstallPath, &component.ExecutablePath, &component.Checksum, &component.SizeBytes, &component.LastCheckedAt, &component.InstalledAt, &component.Error, &metadataOut)
+	if err != nil {
+		return catalog.Component{}, err
+	}
+	if err := json.Unmarshal(metadataOut, &component.Metadata); err != nil || component.Metadata == nil {
+		component.Metadata = map[string]any{}
+	}
+	return component, nil
+}
+
+func (db *DB) ListComponents(ctx context.Context, query catalog.ComponentQuery) ([]catalog.Component, error) {
+	limit, offset := normalizeDBPage(query.Limit, query.Offset)
+	q := strings.ToLower(strings.TrimSpace(query.Q))
+	rows, err := db.pool.Query(ctx, `
+		select id, key, name, category, version, status, source_type, source_url, license_name, provenance_url, install_path, executable_path, checksum, size_bytes, last_checked_at, installed_at, error, metadata_json
+		from components
+		where ($1='' or category=$1)
+			and ($2='' or status=$2)
+			and ($3='' or lower(key || ' ' || name || ' ' || category || ' ' || version || ' ' || status || ' ' || source_type || ' ' || license_name) like '%' || $3 || '%')
+		order by category, key
+		limit $4 offset $5`,
+		query.Category, query.Status, q, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.Component{}
+	for rows.Next() {
+		component, err := scanComponentRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, component)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) GetComponent(ctx context.Context, key string) (catalog.Component, error) {
+	rows, err := db.pool.Query(ctx, `
+		select id, key, name, category, version, status, source_type, source_url, license_name, provenance_url, install_path, executable_path, checksum, size_bytes, last_checked_at, installed_at, error, metadata_json
+		from components
+		where key=$1`, strings.TrimSpace(key))
+	if err != nil {
+		return catalog.Component{}, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return scanComponentRow(rows)
+	}
+	if err := rows.Err(); err != nil {
+		return catalog.Component{}, err
+	}
+	return catalog.Component{}, catalog.ErrNotFound
+}
+
+type componentScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanComponentRow(row componentScanner) (catalog.Component, error) {
+	var component catalog.Component
+	var metadata []byte
+	if err := row.Scan(&component.ID, &component.Key, &component.Name, &component.Category, &component.Version, &component.Status, &component.SourceType, &component.SourceURL, &component.LicenseName, &component.ProvenanceURL, &component.InstallPath, &component.ExecutablePath, &component.Checksum, &component.SizeBytes, &component.LastCheckedAt, &component.InstalledAt, &component.Error, &metadata); err != nil {
+		return catalog.Component{}, err
+	}
+	if err := json.Unmarshal(metadata, &component.Metadata); err != nil || component.Metadata == nil {
+		component.Metadata = map[string]any{}
+	}
+	return component, nil
+}
+
+func (db *DB) AddComponentEvent(ctx context.Context, event catalog.ComponentEvent) (catalog.ComponentEvent, error) {
+	if event.ID == "" {
+		event.ID = id.NewUUID()
+	}
+	if event.Level == "" {
+		event.Level = "info"
+	}
+	metadata, err := json.Marshal(metadataOrEmpty(event.Metadata))
+	if err != nil {
+		return catalog.ComponentEvent{}, err
+	}
+	var metadataOut []byte
+	err = db.pool.QueryRow(ctx, `
+		insert into component_events(id, component_key, level, message, metadata_json)
+		values($1,$2,$3,$4,$5::jsonb)
+		returning id, component_key, level, message, created_at, metadata_json`,
+		event.ID, event.ComponentKey, event.Level, event.Message, metadata,
+	).Scan(&event.ID, &event.ComponentKey, &event.Level, &event.Message, &event.CreatedAt, &metadataOut)
+	if err != nil {
+		return catalog.ComponentEvent{}, err
+	}
+	if err := json.Unmarshal(metadataOut, &event.Metadata); err != nil || event.Metadata == nil {
+		event.Metadata = map[string]any{}
+	}
+	return event, nil
+}
+
+func (db *DB) ListComponentEvents(ctx context.Context, key string, limit int) ([]catalog.ComponentEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.pool.Query(ctx, `
+		select id, component_key, level, message, created_at, metadata_json
+		from component_events
+		where component_key=$1
+		order by created_at desc
+		limit $2`, strings.TrimSpace(key), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.ComponentEvent{}
+	for rows.Next() {
+		var event catalog.ComponentEvent
+		var metadata []byte
+		if err := rows.Scan(&event.ID, &event.ComponentKey, &event.Level, &event.Message, &event.CreatedAt, &metadata); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(metadata, &event.Metadata); err != nil || event.Metadata == nil {
+			event.Metadata = map[string]any{}
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 func vectorFromJSON(payload []byte) []float64 {
 	var doc struct {
 		Vector []float64 `json:"vector"`

@@ -121,9 +121,14 @@ Every archive contains:
 - `licenses/THIRD_PARTY_NOTICES.md`;
 - `licenses/go-modules.txt`;
 - `licenses/npm-production-tree.json`;
+- `components-manifest.json` and `licenses/components-manifest.json`;
 - `licenses/python-packages.txt` when AI is bundled;
 - Debian/Ubuntu copyright files for copied system packages when available;
 - `source/cartolensia-source.tar.gz` when source bundling is enabled.
+
+The component manifest records each staged component key, name, category, source type, package-relative path, version string, license note, provenance URL, and redistribution note. It is intended for release review and for the in-app Component Manager import flow.
+
+The packager captures the bundled FFmpeg configure line to `licenses/ffmpeg-configure.txt` when FFmpeg is included. A configure line containing `--enable-nonfree` fails packaging by default because that build is not suitable for ordinary redistribution. `--enable-gpl` is recorded in `licenses/build-manifest.env` so release operators can mark the archive as a GPL-tools bundle. Only set `CARTOLENSIA_DIST_ALLOW_NONFREE_FFMPEG=1` for private/internal packages after a separate legal review.
 
 Before publishing a public release, review:
 

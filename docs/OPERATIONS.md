@@ -429,3 +429,19 @@ The package builder writes only under repo-local `dist/` by default. It stages:
 The GitHub Actions workflow `Build Offline Distribution` is manually triggerable and creates or updates a release with a `.7z` archive and `.sha256` checksum. Use `ai_flavor=runtime` for a compact OCR-capable package, `cpu` for CPU AI packages, and `cuda128` only after reviewing CUDA/PyTorch redistribution terms.
 
 Offline packages are self-contained application bundles for compatible Linux x86_64 hosts, but they cannot include host kernel/GPU drivers. GPU acceleration therefore still depends on compatible host drivers already being installed. Model weights are bundled only when `include_models` is enabled and the model cache has been reviewed for license/provenance.
+
+## Component Manager Operations
+
+Use Settings -> Components to audit and provide local runtime components:
+
+- media tools: FFmpeg and FFprobe;
+- metrics: VMAF/libvmaf detection;
+- OCR: Tesseract and English/Russian/Armenian/Chinese language data;
+- AI runtime: Python venv, PyTorch/torchvision, OpenCV, Transformers/Safetensors, OpenCLIP, facenet-pytorch;
+- AI models: EfficientNet-B0, MobileNetV3 Large, YuNet, Falconsai NSFW, OpenCLIP ViT-B/32, BLIP base.
+
+The Check action validates the current system or repo-local path and records component events. Provide path accepts an operator-selected executable or extracted directory after expected-file validation. Provide archive accepts `.zip`, `.tar.gz`, or `.tgz` and extracts only under `.cartolensia/components/<component-key>` after traversal/link checks.
+
+Do not use `/mnt/Models/rclone` as a component source, destination, cache, or extraction target. The API rejects that path for component operations. Component download/install buttons create visible jobs and provenance-gated messages; they do not silently fetch unreviewed third-party binaries.
+
+Asset detail pages use the component registry to explain missing AI/OCR/model prerequisites before starting an asset-scoped action. A missing component can be resolved by opening Settings -> Components and checking/providing the relevant component key.

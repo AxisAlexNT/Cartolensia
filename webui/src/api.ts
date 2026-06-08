@@ -680,6 +680,46 @@ export type FileBrowseResponse = {
   warnings?: string[];
 };
 
+export type ComponentRecord = {
+  id: string;
+  key: string;
+  name: string;
+  category: string;
+  version?: string;
+  status: string;
+  source_type: string;
+  source_url?: string;
+  license_name?: string;
+  provenance_url?: string;
+  install_path?: string;
+  executable_path?: string;
+  checksum?: string;
+  size_bytes?: number;
+  last_checked_at?: string;
+  installed_at?: string;
+  error?: string;
+  metadata_json?: Record<string, unknown>;
+};
+
+export type ComponentEvent = {
+  id: string;
+  component_key: string;
+  level: string;
+  message: string;
+  created_at: string;
+  metadata_json?: Record<string, unknown>;
+};
+
+export type ComponentListResponse = {
+  components: ComponentRecord[];
+  root: string;
+  total?: number;
+};
+
+export type ComponentStatusResponse = ComponentListResponse & {
+  counts: Record<string, number>;
+};
+
 let csrfHeader = "X-CSRF-Token";
 let csrfToken = "";
 
@@ -1177,5 +1217,45 @@ export const api = {
       entries: asArray(response.entries),
       warnings: asArray(response.warnings)
     }));
-  }
+  },
+  components: () =>
+    request<ComponentListResponse>("/api/v1/components").then((response) => ({
+      ...response,
+      components: asArray(response.components)
+    })),
+  componentStatus: () =>
+    request<ComponentStatusResponse>("/api/v1/components/status").then((response) => ({
+      ...response,
+      components: asArray(response.components),
+      counts: response.counts ?? {}
+    })),
+  component: (key: string) => request<ComponentRecord>(`/api/v1/components/${encodeURIComponent(key)}`),
+  componentEvents: (key: string) =>
+    request<{ events: ComponentEvent[] }>(`/api/v1/components/${encodeURIComponent(key)}/events`).then((response) => ({
+      events: asArray(response.events)
+    })),
+  checkComponent: (key: string) =>
+    request<{ job_id: string; component: ComponentRecord; status: string; error?: string }>(
+      `/api/v1/components/${encodeURIComponent(key)}/check`,
+      { method: "POST" }
+    ),
+  downloadComponent: (key: string) =>
+    request<{ job_id: string; component: ComponentRecord; status: string; error?: string }>(
+      `/api/v1/components/${encodeURIComponent(key)}/download`,
+      { method: "POST" }
+    ),
+  provideComponentPath: (key: string, path: string) =>
+    request<ComponentRecord>(`/api/v1/components/${encodeURIComponent(key)}/provide-path`, {
+      method: "POST",
+      body: JSON.stringify({ path })
+    }),
+  provideComponentArchive: (key: string, path: string) =>
+    request<{ job_id: string; component: ComponentRecord }>(`/api/v1/components/${encodeURIComponent(key)}/provide-archive`, {
+      method: "POST",
+      body: JSON.stringify({ path })
+    }),
+  setComponentEnabled: (key: string, enabled: boolean) =>
+    request<ComponentRecord>(`/api/v1/components/${encodeURIComponent(key)}/${enabled ? "enable" : "disable"}`, {
+      method: "POST"
+    })
 };

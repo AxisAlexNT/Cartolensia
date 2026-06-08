@@ -224,6 +224,7 @@ func (s *Server) settingsPayload() map[string]any {
 			{"id": "search", "label": "Search/Places", "runtime": true},
 			{"id": "transcoding", "label": "Transcoding", "runtime": true},
 			{"id": "ai", "label": "AI/Vector", "runtime": false},
+			{"id": "components", "label": "Components", "runtime": true},
 			{"id": "auth", "label": "Auth/Security", "runtime": false},
 			{"id": "backups", "label": "Backups/DB Export", "runtime": true},
 			{"id": "plugins", "label": "Plugins", "runtime": true},
