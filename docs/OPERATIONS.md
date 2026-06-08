@@ -472,21 +472,29 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/indexing/start \
   }'
 ```
 
-Run or rerun audio metadata/feature seeding with:
+Run or rerun bounded audio feature analysis with selected asset IDs or a bounded current scope:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:18080/api/v1/audio/analyze/start \
   -H 'Content-Type: application/json' \
   -d '{
-    "storage":"rclone_peek",
-    "prefix":"Cartolensia-photos/Sound Records",
-    "media_kind":"audio",
-    "max_files":20,
-    "include_audio":true,
-    "include_video":false,
-    "include_images":false,
-    "include_tracks":false,
-    "include_documents":false
+    "scope":"selected",
+    "asset_ids":["<audio-asset-id>"],
+    "limit":1
+  }'
+```
+
+Run ASR on a selected audio/video asset with:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/ai/jobs/transcribe \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "scope":"selected",
+    "asset_ids":["<audio-or-video-asset-id>"],
+    "limit":1,
+    "model":"small",
+    "language":"auto"
   }'
 ```
 
@@ -497,8 +505,11 @@ Useful inspection endpoints:
 - `/api/v1/audio/{id}/metadata`;
 - `/api/v1/assets/{id}/transcripts`;
 - `/api/v1/assets/{id}/document`;
+- `/api/v1/ai/workers`;
+- `/api/v1/components/status`;
 - `/api/v1/search?q=audio`;
 - `/api/v1/search?q=transcript:station`;
+- `/api/v1/search?q=tempo:120..140`;
 - `/api/v1/search?q=document:invoice`.
 
-ASR, Marker, advanced video captioning, and genre classifiers are optional component/model paths. If they are missing, operators should see a missing-component state rather than silent fallback to a remote service.
+ASR uses faster-whisper when `asr-faster-whisper`, `asr-ctranslate2`, and an ASR model component are installed. Audio analysis uses librosa/SoundFile. Marker, advanced video captioning, and dedicated genre classifiers are optional component/model paths. If they are missing, operators should see a missing-component state rather than silent fallback to a remote service.

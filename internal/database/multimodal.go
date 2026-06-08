@@ -96,6 +96,48 @@ func (db *DB) ListTranscripts(ctx context.Context, assetID string, limit int) ([
 	return out, rows.Err()
 }
 
+func (db *DB) ListAllTranscripts(ctx context.Context, limit, offset int) ([]catalog.Transcript, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := db.pool.Query(ctx, `
+		select id::text, asset_id::text, source_kind, language, model, full_text, created_at, metadata_json
+		from asset_transcripts
+		order by created_at desc
+		limit $1 offset $2
+	`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.Transcript{}
+	for rows.Next() {
+		var item catalog.Transcript
+		var meta []byte
+		if err := rows.Scan(&item.ID, &item.AssetID, &item.SourceKind, &item.Language, &item.Model, &item.FullText, &item.CreatedAt, &meta); err != nil {
+			return nil, err
+		}
+		item.Metadata = decodeMap(meta)
+		item.Segments, _ = db.listTranscriptSegments(ctx, item.ID, item.AssetID)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) DeleteTranscript(ctx context.Context, transcriptID string) error {
+	tag, err := db.pool.Exec(ctx, `delete from asset_transcripts where id=$1`, transcriptID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return catalog.ErrNotFound
+	}
+	return nil
+}
+
 func (db *DB) listTranscriptSegments(ctx context.Context, transcriptID, assetID string) ([]catalog.TranscriptSegment, error) {
 	rows, err := db.pool.Query(ctx, `
 		select id::text, transcript_id::text, asset_id::text, start_ms, end_ms, text, confidence, speaker, metadata_json

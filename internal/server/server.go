@@ -212,6 +212,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/videos/", s.handleVideoByID)
 	s.mux.HandleFunc("/api/v1/audio/analyze/start", s.handleAudioAnalyzeStart)
 	s.mux.HandleFunc("/api/v1/audio/", s.handleAudioByID)
+	s.mux.HandleFunc("/api/v1/transcripts", s.handleTranscripts)
+	s.mux.HandleFunc("/api/v1/transcripts/", s.handleTranscriptByID)
 	s.mux.HandleFunc("/api/v1/geo-align/session", s.handleGeoAlignSessionCreate)
 	s.mux.HandleFunc("/api/v1/geo-align/sessions/", s.handleGeoAlignSessionByID)
 	s.mux.HandleFunc("/api/v1/video-track-player/session", s.handleVideoTrackPlayerSessionCreate)
@@ -239,6 +241,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/jobs/embed", s.handleAIJobRequest("embed_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/describe", s.handleAIJobRequest("describe_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/ocr", s.handleAIJobRequest("ocr_image"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/transcribe", s.handleAIJobRequest("transcribe_audio"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/audio-analyze", s.handleAIJobRequest("analyze_audio"))
 	s.mux.HandleFunc("/api/v1/ai/predictions", s.handleAIPredictions)
 	s.mux.HandleFunc("/api/v1/ai/safety/", s.handleAISafetyByAsset)
 	s.mux.HandleFunc("/api/v1/faces/clusters", s.handleFaceClusters)
@@ -1137,38 +1141,14 @@ func (s *Server) handleMetadataEnrichStart(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleAudioAnalyzeStart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
-	if !s.requireWrite(w, r, "audio.analyze") {
-		return
-	}
-	payload := metadata.NewPayload()
-	payload.MediaKind = "audio"
-	payload.IncludeImages = false
-	payload.IncludeVideo = false
-	payload.IncludeTracks = false
-	payload.IncludeAudio = true
-	payload.IncludeDocs = false
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-	}
-	payload.MediaKind = "audio"
-	payload.IncludeAudio = true
-	job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("metadata_enrich", payload))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if s.deps.SyncJobs {
-		runner := metadata.Runner{Registry: s.deps.Registry, Store: s.deps.Store}
-		if err := runner.Enrich(r.Context(), &job); err != nil && !errors.Is(err, jobs.ErrCanceled) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+	s.handleAIJobRequestWithDefault("analyze_audio", func(req *aiJobRequest) {
+		if req.Scope == "" && req.AssetID == "" && len(req.AssetIDs) == 0 {
+			req.Scope = "current"
 		}
-	}
-	writeJSON(w, http.StatusAccepted, job)
+		if req.Limit <= 0 {
+			req.Limit = 50
+		}
+	})(w, r)
 }
 
 func (s *Server) handleAudioByID(w http.ResponseWriter, r *http.Request) {
@@ -1205,6 +1185,51 @@ func (s *Server) handleAudioByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"asset": asset, "features": features, "status": "ok"})
+}
+
+func (s *Server) handleTranscripts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit := intQuery(r.URL.Query(), "limit", 50, 1, 200)
+	offset := intQuery(r.URL.Query(), "offset", 0, 0, 100000)
+	transcripts, err := s.deps.Store.ListAllTranscripts(r.Context(), limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"transcripts": transcripts,
+		"limit":       limit,
+		"offset":      offset,
+		"total":       len(transcripts),
+		"note":        "Transcripts are Cartolensia metadata only; no ASR sidecars are written beside originals.",
+	})
+}
+
+func (s *Server) handleTranscriptByID(w http.ResponseWriter, r *http.Request) {
+	transcriptID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/transcripts/"), "/")
+	if transcriptID == "" {
+		writeError(w, http.StatusNotFound, errors.New("transcript id is required"))
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		if !s.requireWrite(w, r, "transcripts.write") {
+			return
+		}
+		if err := s.deps.Store.DeleteTranscript(r.Context(), transcriptID); errors.Is(err, catalog.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": transcriptID})
+	default:
+		methodNotAllowed(w)
+	}
 }
 
 func (s *Server) handlePreviewsStart(w http.ResponseWriter, r *http.Request) {
@@ -2628,6 +2653,10 @@ func (s *Server) handleAIWorkerByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAIJobRequest(kind string) http.HandlerFunc {
+	return s.handleAIJobRequestWithDefault(kind, nil)
+}
+
+func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*aiJobRequest)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
@@ -2639,6 +2668,9 @@ func (s *Server) handleAIJobRequest(kind string) http.HandlerFunc {
 		var req aiJobRequest
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		if applyDefaults != nil {
+			applyDefaults(&req)
 		}
 		jobKind := aiCartolensiaJobKind(kind)
 		auditPayload := map[string]any{
@@ -2708,6 +2740,8 @@ type aiJobRequest struct {
 	Scope           string   `json:"scope"`
 	Limit           int      `json:"limit"`
 	SafetyThreshold *float64 `json:"safety_threshold"`
+	Language        string   `json:"language"`
+	Model           string   `json:"model"`
 }
 
 type aiJobResult struct {
@@ -2777,9 +2811,18 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 			"media_url": s.aiMediaURL(r, asset.ID),
 			"options": map[string]any{
 				"safety_threshold": req.SafetyThreshold,
+				"language":         req.Language,
+				"model":            req.Model,
+				"suffix":           assetAISuffix(asset),
 			},
 		}
-		response, err := callAISidecar(ctx, endpoint+apiPath, payload)
+		timeout := 3 * time.Minute
+		if kind == "transcribe_audio" {
+			timeout = 45 * time.Minute
+		} else if kind == "analyze_audio" {
+			timeout = 10 * time.Minute
+		}
+		response, err := callAISidecarWithTimeout(ctx, endpoint+apiPath, payload, timeout)
 		if err != nil {
 			result.Errors = append(result.Errors, asset.ID+": "+err.Error())
 			continue
@@ -2866,6 +2909,10 @@ func aiSidecarPath(kind string) string {
 		return "/describe-image"
 	case "ocr_image":
 		return "/ocr-image"
+	case "transcribe_audio":
+		return "/transcribe-audio"
+	case "analyze_audio":
+		return "/analyze-audio"
 	default:
 		return ""
 	}
@@ -2875,9 +2922,25 @@ func aiSupportsAsset(kind string, asset catalog.Asset) bool {
 	switch kind {
 	case "classify_image", "detect_faces", "safety_nsfw", "embed_image", "describe_image", "ocr_image":
 		return asset.MediaKind == "photo"
+	case "transcribe_audio":
+		return asset.MediaKind == "audio" || asset.MediaKind == "video"
+	case "analyze_audio":
+		return asset.MediaKind == "audio"
 	default:
 		return false
 	}
+}
+
+func assetAISuffix(asset catalog.Asset) string {
+	for _, loc := range asset.Locations {
+		if loc.Extension != "" {
+			return "." + strings.TrimPrefix(strings.ToLower(loc.Extension), ".")
+		}
+	}
+	if asset.MediaKind != "" {
+		return "." + asset.MediaKind
+	}
+	return ".media"
 }
 
 func (s *Server) aiMediaURL(r *http.Request, assetID string) string {
@@ -2893,11 +2956,15 @@ func (s *Server) aiMediaURL(r *http.Request, assetID string) string {
 }
 
 func callAISidecar(ctx context.Context, endpoint string, payload map[string]any) (aiInferencePayload, error) {
+	return callAISidecarWithTimeout(ctx, endpoint, payload, 3*time.Minute)
+}
+
+func callAISidecarWithTimeout(ctx context.Context, endpoint string, payload map[string]any, timeout time.Duration) (aiInferencePayload, error) {
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(payload); err != nil {
 		return aiInferencePayload{}, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, &body)
 	if err != nil {
@@ -3075,6 +3142,76 @@ func (s *Server) persistAIResponse(ctx context.Context, workerID, kind, assetID 
 					stored++
 				}
 			}
+		}
+	case "transcribe_audio":
+		asset, err := s.deps.Store.GetAsset(ctx, assetID)
+		sourceKind := "audio"
+		if err == nil && asset.MediaKind == "video" {
+			sourceKind = "video_audio"
+		}
+		fullText := strings.TrimSpace(stringFromAny(response.Metadata["text"]))
+		segmentItems, _ := response.Metadata["segments"].([]any)
+		segments := make([]catalog.TranscriptSegment, 0, len(segmentItems))
+		for _, raw := range segmentItems {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			text := strings.TrimSpace(stringFromAny(item["text"]))
+			if text == "" {
+				continue
+			}
+			segments = append(segments, catalog.TranscriptSegment{
+				StartMS:    int64FromAny(item["start_ms"]),
+				EndMS:      int64FromAny(item["end_ms"]),
+				Text:       text,
+				Confidence: floatPtrFromAny(item["confidence"]),
+				Metadata: map[string]any{
+					"index":          item["index"],
+					"avg_logprob":    item["avg_logprob"],
+					"no_speech_prob": item["no_speech_prob"],
+					"engine":         response.Metadata["engine"],
+					"provider":       response.Metadata["provider"],
+				},
+			})
+		}
+		if fullText == "" && len(segments) > 0 {
+			parts := make([]string, 0, len(segments))
+			for _, segment := range segments {
+				parts = append(parts, segment.Text)
+			}
+			fullText = strings.Join(parts, "\n")
+		}
+		metadata := summarizeAIMetadata(response.Metadata)
+		delete(metadata, "segments")
+		delete(metadata, "text")
+		transcript, err := s.deps.Store.UpsertTranscript(ctx, catalog.Transcript{
+			AssetID:    assetID,
+			SourceKind: sourceKind,
+			Language:   stringFromAny(response.Metadata["language"]),
+			Model:      modelName,
+			FullText:   fullText,
+			Metadata:   metadata,
+		}, segments)
+		if err == nil {
+			stored += 1 + len(transcript.Segments)
+		}
+	case "analyze_audio":
+		metadata := summarizeAIMetadata(response.Metadata)
+		features := catalog.AudioFeatures{
+			AssetID:          assetID,
+			DurationSeconds:  floatPtrFromOptionalAny(response.Metadata["duration_seconds"]),
+			TempoBPM:         floatPtrFromOptionalAny(response.Metadata["tempo_bpm"]),
+			Key:              stringFromAny(response.Metadata["key"]),
+			Mode:             stringFromAny(response.Metadata["mode"]),
+			Loudness:         floatPtrFromOptionalAny(response.Metadata["loudness"]),
+			SpeechMusicRatio: floatPtrFromOptionalAny(response.Metadata["speech_music_ratio"]),
+			GenreLabels:      stringSliceFromAny(response.Metadata["genre_labels"]),
+			Model:            modelName,
+			Metadata:         metadata,
+		}
+		if _, err := s.deps.Store.UpsertAudioFeatures(ctx, features); err == nil {
+			stored++
 		}
 	}
 	return stored, unsafe
@@ -4291,7 +4428,7 @@ func (s *Server) handleAISafetyByAsset(w http.ResponseWriter, r *http.Request) {
 func aiWorkerProfiles(ctx context.Context) []map[string]any {
 	hints := transcoding.AcceleratorHints()
 	localStatus, localHealth := aiWorkerHealth(ctx, "http://127.0.0.1:19090/health")
-	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text", "ocr_image"}
+	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text", "ocr_image", "transcribe_audio", "analyze_audio"}
 	localDevice := ""
 	localModels := map[string]any{}
 	if caps, ok := localHealth["capabilities"].(map[string]any); ok {
@@ -4326,7 +4463,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"profile":      "cpu",
 			"configured":   false,
 			"status":       "not_configured",
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
 			"endpoint":     "",
 		},
 		{
@@ -4337,7 +4474,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"available":      hints["docker_nvidia_runtime"],
 			"native_gpu":     hints["nvidia_smi"],
 			"docker_runtime": hints["docker_nvidia_runtime"],
-			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
+			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
 			"endpoint":       "",
 			"note":           "optional Docker NVIDIA profile; native CUDA is represented by ai-local",
 		},
@@ -4347,7 +4484,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"configured":   false,
 			"status":       "not_configured",
 			"available":    hints["dev_dri"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
 			"endpoint":     "",
 		},
 		{
@@ -4356,7 +4493,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"configured":   false,
 			"status":       "not_configured",
 			"available":    hints["dev_dri"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
 			"endpoint":     "",
 		},
 	}
@@ -4434,6 +4571,10 @@ func aiCartolensiaJobKind(kind string) string {
 		return "ai_describe"
 	case "ocr_image":
 		return "ai_ocr"
+	case "transcribe_audio":
+		return "ai_transcribe"
+	case "analyze_audio":
+		return "audio_analyze"
 	default:
 		return "ai_action"
 	}
@@ -6064,6 +6205,24 @@ func audioFeatureMatchesToken(features catalog.AudioFeatures, prefix, plain stri
 		if features.TempoBPM == nil {
 			return false
 		}
+		if strings.Contains(plain, "..") {
+			minRaw, maxRaw, _ := strings.Cut(plain, "..")
+			minRaw = strings.TrimSpace(minRaw)
+			maxRaw = strings.TrimSpace(maxRaw)
+			if minRaw != "" {
+				minValue, err := strconv.ParseFloat(minRaw, 64)
+				if err != nil || *features.TempoBPM < minValue {
+					return false
+				}
+			}
+			if maxRaw != "" {
+				maxValue, err := strconv.ParseFloat(maxRaw, 64)
+				if err != nil || *features.TempoBPM > maxValue {
+					return false
+				}
+			}
+			return true
+		}
 		target, err := strconv.ParseFloat(plain, 64)
 		if err != nil {
 			return strings.Contains(strings.ToLower(fmt.Sprintf("%.0f %.1f bpm", *features.TempoBPM, *features.TempoBPM)), plain)
@@ -6568,8 +6727,40 @@ func floatFromAny(value any) float64 {
 	}
 }
 
+func int64FromAny(value any) int64 {
+	switch typed := value.(type) {
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case json.Number:
+		out, _ := typed.Int64()
+		return out
+	case string:
+		out, _ := strconv.ParseInt(typed, 10, 64)
+		return out
+	default:
+		return 0
+	}
+}
+
 func floatPtrFromAny(value any) *float64 {
 	if value == nil {
+		return nil
+	}
+	out := floatFromAny(value)
+	return &out
+}
+
+func floatPtrFromOptionalAny(value any) *float64 {
+	if value == nil {
+		return nil
+	}
+	if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
 		return nil
 	}
 	out := floatFromAny(value)
@@ -6602,6 +6793,28 @@ func floatSliceFromAny(value any) []float64 {
 		return out
 	default:
 		return nil
+	}
+}
+
+func stringSliceFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return compactStrings(typed)
+	case []any:
+		return compactStrings(anySliceToStrings(typed))
+	default:
+		text := strings.TrimSpace(stringFromAny(value))
+		if text == "" {
+			return []string{}
+		}
+		parts := strings.Split(text, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if value := strings.TrimSpace(part); value != "" {
+				out = append(out, value)
+			}
+		}
+		return compactStrings(out)
 	}
 }
 

@@ -12,7 +12,7 @@ from cartolensia_ai.config import ServiceConfig, load_config
 from cartolensia_ai.image_io import describe_optional_pillow
 from cartolensia_ai.models.dummy import DummyBackend
 from cartolensia_ai.models.real import CAPABILITIES, RealBackend
-from cartolensia_ai.schemas import CapabilityResponse, ImageRequest, InferenceResponse, TextRequest
+from cartolensia_ai.schemas import CapabilityResponse, ImageRequest, InferenceResponse, MediaRequest, TextRequest
 
 
 def create_app(config: ServiceConfig | None = None) -> FastAPI:
@@ -96,6 +96,18 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
         if isinstance(backend, DummyBackend):
             return backend.infer("ocr-image", request)
         return backend.ocr_image(request)
+
+    @app.post("/transcribe-audio", response_model=InferenceResponse, status_code=202)
+    def transcribe_audio(request: MediaRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return backend.infer("transcribe-audio", request)
+        return backend.transcribe_audio(request)
+
+    @app.post("/analyze-audio", response_model=InferenceResponse, status_code=202)
+    def analyze_audio(request: MediaRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return backend.infer("analyze-audio", request)
+        return backend.analyze_audio(request)
 
     return app
 

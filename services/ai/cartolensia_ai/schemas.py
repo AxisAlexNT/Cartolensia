@@ -14,6 +14,13 @@ class ImageRequest(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class MediaRequest(BaseModel):
+    asset_id: str | None = None
+    media_url: str | None = None
+    storage_url: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
 class TextRequest(BaseModel):
     text: str
     options: dict[str, Any] = Field(default_factory=dict)

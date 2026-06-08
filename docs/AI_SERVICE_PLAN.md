@@ -335,3 +335,39 @@ Safety:
 - Model/cache location remains `.cartolensia/models`.
 - No model files were downloaded.
 - Nothing was written under `/mnt/Models/rclone`.
+
+## 2026-06-08 ASR / Audio Analysis Status
+
+Implemented:
+
+- Sidecar endpoints:
+  - `POST /transcribe-audio`;
+  - `POST /analyze-audio`.
+- Backend job/API integration:
+  - `POST /api/v1/ai/jobs/transcribe`;
+  - `POST /api/v1/audio/analyze/start`;
+  - `POST /api/v1/ai/jobs/audio-analyze`;
+  - transcript and audio-feature asset subroutes.
+- Component Manager tracks:
+  - `asr-faster-whisper`;
+  - `asr-ctranslate2`;
+  - `asr-model-small`;
+  - `asr-model-medium`;
+  - `audio-librosa`;
+  - `audio-soundfile`.
+- Approved runtime packages are installed in `.cartolensia/ai-venv`.
+- `faster-whisper-small` is cached under `.cartolensia/models/faster-whisper`.
+- One bounded real-peek audio sample was transcribed and analyzed successfully.
+
+Still gated/future:
+
+- `faster-whisper-medium` is optional and not installed.
+- Dedicated genre classification model is not installed; current audio labels are heuristics.
+- Advanced video-language and document/Marker workflows remain component-dependent.
+
+Safety:
+
+- ASR/audio analysis reads media through read-only Cartolensia URLs or safe temp/cache paths.
+- Temporary sidecar media copies are deleted after processing.
+- Transcripts and audio features are PostgreSQL metadata only.
+- Nothing was written under `/mnt/Models/rclone`.

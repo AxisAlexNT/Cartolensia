@@ -150,5 +150,9 @@ Audio/document/ASR features are component-managed in offline packages.
 - faster-whisper, ctranslate2, librosa/scipy, Marker/PDF tooling, and any advanced video/genre models are optional payloads. Bundle them only after license/provenance review.
 - ASR and document models must be stored under package-local component/model/runtime directories, never under original media roots.
 - Offline packages should expose missing ASR/Marker/genre components as actionable Component Manager states if they are not bundled.
+- Current ASR/audio component keys are `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, and `audio-soundfile`.
+- `faster-whisper-small` can be bundled only when model weight provenance has been reviewed and the package manifest records the source cache path under `.cartolensia/models/faster-whisper`.
+- PyMuPDF is AGPL-3.0-or-later and is tracked as `document-pymupdf`; include it only when the release package and notices satisfy its terms.
+- Audio feature labels are currently heuristic when no reviewed genre model is bundled; do not advertise offline packages as having a production genre classifier unless a reviewed model is included.
 
 The current Linux package flow can include the application, WebUI, OCR/media tools, PostgreSQL runtime, Python runtime, and reviewed model cache. It does not bundle host GPU drivers, public map data, online geocoders, or unreviewed model weights.

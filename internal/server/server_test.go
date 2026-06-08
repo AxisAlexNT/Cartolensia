@@ -292,6 +292,129 @@ func TestComponentManagerAPIsAndSafeOperatorInputs(t *testing.T) {
 	}
 }
 
+func TestTranscribeAIPersistenceAndTranscriptAPIs(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{Version: "test", Config: cfg, Plugins: plugins.BuiltIns(), Registry: registry, Store: store, StoreBackend: "memory"})
+	now := time.Now().UTC()
+	audio, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/audio/sample.wav",
+		RelativePath: "audio/sample.wav",
+		Name:         "sample.wav",
+		Extension:    ".wav",
+		MIME:         "audio/wav",
+		MediaKind:    "audio",
+		SizeBytes:    128,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, unsafe := srv.persistAIResponse(ctx, "ai-local", "transcribe_audio", audio.Asset.ID, aiInferencePayload{
+		Status:   "ok",
+		Endpoint: "transcribe-audio",
+		Metadata: map[string]any{
+			"engine":   "faster-whisper",
+			"provider": "faster-whisper",
+			"model":    "small",
+			"language": "en",
+			"text":     "Hello laboratory.\nStation announcement.",
+			"segments": []any{
+				map[string]any{"start_ms": float64(0), "end_ms": float64(900), "text": "Hello laboratory.", "confidence": 0.94},
+				map[string]any{"start_ms": float64(900), "end_ms": float64(1700), "text": "Station announcement.", "confidence": 0.91},
+			},
+		},
+	}, aiJobRequest{})
+	if unsafe || stored != 3 {
+		t.Fatalf("stored=%d unsafe=%v", stored, unsafe)
+	}
+	transcripts, err := store.ListTranscripts(ctx, audio.Asset.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcripts) != 1 || transcripts[0].SourceKind != "audio" || len(transcripts[0].Segments) != 2 {
+		t.Fatalf("unexpected transcripts %#v", transcripts)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/transcripts?limit=10", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Hello laboratory") {
+		t.Fatalf("transcript list status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/transcripts/"+transcripts[0].ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete transcript status %d body %s", rec.Code, rec.Body.String())
+	}
+	transcripts, _ = store.ListTranscripts(ctx, audio.Asset.ID, 10)
+	if len(transcripts) != 0 {
+		t.Fatalf("transcript was not deleted: %#v", transcripts)
+	}
+}
+
+func TestAudioAnalyzeAIPersistence(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{Version: "test", Config: cfg, Plugins: plugins.BuiltIns(), Registry: registry, Store: store, StoreBackend: "memory"})
+	now := time.Now().UTC()
+	audio, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/audio/features.wav",
+		RelativePath: "audio/features.wav",
+		Name:         "features.wav",
+		Extension:    ".wav",
+		MIME:         "audio/wav",
+		MediaKind:    "audio",
+		SizeBytes:    128,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, unsafe := srv.persistAIResponse(ctx, "ai-local", "analyze_audio", audio.Asset.ID, aiInferencePayload{
+		Status:   "ok",
+		Endpoint: "analyze-audio",
+		Metadata: map[string]any{
+			"model":              "librosa_audio_features",
+			"duration_seconds":   12.5,
+			"tempo_bpm":          121.5,
+			"key":                "A",
+			"mode":               "minor",
+			"loudness":           -18.2,
+			"speech_music_ratio": 0.32,
+			"genre_labels":       []any{"music-like", "mid-tempo"},
+			"genre_status":       "heuristic_labels_model_missing",
+		},
+	}, aiJobRequest{})
+	if unsafe || stored != 1 {
+		t.Fatalf("stored=%d unsafe=%v", stored, unsafe)
+	}
+	features, err := store.GetAudioFeatures(ctx, audio.Asset.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features.TempoBPM == nil || *features.TempoBPM < 121 || features.Key != "A" || features.Mode != "minor" || len(features.GenreLabels) != 2 {
+		t.Fatalf("unexpected audio features %#v", features)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+audio.Asset.ID+"/audio-features", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"music-like"`) {
+		t.Fatalf("asset audio features status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	ctx := context.Background()
 	store := catalog.NewMemoryStore()
@@ -498,6 +621,11 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=genre:ambient", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched audio features"`) {
 		t.Fatalf("audio feature search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=tempo:100..140", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched audio features"`) {
+		t.Fatalf("audio tempo range search status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=caption:train", nil))

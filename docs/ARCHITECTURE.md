@@ -305,3 +305,18 @@ Asset detail exposes OCR full text, transcripts, audio features, video frame cap
 - OCR records are stored as Cartolensia metadata/prediction rows so the existing asset-detail overlays and PostgreSQL/local search can index OCR text without modifying originals or writing sidecars.
 - `place_cache` is now a durable PostgreSQL/memory store concept. The app seeds cache-only entries for Yerevan, Armenia, Lori Province, and Vanadzor, and exposes operator CRUD through `/api/v1/places`.
 - Search and asset-detail reverse-place rows now read from durable local place entries with built-in defaults only as fallback. Online geocoding remains intentionally absent from automatic flows.
+
+## 2026-06-08 ASR And Audio Analysis Update
+
+- The AI sidecar now exposes `POST /transcribe-audio` for local faster-whisper ASR. It accepts bounded media URLs or safe local temp/cache paths, materializes input under `/tmp` when needed, and deletes temporary copies after inference.
+- ASR metadata is stored in normalized PostgreSQL tables:
+  - `asset_transcripts` for full transcript text, source kind, language, model, and metadata;
+  - `asset_transcript_segments` for timestamped text segments and confidence metadata.
+- Backend endpoints are available for transcript workflows:
+  - `POST /api/v1/ai/jobs/transcribe`;
+  - `GET /api/v1/assets/{id}/transcripts`;
+  - `GET /api/v1/transcripts`;
+  - `DELETE /api/v1/transcripts/{id}`.
+- The AI sidecar also exposes `POST /analyze-audio` using librosa/SoundFile. The backend routes `/api/v1/audio/analyze/start` and `/api/v1/ai/jobs/audio-analyze` persist tempo, key, mode, loudness, speech/music ratio, spectral summary, and heuristic labels into the existing `audio_features` table.
+- `postgres_local` search now matches transcript text and audio features. Supported audio tokens include `transcript:...`, `genre:...`, `key:...`, exact tempo values, and tempo ranges such as `tempo:120..140`.
+- Component Manager tracks ASR/audio dependencies and models as first-class components: `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, and `audio-soundfile`.

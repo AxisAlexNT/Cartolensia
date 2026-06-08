@@ -1152,7 +1152,7 @@ export const api = {
   transcodingMetricsStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/metrics/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
-  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr", payload: Record<string, unknown>) =>
+  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
   deleteOCRBlock: (assetId: string, blockId: string) =>
     request<{ status: string }>(`/api/v1/assets/${encodeURIComponent(assetId)}/ocr/${encodeURIComponent(blockId)}`, {

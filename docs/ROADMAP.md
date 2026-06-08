@@ -204,11 +204,15 @@ Completed:
 - Asset-detail APIs and UI panels for OCR full text, transcripts, audio features, frame captions, and document text.
 - PostgreSQL/local universal search hooks for OCR, transcripts, documents, frame captions, and audio features.
 - Cache-safe bounded live indexing of the current Sound Records audio samples.
+- faster-whisper ASR sidecar endpoint, backend transcription jobs, asset transcript UI, and transcript search are implemented and validated on one bounded Sound Records WAV.
+- Component Manager now tracks ASR/audio runtime components and the installed `faster-whisper-small` model.
+- librosa/SoundFile audio analysis jobs now persist tempo, key, loudness, speech/music ratio, spectral summary, and heuristic labels.
+- Tempo range search such as `tempo:120..140` is supported.
 
 Next:
 
-- Install/review ASR components and enable faster-whisper transcription jobs with CPU/CUDA fallback.
-- Add librosa/scipy-backed tempo/key/loudness extraction and a reviewed genre classifier.
+- Add a reviewed genre classifier model beyond heuristic labels.
+- Optionally install/review `faster-whisper-medium` for higher quality ASR.
 - Add Marker/PDF document extraction with Tesseract fallback and Markdown storage.
 - Add simple video frame sampling jobs that use existing image classification/caption/OCR tools.
 - Add waveform peak generation stored in PostgreSQL/cache metadata.

@@ -189,3 +189,11 @@ Audio, transcript, video-frame, and document metadata follow the same immutable-
 - Optional ASR/Marker/video/genre model downloads require component provenance and license review before bundling or release.
 
 The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not use it as an ASR temp directory, OCR cache, document export location, waveform cache, model cache, or component extraction target.
+
+## 2026-06-08 ASR And Audio Analysis Safety Notes
+
+- `faster-whisper`, CTranslate2, librosa, SoundFile, and PyMuPDF were installed into the repo-local `.cartolensia/ai-venv`; they are not vendored into source and must be reviewed before redistribution.
+- `faster-whisper-small` was cached under `.cartolensia/models/faster-whisper`; ASR model weights must stay component-managed and out of original media storage.
+- `/transcribe-audio` and `/analyze-audio` accept only bounded Cartolensia media URLs or safe local temp/cache paths. Temporary media copies are deleted after sidecar processing.
+- ASR transcripts, timestamped segments, and audio features are PostgreSQL metadata only. They do not create sidecars and do not modify media files.
+- Audio-analysis genre labels are heuristic until a reviewed classifier model is added; UI/reporting should avoid presenting them as authoritative identity or safety decisions.

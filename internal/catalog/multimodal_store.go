@@ -62,6 +62,48 @@ func (s *MemoryStore) ListTranscripts(_ context.Context, assetID string, limit i
 	return out, nil
 }
 
+func (s *MemoryStore) ListAllTranscripts(_ context.Context, limit, offset int) ([]Transcript, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []Transcript{}
+	for _, items := range s.transcripts {
+		out = append(out, items...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(out) {
+		return []Transcript{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) DeleteTranscript(_ context.Context, transcriptID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for assetID, items := range s.transcripts {
+		next := items[:0]
+		deleted := false
+		for _, item := range items {
+			if item.ID == transcriptID {
+				deleted = true
+				continue
+			}
+			next = append(next, item)
+		}
+		if deleted {
+			s.transcripts[assetID] = append([]Transcript(nil), next...)
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
 func (s *MemoryStore) UpsertAudioFeatures(_ context.Context, features AudioFeatures) (AudioFeatures, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

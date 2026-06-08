@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+import importlib.util
+import math
 import os
 from pathlib import Path
 import shutil
@@ -12,8 +14,8 @@ import tempfile
 from typing import Any
 
 from cartolensia_ai.config import ServiceConfig
-from cartolensia_ai.image_io import load_pillow_image, read_image_bytes
-from cartolensia_ai.schemas import ImageRequest, InferenceResponse, Prediction, TextRequest
+from cartolensia_ai.image_io import load_pillow_image, materialize_media_input, read_image_bytes
+from cartolensia_ai.schemas import ImageRequest, InferenceResponse, MediaRequest, Prediction, TextRequest
 
 
 CAPABILITIES = [
@@ -24,6 +26,8 @@ CAPABILITIES = [
     "embed_image",
     "embed_text",
     "ocr_image",
+    "transcribe_audio",
+    "analyze_audio",
 ]
 
 DEFAULT_OCR_LANGUAGES = ["eng", "rus", "hye", "chi_sim", "chi_tra"]
@@ -49,6 +53,26 @@ OCR_LANGUAGE_ALIASES = {
     "chi_tra": "chi_tra",
 }
 
+ASR_LANGUAGE_ALIASES = {
+    "auto": "",
+    "": "",
+    "english": "en",
+    "en": "en",
+    "eng": "en",
+    "russian": "ru",
+    "ru": "ru",
+    "rus": "ru",
+    "armenian": "hy",
+    "hy": "hy",
+    "hye": "hy",
+    "chinese": "zh",
+    "zh": "zh",
+    "zh-cn": "zh",
+    "zh-tw": "zh",
+    "chi_sim": "zh",
+    "chi_tra": "zh",
+}
+
 
 @dataclass
 class LoadedModel:
@@ -70,6 +94,7 @@ class RealBackend:
         self._caption: LoadedModel | None = None
         self._openclip: LoadedModel | None = None
         self._yunet: Any | None = None
+        self._asr: LoadedModel | None = None
 
     def _configure_cache_environment(self) -> None:
         self.config.model_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +152,8 @@ class RealBackend:
                 "loaded": self._caption is not None,
             },
             "ocr": _tesseract_status(),
+            "asr": _asr_status(self.config.model_dir, self._asr is not None),
+            "audio_analysis": _audio_analysis_status(),
         }
 
     def classify_image(self, request: ImageRequest) -> InferenceResponse:
@@ -410,6 +437,164 @@ class RealBackend:
         except Exception as exc:
             return _error("ocr-image", exc)
 
+    def transcribe_audio(self, request: MediaRequest) -> InferenceResponse:
+        temp_path: Path | None = None
+        should_delete = False
+        try:
+            model_name = str((request.options or {}).get("model") or "small").strip() or "small"
+            if model_name not in {"tiny", "base", "small", "medium"} and not Path(model_name).exists():
+                raise MissingModelError("unsupported ASR model; allowed values: tiny, base, small, medium, or a safe local model path")
+            language = _requested_asr_language(request.options)
+            timeout = _int_option(request.options, "timeout_seconds", 0)
+            suffix = str((request.options or {}).get("suffix") or ".media")
+            temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
+            loaded = self._load_asr(model_name)
+            whisper_model = loaded.model
+            beam_size = _int_option(request.options, "beam_size", 5)
+            vad_filter = _bool_option(request.options, "vad_filter", True)
+            kwargs: dict[str, Any] = {
+                "beam_size": max(1, min(beam_size, 10)),
+                "vad_filter": vad_filter,
+            }
+            if language:
+                kwargs["language"] = language
+            segments_iter, info = whisper_model.transcribe(str(temp_path), **kwargs)
+            segments: list[dict[str, Any]] = []
+            pieces: list[str] = []
+            for index, segment in enumerate(segments_iter):
+                text = str(getattr(segment, "text", "") or "").strip()
+                if not text:
+                    continue
+                start = float(getattr(segment, "start", 0.0) or 0.0)
+                end = float(getattr(segment, "end", start) or start)
+                no_speech = getattr(segment, "no_speech_prob", None)
+                avg_logprob = getattr(segment, "avg_logprob", None)
+                confidence = _segment_confidence(no_speech, avg_logprob)
+                item = {
+                    "index": index,
+                    "start_ms": int(max(0, round(start * 1000))),
+                    "end_ms": int(max(0, round(end * 1000))),
+                    "start_seconds": start,
+                    "end_seconds": end,
+                    "text": text,
+                    "confidence": confidence,
+                    "avg_logprob": avg_logprob,
+                    "no_speech_prob": no_speech,
+                }
+                segments.append(item)
+                pieces.append(text)
+            full_text = "\n".join(pieces).strip()
+            detected_language = str(getattr(info, "language", "") or language or "")
+            language_probability = getattr(info, "language_probability", None)
+            duration = getattr(info, "duration", None)
+            return InferenceResponse(
+                status="ok",
+                endpoint="transcribe-audio",
+                predictions=[],
+                metadata={
+                    "asset_id": request.asset_id,
+                    "engine": "faster-whisper",
+                    "provider": "faster-whisper",
+                    "model": loaded.name,
+                    "device": loaded.metadata.get("device") if loaded.metadata else "cpu",
+                    "compute_type": loaded.metadata.get("compute_type") if loaded.metadata else "",
+                    "language": detected_language,
+                    "language_probability": language_probability,
+                    "duration_seconds": duration,
+                    "segments": segments,
+                    "segment_count": len(segments),
+                    "text": full_text,
+                    "timeout_seconds": timeout,
+                    "vad_filter": vad_filter,
+                },
+            )
+        except MissingModelError as exc:
+            return InferenceResponse(
+                status="model_missing",
+                endpoint="transcribe-audio",
+                reason=str(exc),
+                metadata={"engine": "faster-whisper", **_asr_status(self.config.model_dir, self._asr is not None)},
+            )
+        except Exception as exc:
+            return _error("transcribe-audio", exc)
+        finally:
+            if should_delete and temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def analyze_audio(self, request: MediaRequest) -> InferenceResponse:
+        temp_path: Path | None = None
+        should_delete = False
+        try:
+            librosa = _import_optional("librosa")
+            np = _import_optional("numpy")
+            suffix = str((request.options or {}).get("suffix") or ".media")
+            temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
+            y, sr = librosa.load(str(temp_path), sr=None, mono=True)
+            if y is None or len(y) == 0:
+                raise ValueError("audio decode produced no samples")
+            duration = float(librosa.get_duration(y=y, sr=sr))
+            tempo_values = librosa.beat.tempo(y=y, sr=sr, aggregate=None)
+            tempo = _median_float(tempo_values, np)
+            rms = librosa.feature.rms(y=y)
+            rms_mean = _mean_float(rms, np)
+            loudness = 20.0 * math.log10(max(rms_mean, 1e-9))
+            zcr = _mean_float(librosa.feature.zero_crossing_rate(y), np)
+            flatness = _mean_float(librosa.feature.spectral_flatness(y=y), np)
+            centroid = _mean_float(librosa.feature.spectral_centroid(y=y, sr=sr), np)
+            bandwidth = _mean_float(librosa.feature.spectral_bandwidth(y=y, sr=sr), np)
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+            key, mode, key_confidence = _estimate_key(chroma, np)
+            speech_music_ratio = max(0.0, min(1.0, (flatness * 2.5) + (zcr * 3.0)))
+            genre_labels = _audio_feature_labels(tempo, speech_music_ratio, loudness)
+            return InferenceResponse(
+                status="ok",
+                endpoint="analyze-audio",
+                predictions=[
+                    Prediction(label=label, confidence=None, metadata={"source": "local_audio_features"})
+                    for label in genre_labels
+                ],
+                metadata={
+                    "asset_id": request.asset_id,
+                    "engine": "librosa",
+                    "model": "librosa_audio_features",
+                    "duration_seconds": duration,
+                    "sample_rate_hz": int(sr),
+                    "tempo_bpm": tempo,
+                    "key": key,
+                    "mode": mode,
+                    "key_confidence": key_confidence,
+                    "loudness": loudness,
+                    "speech_music_ratio": speech_music_ratio,
+                    "genre_labels": genre_labels,
+                    "genre_status": "heuristic_labels_model_missing",
+                    "spectral": {
+                        "rms_mean": rms_mean,
+                        "zero_crossing_rate": zcr,
+                        "spectral_flatness": flatness,
+                        "spectral_centroid_hz": centroid,
+                        "spectral_bandwidth_hz": bandwidth,
+                    },
+                },
+            )
+        except MissingModelError as exc:
+            return InferenceResponse(
+                status="model_missing",
+                endpoint="analyze-audio",
+                reason=str(exc),
+                metadata={"engine": "librosa", **_audio_analysis_status()},
+            )
+        except Exception as exc:
+            return _error("analyze-audio", exc)
+        finally:
+            if should_delete and temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     def _select_device(self) -> str:
         requested = self.config.device
         if requested in {"cpu", "cuda"}:
@@ -529,6 +714,36 @@ class RealBackend:
         )
         return self._openclip
 
+    def _load_asr(self, model_name: str) -> LoadedModel:
+        if self._asr is not None and self._asr.name == model_name:
+            return self._asr
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+        except Exception as exc:
+            raise MissingModelError("faster-whisper is not installed in .cartolensia/ai-venv") from exc
+        model_root = self.config.model_dir / "faster-whisper"
+        model_root.mkdir(parents=True, exist_ok=True)
+        device, device_index = _asr_device(self.device)
+        compute_type = "float16" if device == "cuda" else "int8"
+        local_only = bool(os.environ.get("CARTOLENSIA_ASR_LOCAL_ONLY") == "1")
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                device_index=device_index,
+                compute_type=compute_type,
+                download_root=str(model_root),
+                local_files_only=local_only,
+            )
+        except Exception as exc:
+            raise MissingModelError(f"faster-whisper model {model_name!r} is unavailable: {exc}") from exc
+        self._asr = LoadedModel(
+            name=model_name,
+            model=model,
+            metadata={"device": device, "device_index": device_index, "compute_type": compute_type, "download_root": str(model_root)},
+        )
+        return self._asr
+
 
 class MissingModelError(RuntimeError):
     pass
@@ -602,6 +817,104 @@ def _tesseract_status() -> dict[str, Any]:
     }
 
 
+def _asr_status(model_dir: Path, loaded: bool) -> dict[str, Any]:
+    package_available = importlib.util.find_spec("faster_whisper") is not None
+    ctranslate_available = importlib.util.find_spec("ctranslate2") is not None
+    model_root = model_dir / "faster-whisper"
+    model_entries = []
+    if model_root.exists():
+        model_entries = sorted(path.name for path in model_root.iterdir() if path.is_dir())
+    return {
+        "name": "faster-whisper",
+        "available": package_available and ctranslate_available,
+        "loaded": loaded,
+        "package_available": package_available,
+        "ctranslate2_available": ctranslate_available,
+        "download_root": str(model_root),
+        "models_present": model_entries,
+        "supported_languages": ["auto", "en", "ru", "hy", "zh"],
+        "default_model": "small",
+    }
+
+
+def _audio_analysis_status() -> dict[str, Any]:
+    return {
+        "name": "librosa",
+        "available": importlib.util.find_spec("librosa") is not None and importlib.util.find_spec("soundfile") is not None,
+        "librosa_available": importlib.util.find_spec("librosa") is not None,
+        "soundfile_available": importlib.util.find_spec("soundfile") is not None,
+        "features": ["tempo_bpm", "key", "mode", "loudness", "speech_music_ratio", "spectral_summary"],
+        "genre": "heuristic_only_model_missing",
+    }
+
+
+def _import_optional(module_name: str) -> Any:
+    if importlib.util.find_spec(module_name) is None:
+        raise MissingModelError(f"Python package {module_name!r} is not installed in the Cartolensia AI environment")
+    return __import__(module_name)
+
+
+def _mean_float(values: Any, np: Any) -> float:
+    try:
+        if values is None:
+            return 0.0
+        return float(np.nan_to_num(np.asarray(values, dtype=float), nan=0.0).mean())
+    except Exception:
+        return 0.0
+
+
+def _median_float(values: Any, np: Any) -> float | None:
+    try:
+        array = np.asarray(values, dtype=float)
+        array = array[np.isfinite(array)]
+        if array.size == 0:
+            return None
+        value = float(np.median(array))
+        if value <= 0:
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def _estimate_key(chroma: Any, np: Any) -> tuple[str, str, float]:
+    names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    try:
+        profile = np.asarray(chroma, dtype=float).mean(axis=1)
+        if profile.size < 12:
+            return "", "", 0.0
+        index = int(np.argmax(profile[:12]))
+        total = float(profile[:12].sum())
+        confidence = float(profile[index] / total) if total > 0 else 0.0
+        major_thirds = profile[(index + 4) % 12] + profile[(index + 7) % 12]
+        minor_thirds = profile[(index + 3) % 12] + profile[(index + 7) % 12]
+        mode = "major" if major_thirds >= minor_thirds else "minor"
+        return names[index], mode, confidence
+    except Exception:
+        return "", "", 0.0
+
+
+def _audio_feature_labels(tempo: float | None, speech_music_ratio: float, loudness: float) -> list[str]:
+    labels: list[str] = []
+    if speech_music_ratio >= 0.55:
+        labels.append("speech-like")
+    else:
+        labels.append("music-like")
+    if tempo is None:
+        labels.append("tempo-uncertain")
+    elif tempo < 80:
+        labels.append("slow")
+    elif tempo > 140:
+        labels.append("fast")
+    else:
+        labels.append("mid-tempo")
+    if loudness < -35:
+        labels.append("quiet")
+    elif loudness > -12:
+        labels.append("loud")
+    return labels
+
+
 def _available_tesseract_languages(tesseract_path: str) -> set[str]:
     try:
         proc = subprocess.run(
@@ -645,6 +958,14 @@ def _requested_ocr_languages(options: dict[str, Any] | None) -> list[str]:
     return list(dict.fromkeys(normalized))
 
 
+def _requested_asr_language(options: dict[str, Any] | None) -> str:
+    raw = "" if not options else str(options.get("language") or options.get("languages") or "").strip()
+    if "," in raw or "+" in raw:
+        raw = raw.replace("+", ",").split(",", 1)[0].strip()
+    key = raw.lower().replace(" ", "_")
+    return ASR_LANGUAGE_ALIASES.get(key, key)
+
+
 def _int_option(options: dict[str, Any] | None, key: str, default: int) -> int:
     if not options or key not in options:
         return default
@@ -661,6 +982,44 @@ def _float_option(options: dict[str, Any] | None, key: str, default: float) -> f
         return float(options[key])
     except Exception:
         return default
+
+
+def _bool_option(options: dict[str, Any] | None, key: str, default: bool) -> bool:
+    if not options or key not in options:
+        return default
+    value = options[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _asr_device(selected_device: str) -> tuple[str, int]:
+    if selected_device.startswith("cuda"):
+        parts = selected_device.split(":", 1)
+        index = 0
+        if len(parts) == 2:
+            try:
+                index = int(parts[1])
+            except ValueError:
+                index = 0
+        return "cuda", max(0, index)
+    return "cpu", 0
+
+
+def _segment_confidence(no_speech: Any, avg_logprob: Any) -> float | None:
+    if no_speech is not None:
+        try:
+            return max(0.0, min(1.0, 1.0 - float(no_speech)))
+        except Exception:
+            pass
+    if avg_logprob is not None:
+        try:
+            return max(0.0, min(1.0, math.exp(float(avg_logprob))))
+        except Exception:
+            return None
+    return None
 
 
 def _parse_tesseract_tsv(raw: str, languages: list[str], min_confidence: float) -> list[dict[str, Any]]:

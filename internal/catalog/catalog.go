@@ -624,6 +624,8 @@ type Store interface {
 	VectorSearch(context.Context, string, []float64, int) ([]VectorSearchResult, error)
 	UpsertTranscript(context.Context, Transcript, []TranscriptSegment) (Transcript, error)
 	ListTranscripts(context.Context, string, int) ([]Transcript, error)
+	ListAllTranscripts(context.Context, int, int) ([]Transcript, error)
+	DeleteTranscript(context.Context, string) error
 	UpsertAudioFeatures(context.Context, AudioFeatures) (AudioFeatures, error)
 	GetAudioFeatures(context.Context, string) (AudioFeatures, error)
 	UpsertVideoFrameCaption(context.Context, VideoFrameCaption) (VideoFrameCaption, error)

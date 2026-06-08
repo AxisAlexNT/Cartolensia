@@ -283,6 +283,7 @@ const galleryTrackElement = ref<HTMLDivElement | null>(null);
 const selectedTrackMapElement = ref<HTMLDivElement | null>(null);
 const geoAlignMapElement = ref<HTMLDivElement | null>(null);
 const assetVideoElement = ref<HTMLVideoElement | null>(null);
+const assetAudioElement = ref<HTMLAudioElement | null>(null);
 const galleryVideoElement = ref<HTMLVideoElement | null>(null);
 const showMapDebug = ref(localStorage.getItem("cartolensia.map.showDebug") === "true");
 const showMapLayerMenu = ref(false);
@@ -341,7 +342,7 @@ const transcodeTemplate = ref("ffmpeg -i ${input} -c:v ${preset} -f hls ${output
 const transcodePlannerMessage = ref("Plans write only to the configured Cartolensia transcode cache; originals are never replaced.");
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const aiWorkers = ref<Record<string, unknown> | null>(null);
-type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed" | "ocr";
+type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze";
 
 const aiMessage = ref("");
 const aiBusyKind = ref<AIJobKind | "">("");
@@ -1756,6 +1757,13 @@ async function attachHLSPlayback() {
   await video.play().catch(() => undefined);
 }
 
+function seekAssetMedia(timeMs: number) {
+  const media = assetAudioElement.value || assetVideoElement.value;
+  if (!media) return;
+  media.currentTime = Math.max(0, timeMs / 1000);
+  media.play().catch(() => undefined);
+}
+
 function terminalJobStatus(status: string): boolean {
   return ["succeeded", "failed", "canceled", "cancelled"].includes(status);
 }
@@ -2203,7 +2211,9 @@ function missingComponentsForAIAction(kind: AIJobKind): string[] {
     describe: ["python-ai-venv", "blip-base"],
     safety: ["python-ai-venv", "falconsai-nsfw"],
     embed: ["python-ai-venv", "openclip-vit-b32"],
-    ocr: ["tesseract", "tessdata-eng"]
+    ocr: ["tesseract", "tessdata-eng"],
+    transcribe: ["python-ai-venv", "asr-faster-whisper", "asr-ctranslate2"],
+    "audio-analyze": ["python-ai-venv", "audio-librosa", "audio-soundfile"]
   };
   return requirements[kind].filter((key) => {
     const component = componentByKey(key);
@@ -2216,8 +2226,22 @@ function missingComponentsForAIAction(kind: AIJobKind): string[] {
 
 async function runAssetAIAction(kind: AIJobKind, label: string, extra: Record<string, unknown> = {}) {
   if (!assetDetail.value) return;
-  if (assetDetail.value.asset.media_kind !== "photo") {
-    assetAIActionStatus.value[label] = { status: "skipped", summary: "This action currently runs on photo assets only." };
+  const mediaKind = assetDetail.value.asset.media_kind;
+  const mediaCompatible =
+    kind === "transcribe"
+      ? mediaKind === "audio" || mediaKind === "video"
+      : kind === "audio-analyze"
+        ? mediaKind === "audio"
+      : mediaKind === "photo";
+  if (!mediaCompatible) {
+    assetAIActionStatus.value[label] = {
+      status: "skipped",
+      summary: kind === "transcribe"
+        ? "Transcription runs on audio/video assets only."
+        : kind === "audio-analyze"
+          ? "Audio feature analysis runs on audio assets only."
+          : "This action currently runs on photo assets only."
+    };
     return;
   }
   const missing = missingComponentsForAIAction(kind);
@@ -4386,6 +4410,7 @@ onBeforeUnmount(() => {
             <div v-else-if="assetDetail.asset.media_kind === 'audio'" class="audio-panel">
               <audio
                 v-if="assetDetail.original_url"
+                ref="assetAudioElement"
                 :src="assetDetail.original_url"
                 controls
                 preload="metadata"
@@ -4494,7 +4519,25 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <div v-else-if="assetDetail.asset.media_kind === 'video'" class="empty-state compact-empty">
-              Frame AI for videos is planned. Use the poster/frame workflows when implemented; current live AI functions are photo-scoped.
+              <p>Frame AI for videos is planned. Audio transcription can run now against the selected video audio stream.</p>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('transcribe', 'video_transcript', { model: 'small' })">
+                <i class="bi bi-soundwave" aria-hidden="true"></i>
+                Run audio transcription
+              </button>
+            </div>
+            <div v-else-if="assetDetail.asset.media_kind === 'audio'" class="ai-action-grid">
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('transcribe', 'audio_transcript', { model: 'small' })">
+                <i class="bi bi-soundwave" aria-hidden="true"></i>
+                Run transcription
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('audio-analyze', 'audio_features')">
+                <i class="bi bi-sliders" aria-hidden="true"></i>
+                Run audio analysis
+              </button>
+              <button type="button" class="btn btn-outline-secondary" @click="setActive('Jobs')">
+                <i class="bi bi-list-task" aria-hidden="true"></i>
+                View audio jobs
+              </button>
             </div>
             <div v-else class="empty-state compact-empty">
               AI image actions are not relevant for GPS/KML track assets.
@@ -4613,6 +4656,19 @@ onBeforeUnmount(() => {
                   <strong>{{ transcript.language || 'auto language' }} · {{ transcript.model || 'ASR model' }}</strong>
                   <small>{{ transcript.source_kind || 'media audio' }} · {{ transcript.segments?.length ?? 0 }} segments</small>
                   <p>{{ transcript.full_text }}</p>
+                  <div v-if="transcript.segments?.length" class="segment-list">
+                    <button
+                      v-for="segment in transcript.segments"
+                      :key="segment.id"
+                      type="button"
+                      class="segment-row"
+                      @click="seekAssetMedia(segment.start_ms)"
+                    >
+                      <span>{{ formatDuration(segment.start_ms / 1000) }}</span>
+                      <strong>{{ segment.text }}</strong>
+                      <small>{{ typeof segment.confidence === 'number' ? segment.confidence.toFixed(2) : '' }}</small>
+                    </button>
+                  </div>
                 </div>
                 <button type="button" class="btn btn-sm btn-outline-secondary" @click.stop="copyText(transcript.full_text)">
                   <i class="bi bi-clipboard" aria-hidden="true"></i>

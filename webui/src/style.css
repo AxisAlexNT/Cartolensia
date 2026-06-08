@@ -777,6 +777,31 @@ td {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.segment-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.segment-row {
+  align-items: center;
+  background: rgba(9, 105, 218, 0.08);
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: inherit;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 72px minmax(0, 1fr) 48px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.segment-row:hover {
+  border-color: #0969da;
+}
+
 .compact-empty {
   padding: 0.75rem;
 }

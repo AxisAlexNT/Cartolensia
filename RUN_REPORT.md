@@ -1604,6 +1604,117 @@ Safety confirmation:
 - PostgreSQL was not reset.
 - No commit and no push were done.
 
+## 2026-06-08 ASR And Audio Analysis Productization Pass
+
+### Implemented
+
+- Added real ASR support to the local AI sidecar:
+  - `POST /transcribe-audio`;
+  - faster-whisper provider with CUDA when available and CPU fallback;
+  - explicit language support for English, Russian, Armenian, Chinese, and auto-detect;
+  - safe media materialization under `/tmp` or approved cache/model roots only;
+  - returned full transcript, timestamped segments, language probability, model/device metadata, and confidence proxies.
+- Added Component Manager records for `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, `audio-soundfile`, and `document-pymupdf`.
+- Installed approved repo-local Python packages into `.cartolensia/ai-venv`, including faster-whisper, CTranslate2, librosa, SoundFile, PyMuPDF, and supporting packages.
+- Downloaded and registered the approved `faster-whisper-small` model under `.cartolensia/models/faster-whisper`; it is now visible as `asr-model-small`.
+- Added backend ASR job/action support:
+  - `POST /api/v1/ai/jobs/transcribe`;
+  - `GET /api/v1/assets/{id}/transcripts`;
+  - `GET /api/v1/transcripts`;
+  - `DELETE /api/v1/transcripts/{id}`;
+  - persisted `asset_transcripts` and `asset_transcript_segments`.
+- Added asset-detail UI support:
+  - audio/video transcription action buttons;
+  - transcript section with full text, copy button, and clickable timestamped segments that seek the audio/video player.
+- Added real audio feature analysis:
+  - sidecar `POST /analyze-audio` using librosa/SoundFile;
+  - backend `/api/v1/audio/analyze/start` and `/api/v1/ai/jobs/audio-analyze`;
+  - persisted tempo, key, mode, loudness, speech/music ratio, spectral summary, and heuristic labels in `audio_features`;
+  - audio asset action button for bounded per-asset analysis.
+- Hardened multimodal search:
+  - transcript text is searchable through `transcript:...` and plain local search;
+  - audio feature search supports `genre:...`, `key:...`, exact tempo, and tempo ranges such as `tempo:120..140`.
+
+### Live Validation
+
+- Synthetic `/tmp/cartolensia-asr-tone.wav` ASR probe succeeded through the sidecar using faster-whisper `small`.
+- Bounded real-peek ASR run on `Hamalir (2026-03-15 19_19_40).wav` completed:
+  - job `142200aa-866a-4ad3-9a21-ecb64aa1c218`;
+  - 1 target processed;
+  - 12 timestamped segments plus full transcript stored;
+  - transcript search `transcript:story` returned the audio asset.
+- Bounded real-peek audio analysis on the same asset completed:
+  - job `5a0a9fcb-e8fb-4caa-afac-2057f1ff711a`;
+  - tempo `126.048` BPM;
+  - key `C major`;
+  - loudness `-27.79`;
+  - labels `music-like`, `mid-tempo`;
+  - searches `genre:music-like`, `key:C`, and `tempo:120..140` returned the asset.
+- Live `/api/v1/ai/workers` now advertises `transcribe_audio` and `analyze_audio`.
+- Live `/api/v1/components/status` reports ASR/audio packages and `asr-model-small` installed; VMAF/libvmaf, MobileNetV3 fallback weights, and `asr-model-medium` remain missing/optional.
+
+### Verification
+
+Passed during this pass:
+
+- `.cartolensia/ai-venv/bin/python -m py_compile services/ai/cartolensia_ai/server.py services/ai/cartolensia_ai/models/real.py services/ai/cartolensia_ai/models/dummy.py`
+- `gofmt -w internal/server/server.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/catalog ./internal/database`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server`
+- `npm --prefix webui run build`
+
+Final full verification is recorded in the latest closeout notes.
+
+### Known Limitations
+
+- ASR quality depends on the selected faster-whisper model and source audio; the live sample auto-detected English with moderate probability.
+- Genre classification is currently heuristic and marked `heuristic_labels_model_missing`; no dedicated genre model was downloaded.
+- `asr-model-medium` is optional and remains missing to avoid a larger download in this pass.
+- Document/Marker extraction remains component-scaffolded; PyMuPDF is installed and registered, but a full document extraction job was not completed in this pass.
+- Persisted map cluster cache remains future work; current map clustering behavior was not changed in this pass.
+
+### Safety Confirmation
+
+- `/mnt/Models/rclone` was read only through Cartolensia media URLs and was not modified.
+- No generated files, model files, components, transcripts, caches, or exports were written under `/mnt/Models/rclone`.
+- No new real-data prefix scan was run.
+- No missing-file marking was run.
+- PostgreSQL was not reset.
+- No commit and no push were done.
+
+### Final Closeout Verification
+
+Passed after the final edits:
+
+- `git diff --check`
+- `bash -n scripts/smoke-test.sh`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+- `bash scripts/test-db.sh`
+- `CARTOLENSIA_SMOKE_ADDR=127.0.0.1:18081 bash scripts/smoke-test.sh`
+
+Focused live checks passed:
+
+- `/api/v1/health`: `ok`;
+- AI sidecar `/health`: `ok`, with `transcribe_audio` and `analyze_audio`;
+- `/api/v1/stats`: `57` assets, `48` photos, `2` videos, `3` audio, `4` tracks;
+- `/api/v1/components/status`: ASR/audio components installed and optional missing components clearly reported;
+- `/api/v1/search?q=transcript:story`: returned the transcribed audio asset;
+- `/api/v1/search?q=tempo:120..140`: returned the analyzed audio asset;
+- `/api/v1/assets/edfa9b20-b6d8-42ea-b87b-10609f48c511/transcripts`: returned full transcript plus 12 segments;
+- `/api/v1/assets/edfa9b20-b6d8-42ea-b87b-10609f48c511/audio-features`: returned librosa feature metadata.
+
+Additional fix during verification:
+
+- `scripts/smoke-test.sh` expected the old fixture count of `4`; current fixture tests and discovery include `5` assets including a document. The smoke script now checks `assets:5` and `hashed:5`.
+
+Live services were restarted and left running:
+
+- App: `http://127.0.0.1:18080`;
+- AI sidecar: `http://127.0.0.1:19090`.
+
 ## 2026-06-08 OCR Runtime And Durable Place Cache Pass
 
 This pass continued from the live real-peek service after the operator installed OCR packages. I did not install packages, download models, pull Docker images, scan new real-data prefixes, reset PostgreSQL, run missing-file marking, commit, or push.
