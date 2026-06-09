@@ -876,6 +876,106 @@ func TestScreenDistanceClusteringSplitsWithZoom(t *testing.T) {
 	}
 }
 
+func TestVideoTrackPositionInterpolatesSpeedAndElevation(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.Auth.Mode = "local"
+	cfg.Cache.Dir = t.TempDir()
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       cfg,
+		Plugins:      plugins.BuiltIns(),
+		Registry:     registry,
+		Store:        store,
+		StoreBackend: "memory",
+	})
+	videoFile, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/videos/PXL_20260512_072546131.mp4",
+		RelativePath: "videos/PXL_20260512_072546131.mp4",
+		Name:         "PXL_20260512_072546131.mp4",
+		Extension:    "mp4",
+		MIME:         "video/mp4",
+		MediaKind:    "video",
+		SizeBytes:    1024,
+		MTime:        time.Date(2026, 5, 12, 7, 25, 46, 0, time.FixedZone("AMT", 4*60*60)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	videoTaken := time.Date(2026, 5, 12, 7, 25, 46, 0, time.FixedZone("AMT", 4*60*60))
+	if err := store.UpdateAssetMetadata(ctx, videoFile.Asset.ID, &videoTaken, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	trackFile, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/tracks/20260512-072610.gpx",
+		RelativePath: "tracks/20260512-072610.gpx",
+		Name:         "20260512-072610.gpx",
+		Extension:    "gpx",
+		MIME:         "application/gpx+xml",
+		MediaKind:    "track",
+		SizeBytes:    1024,
+		MTime:        videoTaken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	speedA := 1.5
+	speedB := 2.5
+	elevA := 10.0
+	elevB := 20.0
+	if err := store.UpsertTrackPoints(ctx, trackFile.Asset.ID, []catalog.TrackPoint{
+		{RecordedAt: videoTaken, Lat: 61.0, Lon: 30.0, SpeedMPS: &speedA, ElevationM: &elevA},
+		{RecordedAt: videoTaken.Add(10 * time.Second), Lat: 61.1, Lon: 30.1, SpeedMPS: &speedB, ElevationM: &elevB},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/video-track-player/session", strings.NewReader(`{"video_asset_id":"`+videoFile.Asset.ID+`","track_ids":["`+trackFile.Asset.ID+`"]}`))
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session status %d body %s", rec.Code, rec.Body.String())
+	}
+	var session videoTrackPlayerSession
+	if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/video-track-player/sessions/"+session.ID+"/position?time_ms=5000", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("position status %d body %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Positions []struct {
+			Lat        float64  `json:"lat"`
+			Lon        float64  `json:"lon"`
+			SpeedMPS   *float64 `json:"speed_mps"`
+			ElevationM *float64 `json:"elevation_m"`
+			Mode       string   `json:"mode"`
+			Time       string   `json:"time"`
+		} `json:"positions"`
+		TargetTime string `json:"target_time"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Positions) != 1 {
+		t.Fatalf("expected one interpolated position, got %#v", payload.Positions)
+	}
+	if payload.Positions[0].SpeedMPS == nil || payload.Positions[0].ElevationM == nil {
+		t.Fatalf("expected interpolated speed/elevation, got %#v", payload.Positions[0])
+	}
+	if payload.Positions[0].Mode == "" || payload.TargetTime == "" {
+		t.Fatalf("expected moving marker metadata, got %#v", payload)
+	}
+}
+
 func testPointFeature(id string, lon, lat float64) map[string]any {
 	return map[string]any{
 		"type": "Feature",

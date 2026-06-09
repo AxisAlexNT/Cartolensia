@@ -4691,15 +4691,27 @@ func (s *Server) videoTrackPosition(ctx context.Context, session *videoTrackPlay
 			continue
 		}
 		positions = append(positions, map[string]any{
-			"track_id": trackID,
-			"name":     detail.Summary.Name,
-			"lat":      point.Lat,
-			"lon":      point.Lon,
-			"time":     point.RecordedAt,
-			"mode":     mode,
+			"track_id":               trackID,
+			"name":                   detail.Summary.Name,
+			"lat":                    point.Lat,
+			"lon":                    point.Lon,
+			"time":                   point.RecordedAt,
+			"mode":                   mode,
+			"speed_mps":              point.SpeedMPS,
+			"elevation_m":            point.ElevationM,
+			"relative_time_seconds":  relativeTimeSeconds(detail.Summary.StartTime, point.RecordedAt),
+			"track_distance_m":       detail.Summary.DistanceM,
+			"track_duration_seconds": detail.Summary.DurationSec,
 		})
 	}
 	return map[string]any{"session_id": session.ID, "target_time": target, "time_source": session.TimeSource, "positions": positions, "warnings": warnings}, nil
+}
+
+func relativeTimeSeconds(start *time.Time, current time.Time) float64 {
+	if start == nil || start.IsZero() || current.IsZero() {
+		return 0
+	}
+	return current.Sub(*start).Seconds()
 }
 
 func (s *Server) bestVideoTimestampCandidate(ctx context.Context, asset catalog.Asset, trackIDs []string) (catalog.TimestampCandidate, bool) {
@@ -6168,6 +6180,8 @@ func interpolateTrackPoint(points []catalog.TrackPoint, target time.Time) (catal
 			ratio := target.Sub(prev.RecordedAt).Seconds() / total
 			prev.Lat = prev.Lat + (next.Lat-prev.Lat)*ratio
 			prev.Lon = prev.Lon + (next.Lon-prev.Lon)*ratio
+			prev.ElevationM = interpolateOptionalFloat64(prev.ElevationM, next.ElevationM, ratio)
+			prev.SpeedMPS = interpolateOptionalFloat64(prev.SpeedMPS, next.SpeedMPS, ratio)
 			prev.RecordedAt = target
 			return prev, "interpolated", nil
 		}
@@ -6198,6 +6212,22 @@ func interpolateTrackPointWithTolerance(points []catalog.TrackPoint, target time
 		return last, "clamped_end", nil
 	}
 	return catalog.TrackPoint{}, "", catalog.ErrNotFound
+}
+
+func interpolateOptionalFloat64(left, right *float64, ratio float64) *float64 {
+	if left == nil && right == nil {
+		return nil
+	}
+	if left == nil {
+		value := *right
+		return &value
+	}
+	if right == nil {
+		value := *left
+		return &value
+	}
+	value := *left + (*right-*left)*ratio
+	return &value
 }
 
 type bbox struct {

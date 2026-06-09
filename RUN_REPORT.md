@@ -3061,6 +3061,30 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-09 Video Track Player Stabilization
+
+Fixed:
+
+- The Video Track Player playback loop no longer self-throttles the position request before the fetch is issued.
+- The synchronized map now includes an OpenLayers scale line.
+- The synchronized map now shows a live HUD with coordinates, time, source, mode, speed, and altitude for the current point.
+- The backend `video-track-player` position payload now includes interpolated speed/elevation and relative time metadata.
+- Added a regression test for interpolated position metrics.
+
+Live validation:
+
+- Restarted the live app and confirmed `GET /api/v1/health` is healthy.
+- `20260512-072610.gpx` and `PXL_20260512_072546131.mp4` still form a valid session.
+- `GET /api/v1/video-track-player/sessions/{id}/position?time_ms=45000` now returns a different point than `time_ms=0`, so the marker advances once playback reaches the overlapping track window.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-09 Local Full-Bundle Build Path
 
 Added:

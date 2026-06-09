@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import OLMap from "ol/Map";
 import View from "ol/View";
 import GeoJSON from "ol/format/GeoJSON";
+import { defaults as defaultControls } from "ol/control/defaults";
+import ScaleLine from "ol/control/ScaleLine";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
 import Overlay from "ol/Overlay";
@@ -419,6 +421,10 @@ const videoTrackTrackSearch = ref("");
 const videoTrackVideoOptions = ref<Asset[]>([]);
 const videoTrackTrackOptions = ref<TrackSummary[]>([]);
 const videoTrackSelectedTracks = ref<TrackSummary[]>([]);
+const videoTrackCurrentPosition = computed(() => {
+  const positions = asArray(videoTrackPosition.value?.positions as unknown[]);
+  return (positions[0] as Record<string, unknown> | undefined) ?? null;
+});
 const assetDetailSeekMs = ref<number | null>(null);
 const searchPageTotal = ref(0);
 const filePickerOpen = ref(false);
@@ -1283,6 +1289,29 @@ function videoTrackMarkerStyle(feature: FeatureLike) {
   });
 }
 
+function videoTrackPositionNumber(position: Record<string, unknown> | null, key: string): number | undefined {
+  if (!position) return undefined;
+  const value = Number(position[key]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function videoTrackPositionText(position: Record<string, unknown> | null, key: string): string {
+  if (!position) return "";
+  const value = position[key];
+  return value === undefined || value === null || value === "" ? "" : String(value);
+}
+
+function videoTrackPayloadText(key: string): string {
+  return videoTrackPositionText(videoTrackPosition.value, key);
+}
+
+function videoTrackPointSummary(position: Record<string, unknown> | null): string {
+  const lat = videoTrackPositionNumber(position, "lat");
+  const lon = videoTrackPositionNumber(position, "lon");
+  if (lat === undefined || lon === undefined) return "n/a";
+  return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+}
+
 function updateVideoTrackMarkerLayer() {
   const positions = asArray(videoTrackPosition.value?.positions as unknown[]);
   videoTrackMarkerSource.clear();
@@ -1338,6 +1367,9 @@ async function renderVideoTrackMap() {
     videoTrackMap = new OLMap({
       target: videoTrackMapElement.value,
       layers: [videoTrackTileLayer, videoTrackTrackLayer, videoTrackMarkerLayer],
+      controls: defaultControls({ attribution: false }).extend([
+        new ScaleLine({ units: "metric", bar: true, steps: 4, text: true, minWidth: 120 })
+      ]),
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 10 })
     });
   } else {
@@ -1389,7 +1421,6 @@ function startVideoTrackPlaybackLoop(video: HTMLVideoElement) {
       videoTrackRafId = window.requestAnimationFrame(tick);
       return;
     }
-    videoTrackMarkerThrottleAt = now;
     void updateVideoTrackPosition(video.currentTime * 1000);
     videoTrackRafId = window.requestAnimationFrame(tick);
   };
@@ -1402,7 +1433,6 @@ function startVideoTrackPlaybackLoop(video: HTMLVideoElement) {
     if (!videoTrackSession.value || video.paused || video.ended) return;
     const now = performance.now();
     if (now - videoTrackMarkerThrottleAt < throttleMs || videoTrackPositionPending) return;
-    videoTrackMarkerThrottleAt = now;
     void updateVideoTrackPosition(video.currentTime * 1000);
   }, intervalMs);
 }
@@ -1421,9 +1451,11 @@ function handleVideoTrackPlaybackEvent(event: Event) {
   if (event.type === "loadedmetadata" || event.type === "seeked" || event.type === "timeupdate") {
     const now = performance.now();
     const throttleMs = Math.max(0, numericRuntimeSetting("video_track_player.marker_throttle_ms", 250));
-    if (videoTrackPositionPending || now - videoTrackMarkerThrottleAt < throttleMs) return;
-    videoTrackMarkerThrottleAt = now;
-    void updateVideoTrackPosition(video.currentTime * 1000);
+    if (videoTrackPositionPending) return;
+    if (event.type === "timeupdate" && now - videoTrackMarkerThrottleAt < throttleMs) {
+      return;
+    }
+    void updateVideoTrackPosition(video.currentTime * 1000, event.type !== "timeupdate");
   }
 }
 
@@ -3038,17 +3070,17 @@ async function startVideoTrackPlayerSession() {
     selectedTrackIDs.length === 0 ? "Tracks were auto-selected from overlap." : "Playback positions are computed from video time plus offset.",
     ...warnings
   ].join(" ");
-  await updateVideoTrackPosition(0);
+  await updateVideoTrackPosition(0, true);
   await nextTick();
   await renderVideoTrackMap();
 }
 
-async function updateVideoTrackPosition(timeMS: number) {
+async function updateVideoTrackPosition(timeMS: number, force = false) {
   if (!videoTrackSession.value) return;
   if (videoTrackPositionPending) return;
   const throttleMs = Math.max(0, numericRuntimeSetting("video_track_player.marker_throttle_ms", 250));
   const now = performance.now();
-  if (videoTrackMarkerThrottleAt && now - videoTrackMarkerThrottleAt < throttleMs && timeMS !== 0) return;
+  if (!force && videoTrackMarkerThrottleAt && now - videoTrackMarkerThrottleAt < throttleMs && timeMS !== 0) return;
   videoTrackMarkerThrottleAt = now;
   videoTrackPositionPending = true;
   videoTrackSyncTimeMs.value = timeMS;
@@ -3057,6 +3089,15 @@ async function updateVideoTrackPosition(timeMS: number) {
       error: err instanceof Error ? err.message : String(err)
     }));
     updateVideoTrackMarkerLayer();
+    const current = videoTrackCurrentPosition.value;
+    const lon = videoTrackPositionNumber(current, "lon");
+    const lat = videoTrackPositionNumber(current, "lat");
+    if (videoTrackMap && lon !== undefined && lat !== undefined) {
+      const view = videoTrackMap.getView();
+      if (view) {
+        view.animate({ center: fromLonLat([lon, lat]), duration: force ? 220 : 140 });
+      }
+    }
   } finally {
     videoTrackPositionPending = false;
   }
@@ -6926,6 +6967,16 @@ onBeforeUnmount(() => {
                 ></video>
                 <div class="video-track-map-shell">
                   <div ref="videoTrackMapElement" class="video-track-map" role="img" aria-label="OpenLayers synchronized video track map"></div>
+                  <div v-if="videoTrackCurrentPosition" class="video-track-hud">
+                    <strong>Track position</strong>
+                    <span>Coordinates: {{ videoTrackPointSummary(videoTrackCurrentPosition) }}</span>
+                    <span v-if="videoTrackPositionText(videoTrackCurrentPosition, 'time')">Time: {{ videoTrackPositionText(videoTrackCurrentPosition, 'time') }}</span>
+                    <span v-if="videoTrackPayloadText('target_time')">Target: {{ videoTrackPayloadText('target_time') }}</span>
+                    <span v-if="videoTrackPayloadText('time_source')">Source: {{ videoTrackPayloadText('time_source') }}</span>
+                    <span v-if="videoTrackPositionText(videoTrackCurrentPosition, 'mode')">Mode: {{ videoTrackPositionText(videoTrackCurrentPosition, 'mode') }}</span>
+                    <span v-if="videoTrackPositionNumber(videoTrackCurrentPosition, 'speed_mps') !== undefined">Speed: {{ videoTrackPositionNumber(videoTrackCurrentPosition, 'speed_mps')?.toFixed(2) }} m/s</span>
+                    <span v-if="videoTrackPositionNumber(videoTrackCurrentPosition, 'elevation_m') !== undefined">Altitude: {{ videoTrackPositionNumber(videoTrackCurrentPosition, 'elevation_m')?.toFixed(1) }} m</span>
+                  </div>
                   <div class="map-status-overlay">
                     <i class="bi bi-signpost-split" aria-hidden="true"></i>
                     {{ videoTrackPosition?.warning || videoTrackSession.warnings?.[0] || videoTrackMessage || "Open the player to synchronize the marker." }}
