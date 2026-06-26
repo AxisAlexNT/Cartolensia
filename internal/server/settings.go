@@ -44,6 +44,7 @@ var runtimeSettings = struct {
 	"search.online_geocoding":                           false,
 	"search.geocoder_provider":                          "local_place_cache",
 	"search.geocoder_provider_url":                      "https://nominatim.openstreetmap.org",
+	"ai.worker_endpoint":                                "http://127.0.0.1:19090",
 	"transcode.session_ttl":                             "2h",
 }}
 
@@ -241,6 +242,7 @@ func (s *Server) settingsPayload() map[string]any {
 			{"id": "transcoding", "label": "Transcoding", "runtime": true},
 			{"id": "ai", "label": "AI/Vector", "runtime": false},
 			{"id": "components", "label": "Components", "runtime": true},
+			{"id": "readiness", "label": "Readiness", "runtime": true},
 			{"id": "auth", "label": "Auth/Security", "runtime": false},
 			{"id": "backups", "label": "Backups/DB Export", "runtime": true},
 			{"id": "plugins", "label": "Plugins", "runtime": true},
@@ -405,6 +407,7 @@ func runtimeSettingsSchema() []map[string]any {
 		{"tab": "search", "key": "search.online_geocoding", "type": "boolean", "label": "Online geocoding enabled"},
 		{"tab": "search", "key": "search.geocoder_provider", "type": "text", "label": "Geocoder provider"},
 		{"tab": "search", "key": "search.geocoder_provider_url", "type": "text", "label": "Geocoder provider URL"},
+		{"tab": "ai", "key": "ai.worker_endpoint", "type": "text", "label": "AI worker endpoint", "help": "HTTP base URL for local or remote Cartolensia AI sidecar, for example http://ai-node:19090."},
 		{"tab": "transcoding", "key": "transcode.session_ttl", "type": "text", "label": "Transcode session TTL"},
 	}
 }

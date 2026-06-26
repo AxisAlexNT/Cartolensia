@@ -150,6 +150,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
+	s.mux.HandleFunc("/api/v1/diagnostics/readiness", s.handleReadiness)
 	s.mux.HandleFunc("/api/v1/config/effective", s.handleConfig)
 	s.mux.HandleFunc("/api/v1/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/v1/settings/schema", s.handleSettingsSchema)
@@ -3176,7 +3177,7 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		SkippedKinds: map[string]int{},
 	}
 	if !ok {
-		result.Errors = append(result.Errors, "no local AI sidecar is reachable at 127.0.0.1:19090")
+		result.Errors = append(result.Errors, "no AI sidecar is reachable at "+endpoint)
 		return result, nil
 	}
 	assets, err := s.resolveAIAssets(ctx, req)
@@ -3285,6 +3286,7 @@ func (s *Server) resolveAIAssets(ctx context.Context, req aiJobRequest) ([]catal
 }
 
 func aiConfiguredWorkerEndpoint(ctx context.Context) (endpoint, workerID string, ok bool) {
+	configuredEndpoint := aiWorkerEndpoint()
 	for _, worker := range aiWorkerProfiles(ctx) {
 		configured, _ := worker["configured"].(bool)
 		rawEndpoint, _ := worker["endpoint"].(string)
@@ -3293,7 +3295,14 @@ func aiConfiguredWorkerEndpoint(ctx context.Context) (endpoint, workerID string,
 			return strings.TrimRight(rawEndpoint, "/"), rawID, true
 		}
 	}
-	return "", "", false
+	return strings.TrimRight(configuredEndpoint, "/"), "ai-configured", false
+}
+
+func aiWorkerEndpoint() string {
+	if endpoint := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_WORKER_ENDPOINT")); endpoint != "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	return strings.TrimRight(runtimeStringSetting("ai.worker_endpoint", "http://127.0.0.1:19090"), "/")
 }
 
 func aiSidecarPath(kind string) string {
@@ -4913,7 +4922,8 @@ func (s *Server) handleAISafetyByAsset(w http.ResponseWriter, r *http.Request) {
 
 func aiWorkerProfiles(ctx context.Context) []map[string]any {
 	hints := transcoding.AcceleratorHints()
-	localStatus, localHealth := aiWorkerHealth(ctx, "http://127.0.0.1:19090/health")
+	endpoint := aiWorkerEndpoint()
+	localStatus, localHealth := aiWorkerHealth(ctx, endpoint+"/health")
 	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text", "ocr_image", "transcribe_audio", "analyze_audio"}
 	localDevice := ""
 	localModels := map[string]any{}
@@ -4936,11 +4946,11 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"status":            localStatus,
 			"available":         true,
 			"capabilities":      localCapabilities,
-			"endpoint":          "http://127.0.0.1:19090",
+			"endpoint":          endpoint,
 			"device":            localDevice,
 			"cuda_available":    strings.HasPrefix(strings.ToLower(localDevice), "cuda"),
 			"models":            localModels,
-			"native_entrypoint": "python -m cartolensia_ai.server --host 127.0.0.1 --port 19090",
+			"native_entrypoint": "python -m cartolensia_ai.server --host 0.0.0.0 --port 19090",
 			"health":            localHealth,
 			"note":              "local optional worker; inference only runs when a user starts a scoped AI job",
 		},

@@ -15,7 +15,8 @@ Cartolensia can build a Linux x86_64 offline archive intended for machines with 
   - PostgreSQL runtime binaries for a local metadata database;
   - Python runtime and AI sidecar packages.
 - Include an AGPL source snapshot.
-- Produce a `.7z` archive and `.sha256` checksum.
+- Produce a `.7z` archive and `.sha256` checksum for the normal offline release path.
+- Produce a private/local `.tar.zst` full bundle when explicitly built on an Internet-connected operator machine.
 
 ## Non-Goals And Limits
 
@@ -95,6 +96,114 @@ The output appears under `dist/`:
 - `cartolensia-<version>-linux-x86_64-offline.7z.sha256`
 - `cartolensia-<version>-linux-x86_64-offline-RELEASE_NOTES.md`
 
+## Private Local Full `tar.zst` Bundle
+
+For a self-contained private bundle that is not uploaded to GitHub Releases, use the local full tar.zst builder. This path is intended for an Internet-connected staging machine and can download/copy reviewed external payloads into one archive:
+
+- Cartolensia backend binary and built WebUI;
+- production configs and launcher/maintenance scripts;
+- BtbN FFmpeg GPL shared Linux x86_64 build from:
+  `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl-shared.tar.xz`;
+- Tesseract executable and detected tessdata from the build host;
+- PostgreSQL server/client binaries from the configured `pg_config`;
+- Python AI executor environments for `cpu-avx2`, `cpu-avx512`, `nvidia-cu128`, `intel-arc`, and `rocm-radeon`;
+- reviewed AI model cache, including torchvision classifiers, YuNet, Falconsai NSFW, OpenCLIP, BLIP, and faster-whisper small when model preparation is enabled;
+- optional operator-provided offline map bundle.
+
+Build:
+
+```bash
+cp config/local-full-tarzst-build.env.example config/local-full-tarzst-build.env
+$EDITOR config/local-full-tarzst-build.env
+bash scripts/release/build-local-full-tarzst.sh config/local-full-tarzst-build.env
+```
+
+Quick smoke build without external downloads:
+
+```bash
+bash scripts/release/smoke-local-full-tarzst.sh
+```
+
+The full bundle output is:
+
+```text
+dist/release/cartolensia-...-full.tar.zst
+dist/release/cartolensia-...-full.tar.zst.sha256
+```
+
+Extract on the target host:
+
+```bash
+tar --zstd -xf cartolensia-...-full.tar.zst
+cd cartolensia-.../
+export CARTOLENSIA_ADMIN_PASSWORD='replace-with-a-long-secret'
+./bin/first-run
+./bin/status
+```
+
+Mount originals read-only at `/originals` before indexing:
+
+```bash
+mkdir -p /originals
+# mount local/NFS/SMB/object-storage view read-only according to the host policy
+```
+
+The archive is self-contained after extraction, but the target host still must provide kernel/device access for GPUs. Linux GPU drivers, `/dev/dri`, NVIDIA driver modules, ROCm kernel support, and LXC device passthrough cannot be bundled into a tarball. If GPU access is unavailable, use the CPU executor flavor.
+
+### Boot-Managed Remote Host
+
+For a VM, bare-metal host, or unprivileged LXC where the bundle should run on
+boot, create the dedicated runtime account and systemd units once from a
+workstation that can SSH to the host:
+
+```bash
+ssh <admin-user>@<remote-host> "sudo env CARTOLENSIA_PUBKEY='$(cat ~/.ssh/cartolensia_remote_ed25519.pub)' bash -s" \
+  < scripts/remote/bootstrap-cartolensia-user.sh
+```
+
+The bootstrap creates the `cartolensia` user, grants `docker`, `video`, and
+`render` group membership, writes `/etc/cartolensia/cartolensia.env`, enables
+`cartolensia-postgres`, `cartolensia-ai`, and `cartolensia` systemd services,
+and keeps originals mounted separately at `/originals`. After copying the
+bundle to `/opt/cartolensia/releases/<version>` and pointing
+`/opt/cartolensia/current` at it, start the services:
+
+```bash
+sudo systemctl start cartolensia-postgres cartolensia-ai cartolensia
+sudo systemctl status cartolensia
+```
+
+For NVIDIA AI/transcoding the host must provide the NVIDIA driver and, for
+containerized GPU use, NVIDIA Container Toolkit. For Ryzen/Radeon VAAPI
+transcoding the `cartolensia` service user must be able to read
+`/dev/dri/renderD*`; the bootstrap adds `video` and `render` groups and sets
+`LIBVA_DRIVER_NAME=radeonsi`/`VDPAU_DRIVER=radeonsi` defaults.
+
+### Remote Executors
+
+AI is a real sidecar service and can run on a separate machine:
+
+```bash
+# On the AI node:
+./bin/start-ai-executor nvidia-cu128 0.0.0.0 19090
+
+# On the main Cartolensia node:
+cat >config/remote-executors.local.env <<'EOF'
+CARTOLENSIA_AI_WORKER_ENDPOINT=http://ai-node.example:19090
+EOF
+./bin/start-cartolensia
+```
+
+Available AI executor flavor directories:
+
+- `cpu-avx2`: CPU fallback for common x86_64 hosts;
+- `cpu-avx512`: CPU fallback for AVX-512 hosts; current PyTorch CPU wheels dispatch at runtime and are not a separate AVX-512-only build;
+- `nvidia-cu128`: CUDA 12.8 PyTorch wheels for hosts with compatible NVIDIA drivers, such as RTX 3090 Ti-class systems;
+- `intel-arc`: configurable Intel/XPU executor slot; defaults to CPU wheels unless an reviewed Intel wheel index is configured;
+- `rocm-radeon`: configurable ROCm executor slot; defaults to CPU wheels unless a reviewed ROCm wheel index is configured. Radeon 740M support depends on host ROCm/kernel support and may not be available in upstream wheels.
+
+Live transcoding is currently an in-process ffmpeg session service. The full bundle includes `bin/start-transcode-node` for running a transcode-capable Cartolensia node on a separate host/port with the same read-only originals and PostgreSQL access, but a separate distributed transcode executor protocol is not yet implemented. Route/proxy transcode API requests to that node when using this split layout.
+
 ## GitHub Actions Release Build
 
 The workflow `.github/workflows/offline-release.yml` can be started manually from GitHub Actions. It:
@@ -168,6 +277,8 @@ Every archive contains:
 The component manifest records each staged component key, name, category, source type, package-relative path, version string, license note, provenance URL, and redistribution note. It is intended for release review and for the in-app Component Manager import flow.
 
 The packager captures the bundled FFmpeg configure line to `licenses/ffmpeg-configure.txt` when FFmpeg is included. A configure line containing `--enable-nonfree` fails packaging by default because that build is not suitable for ordinary redistribution. `--enable-gpl` is recorded in `licenses/build-manifest.env` so release operators can mark the archive as a GPL-tools bundle. Only set `CARTOLENSIA_DIST_ALLOW_NONFREE_FFMPEG=1` for private/internal packages after a separate legal review.
+
+The local full `tar.zst` builder records the BtbN FFmpeg configure line in `licenses/ffmpeg-version.txt` and fails on `--enable-nonfree`. The approved BtbN URL above is a GPL shared build, so the resulting private bundle must be treated as a GPL-tools bundle and should include the generated manifests/notices when transferred internally.
 
 Before publishing a public release, review:
 

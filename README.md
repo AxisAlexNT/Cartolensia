@@ -117,6 +117,16 @@ For a local full-bundle build on an Internet-connected machine, copy `config/loc
 bash scripts/release/build-local-full.sh
 ```
 
+For a private, self-contained `tar.zst` bundle with BtbN FFmpeg, PostgreSQL binaries, AI executor environments, and reviewed model caches, use the local tar.zst builder:
+
+```bash
+cp config/local-full-tarzst-build.env.example config/local-full-tarzst-build.env
+$EDITOR config/local-full-tarzst-build.env
+bash scripts/release/build-local-full-tarzst.sh config/local-full-tarzst-build.env
+```
+
+This package is meant for your own offline/air-gapped machines, not as a default GitHub release artifact. GPU drivers and device passthrough still come from the host.
+
 Run with a configured TLS certificate/key:
 
 ```yaml

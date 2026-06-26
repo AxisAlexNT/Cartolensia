@@ -74,3 +74,28 @@ The production release does not automatically bundle:
 - nonfree FFmpeg builds.
 
 If a component is missing, Cartolensia should show it as missing rather than silently downloading it.
+
+## Private Full Bundle
+
+For machines that may never have Internet access, build the private tar.zst bundle on a connected staging host:
+
+```bash
+cp config/local-full-tarzst-build.env.example config/local-full-tarzst-build.env
+bash scripts/release/build-local-full-tarzst.sh config/local-full-tarzst-build.env
+```
+
+The extracted bundle includes `bin/start-cartolensia`, `bin/start-postgres`, `bin/start-ai-executor`, `bin/start-transcode-node`, `bin/backup-db`, and `bin/diagnose`.
+
+For a remote AI node, start the selected executor flavor on that node:
+
+```bash
+./bin/start-ai-executor cpu-avx2 0.0.0.0 19090
+```
+
+Then point the main node at it with `config/remote-executors.local.env`:
+
+```bash
+CARTOLENSIA_AI_WORKER_ENDPOINT=http://ai-node:19090
+```
+
+GPU executor flavors still require host GPU drivers and container/device passthrough. The archive can bundle Python packages and model files, but it cannot bundle kernel drivers, NVIDIA modules, ROCm host support, Intel `/dev/dri` access, or Proxmox LXC device permissions.

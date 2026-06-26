@@ -53,6 +53,7 @@ import {
   type SearchPlace,
   type SearchPlacesResponse,
   type SettingsPayload,
+  type ReadinessPayload,
   type Stats,
   type StreamOptions,
   type TranscodeSession,
@@ -240,6 +241,7 @@ const apiTokens = ref<APIToken[]>([]);
 const settings = ref<SettingsPayload | null>(null);
 const settingsTab = ref("general");
 const settingsMessage = ref("");
+const readiness = ref<ReadinessPayload | null>(null);
 const pendingConfig = ref<Record<string, unknown>>({});
 const components = ref<ComponentRecord[]>([]);
 const componentRoot = ref("");
@@ -2272,6 +2274,7 @@ async function refresh() {
 	      componentStatusPayload,
 	      placeCachePayload,
 	      editablePlacePayload,
+	      readinessPayload,
 	      exportRows
     ] = await Promise.all([
       api.explorer(explorerQueryString()),
@@ -2306,6 +2309,7 @@ async function refresh() {
 	      api.componentStatus(),
 	      api.searchPlaces(),
 	      api.places(placeCacheQuery.value),
+	      api.readiness(),
       api.dbExports()
 		]);
 		rows.value = asArray(explorerRows);
@@ -2379,6 +2383,7 @@ async function refresh() {
     components.value = asArray(componentStatusPayload.components);
     componentRoot.value = componentStatusPayload.root;
     componentCounts.value = componentStatusPayload.counts ?? {};
+    readiness.value = readinessPayload;
     searchPlaceCache.value = placeCachePayload;
     editablePlaces.value = asArray(editablePlacePayload.places);
     initializePendingConfig(settingsPayload);
@@ -3456,6 +3461,30 @@ function componentSourceLabel(component: ComponentRecord): string {
   return [component.source_type, component.version].filter(Boolean).join(" · ") || "not checked";
 }
 
+const readinessGroups = computed(() => {
+  const grouped = new Map<string, ReadinessPayload["checks"]>();
+  for (const check of readiness.value?.checks ?? []) {
+    const rows = grouped.get(check.category) ?? [];
+    rows.push(check);
+    grouped.set(check.category, rows);
+  }
+  return Array.from(grouped.entries()).map(([category, checks]) => ({ category, checks }));
+});
+
+function readinessStatusClass(status: string): string {
+  if (status === "ok") return "ok";
+  if (status === "warn") return "warn";
+  if (status === "error") return "bad";
+  return "";
+}
+
+function readinessIcon(status: string): string {
+  if (status === "ok") return "bi-check-circle";
+  if (status === "warn") return "bi-exclamation-triangle";
+  if (status === "error") return "bi-x-circle";
+  return "bi-info-circle";
+}
+
 async function runComponentCheck(key: string) {
   componentBusyKey.value = key;
   componentMessage.value = `Checking ${key}...`;
@@ -3655,7 +3684,7 @@ function pluginSpecs(pluginId: string): RuntimeSettingSpec[] {
       { key: "max_concurrent_sessions", label: "Max concurrent sessions", help: "Bound server-side transcoding load.", kind: "number" }
     ],
     "ai-base": [
-      { key: "worker_endpoint", label: "Worker endpoint", help: "Future AI sidecar HTTP endpoint.", kind: "text" },
+      { key: "worker_endpoint", label: "Worker endpoint", help: "HTTP endpoint for local or remote AI sidecar, for example http://ai-node:19090.", kind: "text" },
       { key: "model_cache_dir", label: "Model cache dir", help: "Must stay outside original storage.", kind: "text" }
     ],
     "ai-classification": [
@@ -7408,7 +7437,7 @@ onBeforeUnmount(() => {
                 <label>
                   <span>Worker endpoint</span>
                   <input :value="pendingValue('ai.worker_endpoint')" type="text" @input="setPendingValue('ai.worker_endpoint', ($event.target as HTMLInputElement).value)" />
-                  <small>Native sidecar default: http://127.0.0.1:19090.</small>
+                  <small>Native sidecar default: http://127.0.0.1:19090. Use a remote host:port for a dedicated AI executor node.</small>
                 </label>
                 <label>
                   <span>Model cache directory</span>
@@ -7532,6 +7561,61 @@ onBeforeUnmount(() => {
                       </li>
                     </ul>
                   </details>
+                </article>
+              </div>
+            </article>
+          </div>
+
+          <div v-else-if="settingsTab === 'readiness'" class="settings-grid">
+            <article class="settings-form settings-wide readiness-summary">
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-clipboard2-check" aria-hidden="true"></i> Deployment Readiness</h3>
+                  <p class="muted">{{ readiness?.note ?? 'Checks run against the current process and configured paths.' }}</p>
+                </div>
+                <span :class="['status-badge', readinessStatusClass(readiness?.status ?? 'warn')]">
+                  {{ readiness?.status ?? 'loading' }}
+                </span>
+              </div>
+              <div class="detail-grid compact-detail">
+                <article><strong>{{ readiness?.counts?.ok ?? 0 }}</strong><span>OK</span></article>
+                <article><strong>{{ readiness?.counts?.warn ?? 0 }}</strong><span>Warnings</span></article>
+                <article><strong>{{ readiness?.counts?.error ?? 0 }}</strong><span>Errors</span></article>
+                <article><strong>{{ readiness?.generated_at ? new Date(readiness.generated_at).toLocaleTimeString() : 'n/a' }}</strong><span>Last check</span></article>
+              </div>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-outline-primary" @click="refresh">
+                  <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+                  Recheck
+                </button>
+                <button type="button" class="btn btn-outline-secondary" @click="settingsTab = 'components'">
+                  Components
+                </button>
+                <button type="button" class="btn btn-outline-secondary" @click="settingsTab = 'storage'">
+                  Storage
+                </button>
+                <button type="button" class="btn btn-outline-secondary" @click="settingsTab = 'auth'">
+                  Auth
+                </button>
+              </div>
+            </article>
+
+            <article v-for="group in readinessGroups" :key="group.category" class="settings-form settings-wide">
+              <h3>{{ group.category }}</h3>
+              <div class="readiness-list">
+                <article v-for="check in group.checks" :key="check.id" class="readiness-check">
+                  <i :class="['bi', readinessIcon(check.status), readinessStatusClass(check.status)]" aria-hidden="true"></i>
+                  <div>
+                    <div class="section-title compact-title">
+                      <h4>{{ check.label }}</h4>
+                      <span :class="['status-badge', readinessStatusClass(check.status)]">{{ check.status }}</span>
+                    </div>
+                    <p>{{ check.summary }}</p>
+                    <details v-if="check.details">
+                      <summary>Details</summary>
+                      <pre class="compact-json">{{ JSON.stringify(check.details, null, 2) }}</pre>
+                    </details>
+                  </div>
                 </article>
               </div>
             </article>

@@ -24,6 +24,20 @@ $EDITOR config/local-full-build.env
 bash scripts/release/build-local-full.sh
 ```
 
+For a private self-contained `tar.zst` bundle built on an Internet-connected local machine, including the reviewed BtbN FFmpeg GPL shared build, PostgreSQL binaries, AI executor environments, and reviewed model cache, use:
+
+```bash
+cp config/local-full-tarzst-build.env.example config/local-full-tarzst-build.env
+$EDITOR config/local-full-tarzst-build.env
+bash scripts/release/build-local-full-tarzst.sh config/local-full-tarzst-build.env
+```
+
+Run a no-network smoke package first:
+
+```bash
+bash scripts/release/smoke-local-full-tarzst.sh
+```
+
 Common release inputs are environment variables:
 
 - `CARTOLENSIA_RELEASE_INCLUDE_TOOLS`
@@ -45,6 +59,18 @@ The local full-bundle config also accepts explicit paths to reviewed tool/model/
 - `CARTOLENSIA_MODELS_DIR`
 - `CARTOLENSIA_OFFLINE_MAPS_DIR`
 
+The tar.zst builder also accepts:
+
+- `CARTOLENSIA_FFMPEG_BUNDLE_URL`
+- `CARTOLENSIA_FFMPEG_ARCHIVE`
+- `CARTOLENSIA_LOCAL_FULL_AI_FLAVORS`
+- `CARTOLENSIA_PYTORCH_CPU_INDEX_URL`
+- `CARTOLENSIA_PYTORCH_CUDA_INDEX_URL`
+- `CARTOLENSIA_PYTORCH_INTEL_INDEX_URL`
+- `CARTOLENSIA_PYTORCH_ROCM_INDEX_URL`
+- `CARTOLENSIA_LOCAL_FULL_PREPARE_MODELS`
+- `CARTOLENSIA_LOCAL_FULL_SKIP_PIP_INSTALL`
+
 Build modes:
 
 - minimal: app + WebUI + docs + configs only;
@@ -58,6 +84,13 @@ Run the license and archive validation script:
 
 ```bash
 bash scripts/release/check-licenses.sh
+```
+
+Validate the private tar.zst packaging path:
+
+```bash
+bash -n scripts/release/build-local-full-tarzst.sh
+bash scripts/release/smoke-local-full-tarzst.sh
 ```
 
 Validate the production Compose file:

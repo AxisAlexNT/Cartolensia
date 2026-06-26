@@ -443,6 +443,12 @@ td {
   color: #7d4e00;
 }
 
+.status-badge.bad {
+  background: #ffebe9;
+  border-color: #ff8182;
+  color: #82071e;
+}
+
 .media-fallback {
   align-items: center;
   background: #f6f8fa;
@@ -706,6 +712,48 @@ td {
 
 .component-card h4 {
   font-size: 15px;
+  margin: 0;
+}
+
+.readiness-summary .detail-grid article {
+  min-height: 68px;
+}
+
+.readiness-list {
+  display: grid;
+  gap: 10px;
+}
+
+.readiness-check {
+  align-items: start;
+  background: #f6f8fa;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  padding: 12px;
+}
+
+.readiness-check > .bi {
+  font-size: 18px;
+  line-height: 1.2;
+  margin-top: 2px;
+}
+
+.readiness-check > .bi.ok {
+  color: #116329;
+}
+
+.readiness-check > .bi.warn {
+  color: #9a6700;
+}
+
+.readiness-check > .bi.bad {
+  color: #cf222e;
+}
+
+.readiness-check p {
   margin: 0;
 }
 

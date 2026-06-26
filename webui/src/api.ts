@@ -733,6 +733,23 @@ export type SettingsPayload = {
   effective: Record<string, unknown>;
 };
 
+export type ReadinessCheck = {
+  id: string;
+  category: string;
+  label: string;
+  status: "ok" | "warn" | "error" | string;
+  summary: string;
+  details?: Record<string, unknown>;
+};
+
+export type ReadinessPayload = {
+  status: "ok" | "warn" | "error" | string;
+  generated_at: string;
+  counts: Record<string, number>;
+  checks: ReadinessCheck[];
+  note?: string;
+};
+
 export type DBExport = {
   id: string;
   path: string;
@@ -912,6 +929,7 @@ export const api = {
       body: JSON.stringify({ name, scopes })
     }),
   status: () => request<BackendStatus>("/api/v1/backend/status"),
+  readiness: () => request<ReadinessPayload>("/api/v1/diagnostics/readiness"),
   storages: async () => asArray(await request<StorageConfig[] | null>("/api/v1/storages")),
   createStorage: (storage: StorageConfig, validateOnly = false) =>
     request<Record<string, unknown>>("/api/v1/storages", {
