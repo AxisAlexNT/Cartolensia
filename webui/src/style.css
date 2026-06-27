@@ -1525,9 +1525,22 @@ td {
   gap: 4px;
 }
 
+.job-active {
+  background: rgba(9, 105, 218, 0.08);
+  border-color: rgba(9, 105, 218, 0.55);
+}
+
 .job progress {
   height: 10px;
   width: 100%;
+}
+
+.section-subhead {
+  color: #57606a;
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 8px 0 0;
+  text-transform: uppercase;
 }
 
 .logbox {

@@ -1214,6 +1214,72 @@ func TestJobOperationsEndpoints(t *testing.T) {
 	}
 }
 
+func TestJobsActiveSortPinsRunningAndQueued(t *testing.T) {
+	store := catalog.NewMemoryStore()
+	oldSucceeded, err := store.EnqueueJob(context.Background(), jobs.New("old_succeeded", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Start(&oldSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Complete(&oldSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateJob(context.Background(), oldSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.EnqueueJob(context.Background(), jobs.New("long_discovery", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Start(&running); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateJob(context.Background(), running); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.EnqueueJob(context.Background(), jobs.New("queued_hash", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSucceeded, err := store.EnqueueJob(context.Background(), jobs.New("new_succeeded_ai", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Start(&newSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Complete(&newSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateJob(context.Background(), newSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       config.Defaults(),
+		Plugins:      plugins.BuiltIns(),
+		Store:        store,
+		StoreBackend: "memory",
+	})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs?sort=active&limit=3", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("jobs status %d body %s", rec.Code, rec.Body.String())
+	}
+	var rows []jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected three jobs, got %#v", rows)
+	}
+	if rows[0].ID != running.ID || rows[1].ID != queued.ID || rows[2].ID != newSucceeded.ID {
+		t.Fatalf("active sort should pin running then queued before newest history; got %#v", []string{rows[0].Kind, rows[1].Kind, rows[2].Kind})
+	}
+}
+
 type errTestFailure struct{}
 
 func (errTestFailure) Error() string { return "boom" }

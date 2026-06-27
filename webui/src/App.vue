@@ -660,6 +660,12 @@ const nativeCudaAvailable = computed(() => Boolean(aiDevicePolicy.value.native_c
 const dockerNvidiaRuntime = computed(() => Boolean(aiDevicePolicy.value.docker_nvidia_runtime ?? ((aiStatus.value?.accelerator_hints as Record<string, unknown> | undefined)?.docker_nvidia_runtime)));
 const vectorLimits = computed(() => ((vectorStatus.value?.limits ?? {}) as Record<string, unknown>));
 const recentAIJobs = computed(() => jobs.value.filter((job) => job.kind.startsWith("ai_")).slice(0, 6));
+const activeOrQueuedJobs = computed(() =>
+  jobs.value.filter((job) => ["running", "cancel_requested", "queued"].includes(job.status))
+);
+const recentHistoryJobs = computed(() =>
+  jobs.value.filter((job) => !["running", "cancel_requested", "queued"].includes(job.status)).slice(0, 80)
+);
 const transcodeHardwareStatus = computed(() => {
   const hardware = transcodingCapabilities.value?.hardware ?? {};
   return [
@@ -678,6 +684,35 @@ const transcodeMetricsStatus = computed(() => {
     { metric: "VMAF", available: Boolean(filters.libvmaf), note: String(notes.libvmaf ?? "requires ffmpeg built with libvmaf") }
   ];
 });
+
+async function fetchVisibleJobs(): Promise<Job[]> {
+  const [runningRows, queuedRows, recentRows] = await Promise.all([
+    api.jobs("running_only=true&limit=100"),
+    api.jobs("status=queued&sort=created_at&limit=100"),
+    api.jobs("limit=200")
+  ]);
+  const byID = new Map<string, Job>();
+  for (const job of [...asArray(runningRows), ...asArray(queuedRows), ...asArray(recentRows)]) {
+    byID.set(job.id, job);
+  }
+  return Array.from(byID.values()).sort((a, b) => {
+    const priority = (status: string) => {
+      if (status === "running") return 0;
+      if (status === "cancel_requested") return 1;
+      if (status === "queued") return 2;
+      if (status === "failed") return 3;
+      if (status === "cancelled") return 4;
+      return 5;
+    };
+    const left = priority(a.status);
+    const right = priority(b.status);
+    if (left !== right) return left - right;
+    const aTime = Date.parse(a.created_at ?? "") || 0;
+    const bTime = Date.parse(b.created_at ?? "") || 0;
+    if (left <= 2) return aTime - bTime;
+    return bTime - aTime;
+  });
+}
 const transcodeTemplateSafe = computed(() => {
   const stripped = transcodeTemplate.value
     .replaceAll("${input}", "")
@@ -2424,7 +2459,7 @@ async function refresh() {
 	      readinessPayload,
 	      exportRows
     ] = await Promise.all([
-      api.jobs(),
+      fetchVisibleJobs(),
       api.jobStats(),
       api.storages(),
       api.plugins(),
@@ -2894,7 +2929,7 @@ async function runAssetAIAction(kind: AIJobKind, label: string, extra: Record<st
       .concat(aiActionHistory.value)
       .slice(0, 8);
     assetDetail.value = await api.asset(assetDetail.value.asset.id);
-    jobs.value = await api.jobs();
+    jobs.value = await fetchVisibleJobs();
   } catch (err) {
     assetAIActionStatus.value[label] = { status: "failed", summary: err instanceof Error ? err.message : String(err) };
   }
@@ -5254,6 +5289,9 @@ onBeforeUnmount(() => {
               {{ jobStats?.queued ?? 0 }} queued · {{ jobStats?.running ?? 0 }} running · {{ jobStats?.failed ?? 0 }} failed
             </span>
           </header>
+          <p class="muted">
+            Active and queued work is pinned first. Rapid AI micro-jobs can still appear below in recent history.
+          </p>
           <div class="job-list">
             <article v-if="selectedJob" class="job job-detail">
               <div class="job-row">
@@ -5268,7 +5306,11 @@ onBeforeUnmount(() => {
               <small v-if="jobCounterSummary(selectedJob)">{{ jobCounterSummary(selectedJob) }}</small>
               <pre class="logbox">{{ JSON.stringify(selectedJob.logs ?? [], null, 2) }}</pre>
             </article>
-            <article v-for="job in jobs" :key="job.id" class="job">
+            <h3 class="section-subhead">Active / queued</h3>
+            <article v-if="activeOrQueuedJobs.length === 0" class="empty-state">
+              No active or queued jobs.
+            </article>
+            <article v-for="job in activeOrQueuedJobs" :key="job.id" class="job job-active">
               <div class="job-row">
                 <button type="button" class="link-button" @click="openJob(job.id)">{{ job.kind }}</button>
                 <div class="actions">
@@ -5279,7 +5321,20 @@ onBeforeUnmount(() => {
               <progress :value="job.progress_current" :max="job.progress_total ?? 100"></progress>
               <span>{{ job.status }} · {{ job.progress_current }} / {{ job.progress_total ?? "?" }}</span>
               <small v-if="jobCounterSummary(job)">{{ jobCounterSummary(job) }}</small>
-              <small>{{ job.error }}</small>
+              <small>{{ job.logs?.at(-1)?.message ?? job.error }}</small>
+            </article>
+            <h3 class="section-subhead">Recent history</h3>
+            <article v-for="job in recentHistoryJobs" :key="job.id" class="job">
+              <div class="job-row">
+                <button type="button" class="link-button" @click="openJob(job.id)">{{ job.kind }}</button>
+                <div class="actions">
+                  <button v-if="canRetry(job)" type="button" @click="retryJob(job.id)">Retry</button>
+                </div>
+              </div>
+              <progress :value="job.progress_current" :max="job.progress_total ?? 100"></progress>
+              <span>{{ job.status }} · {{ job.progress_current }} / {{ job.progress_total ?? "?" }}</span>
+              <small v-if="jobCounterSummary(job)">{{ jobCounterSummary(job) }}</small>
+              <small>{{ job.logs?.at(-1)?.message ?? job.error }}</small>
             </article>
           </div>
         </section>

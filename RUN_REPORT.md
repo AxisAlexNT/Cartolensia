@@ -3667,3 +3667,46 @@ Safety confirmation:
 - no missing marking
 - no commit
 - no push
+
+## 2026-06-27 Jobs Visibility Fix
+
+Issue observed:
+
+- The Jobs header showed `4 running` and `3 queued`, but the visible list only showed one running job.
+- Root cause: the Jobs page fetched newest jobs only. Fast AI micro-jobs were constantly pushing older long-running discovery/metadata jobs and queued all-storage jobs below the visible page.
+
+Fixed:
+
+- Backend now supports `GET /api/v1/jobs?sort=active`, which pins running, cancel-requested, and queued jobs before history.
+- WebUI now avoids needing a backend restart for this case by fetching and merging:
+  - `/api/v1/jobs?running_only=true&limit=100`;
+  - `/api/v1/jobs?status=queued&sort=created_at&limit=100`;
+  - recent history.
+- Jobs page now has explicit `Active / queued` and `Recent history` sections.
+- Active/queued jobs have a highlighted card style and show the latest log line/error summary.
+
+Deployed:
+
+- Rebuilt and deployed only `webui/dist` to rjazhenka to avoid interrupting active discovery/metadata jobs.
+- Backend active-sort implementation is tested locally and will be picked up with the next backend deploy/restart.
+
+Remote validation:
+
+- `running_only=true` returned 4 jobs:
+  - `ai_detect_faces`;
+  - `metadata_enrich` around `30189 / 250975`;
+  - `discovery` around `66203`;
+  - `ai_ocr`.
+- queued status returned 3 jobs:
+  - `discovery`;
+  - `metadata_enrich`;
+  - `hash`.
+
+Tests:
+
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server`
+- `npm --prefix webui run build`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+
+Safety: no backend restart was performed; active production jobs were not interrupted. No originals/Samba writes, no missing marking, no DB reset, no commit, no push.

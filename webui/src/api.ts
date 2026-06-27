@@ -478,6 +478,9 @@ export type Job = {
   lease_expires_at?: string;
   cancel_requested_at?: string;
   next_run_at?: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
   logs?: Array<{ id?: number; level: string; message: string; created_at: string }>;
 };
 

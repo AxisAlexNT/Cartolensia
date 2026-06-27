@@ -6187,6 +6187,20 @@ func filterJobs(input []jobs.Job, r *http.Request) []jobs.Job {
 		out = append(out, job)
 	}
 	switch query.Get("sort") {
+	case "active":
+		sort.Slice(out, func(i, j int) bool {
+			left, right := jobStatusPriority(out[i].Status), jobStatusPriority(out[j].Status)
+			if left != right {
+				return left < right
+			}
+			if out[i].Status == jobs.StatusQueued && out[j].Status == jobs.StatusQueued {
+				return out[i].CreatedAt.Before(out[j].CreatedAt)
+			}
+			if isActiveJobStatus(out[i].Status) && isActiveJobStatus(out[j].Status) {
+				return out[i].CreatedAt.Before(out[j].CreatedAt)
+			}
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		})
 	case "created_at":
 		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	case "kind":
@@ -6222,6 +6236,29 @@ func filterJobs(input []jobs.Job, r *http.Request) []jobs.Job {
 		end = len(out)
 	}
 	return out[offset:end]
+}
+
+func jobStatusPriority(status jobs.Status) int {
+	switch status {
+	case jobs.StatusRunning:
+		return 0
+	case jobs.StatusCancelRequested:
+		return 1
+	case jobs.StatusQueued:
+		return 2
+	case jobs.StatusFailed:
+		return 3
+	case jobs.StatusCanceled:
+		return 4
+	case jobs.StatusSucceeded:
+		return 5
+	default:
+		return 6
+	}
+}
+
+func isActiveJobStatus(status jobs.Status) bool {
+	return status == jobs.StatusRunning || status == jobs.StatusCancelRequested
 }
 
 func truthyQuery(value string) bool {
