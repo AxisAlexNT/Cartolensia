@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -1309,6 +1310,66 @@ func TestBuildMonthBuckets(t *testing.T) {
 	filtered := buildMonthBuckets(assets, url.Values{"hash_status": []string{catalog.HashStatusHashed}})
 	if len(filtered) != 1 || filtered[0].Month != "2026-01" || filtered[0].Photos != 1 {
 		t.Fatalf("unexpected filtered buckets %#v", filtered)
+	}
+}
+
+func TestResolveAIAssetsFiltersSupportedKindsForScopedJobs(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	srv := New(Dependencies{Version: "test", Config: cfg, Plugins: plugins.BuiltIns(), Store: store, StoreBackend: "memory", SyncJobs: true})
+	now := time.Now().UTC()
+	files := []storage.FileInfo{
+		{StorageName: "fixture", StorageURL: "fs://fixture/tracks/aaa.gpx", RelativePath: "tracks/aaa.gpx", Name: "aaa.gpx", Extension: "gpx", MediaKind: "track", SizeBytes: 1, MTime: now},
+		{StorageName: "fixture", StorageURL: "fs://fixture/audio/ddd.mp3", RelativePath: "audio/ddd.mp3", Name: "ddd.mp3", Extension: "mp3", MediaKind: "audio", SizeBytes: 1, MTime: now},
+		{StorageName: "fixture", StorageURL: "fs://fixture/videos/eee.mp4", RelativePath: "videos/eee.mp4", Name: "eee.mp4", Extension: "mp4", MediaKind: "video", SizeBytes: 1, MTime: now},
+	}
+	for _, file := range files {
+		if _, err := store.UpsertDiscoveredFile(ctx, file); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 610; i++ {
+		name := fmt.Sprintf("photo-%03d.jpg", i)
+		if _, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+			StorageName:  "fixture",
+			StorageURL:   "fs://fixture/photos/" + name,
+			RelativePath: "photos/" + name,
+			Name:         name,
+			Extension:    "jpg",
+			MediaKind:    "photo",
+			SizeBytes:    1,
+			MTime:        now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	imageAssets, err := srv.resolveAIAssets(ctx, "ocr_image", aiJobRequest{Scope: "current_indexed", Limit: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imageAssets) != 600 {
+		t.Fatalf("expected 600 image assets, got %d", len(imageAssets))
+	}
+	for _, asset := range imageAssets {
+		if asset.MediaKind != "photo" {
+			t.Fatalf("image AI resolver returned unsupported asset: %#v", asset)
+		}
+	}
+
+	avAssets, err := srv.resolveAIAssets(ctx, "transcribe_audio", aiJobRequest{Scope: "current_indexed", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(avAssets) != 2 {
+		t.Fatalf("expected audio/video assets, got %#v", avAssets)
+	}
+	for _, asset := range avAssets {
+		if asset.MediaKind != "audio" && asset.MediaKind != "video" {
+			t.Fatalf("transcription resolver returned unsupported asset: %#v", asset)
+		}
 	}
 }
 

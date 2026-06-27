@@ -3311,6 +3311,80 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-28 AI Targeting, Knowledge UI, And Remote Production Stabilization
+
+Implemented:
+
+- Fixed broad AI job targeting so scoped image/audio AI runs query only media kinds each action can actually process:
+  - image actions now select photos instead of spending the first page on GPS tracks;
+  - audio transcription selects audio/video assets;
+  - audio analysis selects audio assets.
+- Fixed the AI resolver to page internally in 500-row chunks, so `limit:1000` and larger scoped AI requests are no longer truncated by the normal UI/API list cap.
+- Added regression coverage for broad AI scoped jobs with many photos and interleaved unsupported track/audio/video rows.
+- Added local LLM integration hooks for Knowledge/Search:
+  - deterministic mode remains the default;
+  - Ollama and OpenAI-compatible/vLLM endpoints can be configured through runtime settings;
+  - local LLM prompts receive only read-only tool results/facts/relations, never DB credentials or write tools.
+- Added Russian/English deterministic natural-language search parsing improvements, including Russian month ranges such as `май-август 2025`.
+- Added Knowledge Base pagination controls and citation cards with clickable asset links.
+- Added a lightweight Knowledge Graph SVG preview with bounded node/relation rendering for large graphs.
+- Added in-browser console capture and a Console page for recent WebUI errors.
+- Hardened Settings API normalization and WebUI guards for nullable settings fields that previously crashed the Settings page.
+- Added reverse-geocode radius support for local place-cache matching; default is controlled by `search.reverse_geocode_radius_m`.
+- Sidebar navigation now uses anchors so normal browser middle-click/new-tab behavior works, and stale `asset_id` is removed when navigating to non-asset pages.
+
+Remote production validation:
+
+- Rebuilt backend and WebUI; deployed both to the remote production service.
+- HTTPS frontend serves built assets and the AI sidecar health endpoint reports CUDA-backed real mode.
+- PostgreSQL/pgvector is active; vector status reports `pgvector_ivfflat`.
+- Current remote stats at validation time:
+  - assets: `614582`;
+  - photos: `443933`;
+  - videos: `28580`;
+  - audio: `8781`;
+  - documents: `133635`;
+  - tracks: `5521`;
+  - hashed: `135211`;
+  - unhashed: `485239`;
+  - total bytes: about `12.56 TB`.
+- Storage health:
+  - `originals`, `old_compressed_data`, `old_nokia5228`, and `old_x12_los20` are readable strict-read-only storages;
+  - two optional child storage paths remain unavailable because their configured directories are not present under the mounted share; Cartolensia reports this without deleting metadata.
+- AI batch root cause confirmed:
+  - previous broad AI jobs targeted `200` assets and skipped all `200` because the first page was tracks;
+  - after the fix, image jobs process supported photos with zero unsupported skips.
+- Corrected AI batch results after deploy:
+  - embed, safety, classify, and describe processed `1000 / 1000` photo assets in the current corrected run;
+  - face detection, OCR, transcription, and audio analysis were relaunched and were progressing in Jobs at the last poll.
+- OCR endpoint showed a running OCR job around `477 / 1000` with stored updates increasing, and transcripts returned CUDA/faster-whisper metadata.
+- A slow caption search probe on the large index was stopped manually; search/index optimization remains a next performance target.
+
+Local validation:
+
+- `gofmt -w internal/server/server.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Known limitations / next work:
+
+- A local LLM runtime is not installed on the remote host yet (`ollama` absent and `vllm` absent in the current AI venv). The Cartolensia integration is ready for an offline-provided Ollama or OpenAI-compatible/vLLM endpoint.
+- Synchronous API-launched AI jobs can leave stale `cancel_requested` audit rows if the app is restarted mid-request. The production path should move these AI actions into the durable job worker/scheduler.
+- The current AI backfill still tends to repeat the first eligible assets unless a higher-level missing-work scheduler is used. A durable per-task “missing AI metadata” scheduler should be the next scaling improvement.
+- GPU utilization is improved by concurrent corrected batches, but the long-term solution is a VRAM-aware multi-lane AI scheduler with model residency and backpressure.
+- Full graph LOD/clustering, all-track map rendering at very large scale, and faster combined caption/OCR/transcript search remain performance hardening targets.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-28 Knowledge Base, Knowledge Graph, And Local Query Tools
 
 Implemented:

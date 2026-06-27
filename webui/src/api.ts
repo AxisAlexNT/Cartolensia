@@ -1521,12 +1521,20 @@ export const api = {
     request<Record<string, unknown>>(`/api/v1/places/${encodeURIComponent(id)}`, {
       method: "DELETE"
     }),
-  reversePlace: (lat: number, lon: number, online = false) =>
+  reversePlace: (lat: number, lon: number, online = false, radiusM?: number) =>
     request<Record<string, unknown>>("/api/v1/places/reverse", {
       method: "POST",
-      body: JSON.stringify({ lat, lon, online })
+      body: JSON.stringify({ lat, lon, online, radius_m: radiusM })
     }),
-  settings: () => request<SettingsPayload>("/api/v1/settings"),
+  settings: () => request<SettingsPayload>("/api/v1/settings").then((payload) => ({
+    ...payload,
+    tabs: asArray(payload.tabs),
+    runtime_settings: payload.runtime_settings && typeof payload.runtime_settings === "object" ? payload.runtime_settings : {},
+    pending_settings: payload.pending_settings && typeof payload.pending_settings === "object" ? payload.pending_settings : {},
+    restart_required: payload.restart_required && typeof payload.restart_required === "object" ? payload.restart_required : {},
+    yaml_bound_fields: asArray(payload.yaml_bound_fields),
+    effective: payload.effective && typeof payload.effective === "object" ? payload.effective : {}
+  })),
   pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
   patchPendingSettings: (settings: Record<string, unknown>) =>
     request<Record<string, unknown>>("/api/v1/settings/pending", {

@@ -971,7 +971,22 @@ Useful views:
 - `cartolensia_search_tracks`
 - `cartolensia_search_places`
 
-The "Ask Cartolensia" planner currently uses a deterministic local English/Russian fallback if no local LLM endpoint is configured. When a local LLM is added, keep it local-only and continue to execute generated queries through the same read-only SQL guard.
+The "Ask Cartolensia" planner uses a deterministic local English/Russian fallback unless a local LLM endpoint is configured. Supported local modes are:
+
+- `deterministic`: no model runtime, no remote API, read-only local parser.
+- `local_llm` with `knowledge.llm_provider=ollama`: calls a local Ollama `/api/chat` endpoint.
+- `local_llm` with `knowledge.llm_provider=openai_compatible` or `vllm`: calls a local OpenAI-compatible `/v1/chat/completions` endpoint.
+
+Keep LLM endpoints on loopback or a trusted LAN host. The LLM receives only bounded read-only tool results from allowlisted search/knowledge views; it never receives database credentials or write-capable tools. If no model is installed, leave deterministic mode enabled and import/provide an offline LLM runtime later through the component workflow.
+
+Relevant runtime settings:
+
+- `search.runner_mode`: `deterministic` or `local_llm`.
+- `knowledge.runner_mode`: `deterministic` or `local_llm`.
+- `knowledge.llm_provider`: `ollama`, `openai_compatible`, or `vllm`.
+- `knowledge.llm_endpoint`: local endpoint URL.
+- `knowledge.llm_model`: model name known by the local runtime.
+- `knowledge.llm_idle_unload_minutes`: operator policy for unloading a local model when the runtime supports it.
 
 ### Knowledge Base And Knowledge Graph
 
@@ -995,7 +1010,7 @@ POST /api/v1/knowledge/extract
 POST /api/v1/knowledge/chat
 ```
 
-`POST /api/v1/knowledge/chat` stores the conversation and the tool calls it used. The current implementation is deterministic and local. If a future local LLM is configured, it must use the same tools and read-only SQL guard; do not connect this feature to remote LLM APIs by default.
+`POST /api/v1/knowledge/chat` stores the conversation and the tool calls it used. Deterministic mode is always available. Local LLM mode uses the same tools and read-only SQL guard; do not connect this feature to remote LLM APIs by default.
 
 The read-only SQL workbench also accepts:
 

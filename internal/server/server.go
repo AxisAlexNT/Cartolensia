@@ -2051,14 +2051,16 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Lat    float64 `json:"lat"`
-		Lon    float64 `json:"lon"`
-		Online bool    `json:"online,omitempty"`
+		Lat     float64 `json:"lat"`
+		Lon     float64 `json:"lon"`
+		Online  bool    `json:"online,omitempty"`
+		RadiusM float64 `json:"radius_m,omitempty"`
 	}
 	if r.Method == http.MethodGet {
 		req.Lat, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lat")), 64)
 		req.Lon, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lon")), 64)
 		req.Online = boolQuery(r.URL.Query().Get("online"))
+		req.RadiusM, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("radius_m")), 64)
 	} else if r.Body != nil {
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			writeError(w, http.StatusBadRequest, err)
@@ -2069,7 +2071,20 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("lat/lon are required and must be valid"))
 		return
 	}
-	places := placesForPoint(req.Lat, req.Lon, s.placeEntries(r.Context()))
+	if req.RadiusM <= 0 {
+		req.RadiusM = float64(runtimeIntSetting("search.reverse_geocode_radius_m", 100))
+	}
+	if req.RadiusM < 0 {
+		req.RadiusM = 0
+	}
+	if req.RadiusM > 5000 {
+		req.RadiusM = 5000
+	}
+	placeEntries := s.placeEntries(r.Context())
+	places := mergePlaceMatches(
+		placesForPoint(req.Lat, req.Lon, placeEntries),
+		nearbyPlacesForPoint(req.Lat, req.Lon, placeEntries, req.RadiusM),
+	)
 	if len(places) > 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"lat":      req.Lat,
@@ -2077,7 +2092,8 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 			"source":   "local_place_cache",
 			"cached":   true,
 			"places":   places,
-			"note":     "Matched existing cached place bbox; no online geocoder was called.",
+			"radius_m": req.RadiusM,
+			"note":     "Matched existing cached place bbox and/or nearby cached place centroid; no online geocoder was called.",
 			"provider": "local_place_cache",
 		})
 		return
@@ -2089,6 +2105,7 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 			"source":   "local_place_cache",
 			"cached":   false,
 			"places":   []catalog.PlaceCacheEntry{},
+			"radius_m": req.RadiusM,
 			"provider": runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
 			"note":     "No local cached place contains this coordinate. Online reverse geocoding is disabled or was not requested.",
 		})
@@ -2110,6 +2127,7 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 		"source":   created.Source,
 		"cached":   true,
 		"places":   []catalog.PlaceCacheEntry{created},
+		"radius_m": req.RadiusM,
 		"provider": created.Provider,
 		"note":     "User-triggered reverse geocode cached in place_cache.",
 	})
@@ -3725,7 +3743,7 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		}
 		return result, nil
 	}
-	assets, err := s.resolveAIAssets(ctx, req)
+	assets, err := s.resolveAIAssets(ctx, kind, req)
 	if err != nil {
 		return result, err
 	}
@@ -3795,7 +3813,7 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 	return result, nil
 }
 
-func (s *Server) resolveAIAssets(ctx context.Context, req aiJobRequest) ([]catalog.Asset, error) {
+func (s *Server) resolveAIAssets(ctx context.Context, kind string, req aiJobRequest) ([]catalog.Asset, error) {
 	ids := compactStrings(req.AssetIDs)
 	if req.AssetID != "" {
 		ids = append(ids, req.AssetID)
@@ -3822,24 +3840,67 @@ func (s *Server) resolveAIAssets(ctx context.Context, req aiJobRequest) ([]catal
 	if limit == 0 {
 		limit = 250
 	}
+	mediaKinds := aiSupportedMediaKinds(kind)
+	if len(mediaKinds) == 0 {
+		return []catalog.Asset{}, nil
+	}
+	pageSize := 500
 	if limit < 0 {
 		var out []catalog.Asset
-		for offset := 0; ; offset += 500 {
-			page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: 500, Offset: offset, Sort: "taken_at"})
+		seen := map[string]struct{}{}
+		for _, mediaKind := range mediaKinds {
+			for offset := 0; ; offset += pageSize {
+				page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{MediaKind: mediaKind, Limit: pageSize, Offset: offset, Sort: "taken_at"})
+				if err != nil {
+					return nil, err
+				}
+				for _, asset := range page.Assets {
+					if _, ok := seen[asset.ID]; ok {
+						continue
+					}
+					seen[asset.ID] = struct{}{}
+					out = append(out, asset)
+				}
+				if offset+len(page.Assets) >= page.Page.Total || len(page.Assets) == 0 {
+					break
+				}
+			}
+		}
+		return out, nil
+	}
+	out := make([]catalog.Asset, 0, limit)
+	seen := map[string]struct{}{}
+	remaining := limit
+	for _, mediaKind := range mediaKinds {
+		if remaining <= 0 {
+			break
+		}
+		for offset := 0; remaining > 0; offset += pageSize {
+			batchLimit := pageSize
+			if remaining < batchLimit {
+				batchLimit = remaining
+			}
+			page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{MediaKind: mediaKind, Limit: batchLimit, Offset: offset, Sort: "taken_at"})
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, page.Assets...)
+			for _, asset := range page.Assets {
+				if _, ok := seen[asset.ID]; ok {
+					continue
+				}
+				seen[asset.ID] = struct{}{}
+				out = append(out, asset)
+				remaining--
+				if remaining <= 0 {
+					break
+				}
+			}
 			if offset+len(page.Assets) >= page.Page.Total || len(page.Assets) == 0 {
-				return out, nil
+				break
 			}
 		}
 	}
-	page, err := s.deps.Store.QueryAssets(ctx, catalog.AssetQuery{Limit: limit, Sort: "taken_at"})
-	if err != nil {
-		return nil, err
-	}
-	return page.Assets, nil
+	return out, nil
 }
 
 func aiConfiguredWorkerEndpoint(ctx context.Context) (endpoint, workerID string, ok bool) {
@@ -3882,6 +3943,19 @@ func aiSidecarPath(kind string) string {
 		return "/analyze-audio"
 	default:
 		return ""
+	}
+}
+
+func aiSupportedMediaKinds(kind string) []string {
+	switch kind {
+	case "classify_image", "detect_faces", "safety_nsfw", "embed_image", "describe_image", "ocr_image":
+		return []string{"photo"}
+	case "transcribe_audio":
+		return []string{"audio", "video"}
+	case "analyze_audio":
+		return []string{"audio"}
+	default:
+		return nil
 	}
 }
 
@@ -8037,10 +8111,66 @@ func placesForPoint(lat, lon float64, places []catalog.PlaceCacheEntry) []catalo
 	out := []catalog.PlaceCacheEntry{}
 	for _, place := range places {
 		if lon >= place.BBox.MinLon && lon <= place.BBox.MaxLon && lat >= place.BBox.MinLat && lat <= place.BBox.MaxLat {
+			out = append(out, placeWithDistance(place, 0, "bbox_contains"))
+		}
+	}
+	return out
+}
+
+func nearbyPlacesForPoint(lat, lon float64, places []catalog.PlaceCacheEntry, radiusM float64) []catalog.PlaceCacheEntry {
+	if radiusM <= 0 {
+		return nil
+	}
+	type match struct {
+		place    catalog.PlaceCacheEntry
+		distance float64
+	}
+	matches := []match{}
+	for _, place := range places {
+		if place.Lat == 0 && place.Lon == 0 {
+			continue
+		}
+		distance := haversineMeters(lat, lon, place.Lat, place.Lon)
+		if distance <= radiusM {
+			matches = append(matches, match{place: placeWithDistance(place, distance, "nearby_centroid"), distance: distance})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].distance < matches[j].distance })
+	out := make([]catalog.PlaceCacheEntry, 0, len(matches))
+	for _, item := range matches {
+		out = append(out, item.place)
+	}
+	return out
+}
+
+func mergePlaceMatches(groups ...[]catalog.PlaceCacheEntry) []catalog.PlaceCacheEntry {
+	seen := map[string]struct{}{}
+	out := []catalog.PlaceCacheEntry{}
+	for _, group := range groups {
+		for _, place := range group {
+			key := firstNonEmpty(place.ID, place.Provider+":"+place.NormalizedName, place.DisplayName)
+			if key == "" {
+				key = fmt.Sprintf("%.7f,%.7f:%s", place.Lat, place.Lon, place.Name)
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
 			out = append(out, place)
 		}
 	}
 	return out
+}
+
+func placeWithDistance(place catalog.PlaceCacheEntry, distanceM float64, matchKind string) catalog.PlaceCacheEntry {
+	metadata := map[string]any{}
+	for key, value := range place.Metadata {
+		metadata[key] = value
+	}
+	metadata["match_kind"] = matchKind
+	metadata["distance_m"] = distanceM
+	place.Metadata = metadata
+	return place
 }
 
 func metadataCoordinate(metadata map[string]any, latKey, lonKey string) (float64, float64, bool) {

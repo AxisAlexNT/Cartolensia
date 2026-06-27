@@ -34,7 +34,13 @@ type searchPlan struct {
 	SafeStructured bool               `json:"safe_structured"`
 }
 
-var sqlLikeClauseRE = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_-]*)\s*(=|:|like|contains|~)\s*("[^"]*"|'[^']*'|[^\s,()]+)`)
+var (
+	sqlLikeClauseRE       = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_-]*)\s*(=|:|like|contains|~)\s*("[^"]*"|'[^']*'|[^\s,()]+)`)
+	naturalMonthRangeRE   = regexp.MustCompile(`(?i)([[:alpha:]а-яё]+)\s*[-–—]\s*([[:alpha:]а-яё]+)\s+(\d{4})`)
+	naturalSingleMonthRE  = regexp.MustCompile(`(?i)([[:alpha:]а-яё]+)\s+(\d{4})`)
+	naturalYearRangeRE    = regexp.MustCompile(`(?i)\b(\d{4})\s*[-–—]\s*(\d{4})\b`)
+	naturalYearWithWordRE = regexp.MustCompile(`(?i)\b(19\d{2}|20\d{2})\b`)
+)
 
 func (s *Server) handleSearchParse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -213,7 +219,16 @@ func (s *Server) buildNaturalLanguageSearchPlan(description string) searchPlan {
 	description = strings.TrimSpace(description)
 	plan := s.buildSearchPlan(description)
 	plan.Planner = "rule_based_local"
-	plan.LLMStatus = runtimeStringSetting("search.llm_status", "not_configured")
+	if runtimeStringSetting("search.runner_mode", "deterministic") == "local_llm" {
+		model := strings.TrimSpace(runtimeStringSetting("knowledge.llm_model", ""))
+		if model == "" {
+			plan.LLMStatus = "local_llm_missing_model"
+		} else {
+			plan.LLMStatus = "local_llm_configured_rule_fallback"
+		}
+	} else {
+		plan.LLMStatus = "not_used"
+	}
 	if description == "" {
 		return plan
 	}
@@ -237,6 +252,9 @@ func (s *Server) buildNaturalLanguageSearchPlan(description string) searchPlan {
 	if containsAnyWord(lower, "track", "gps", "gpx", "kml", "трек", "маршрут", "gps") {
 		add("kind:track")
 	}
+	for _, dateToken := range dateConstraintTokens(description) {
+		add(dateToken)
+	}
 	for _, ext := range storageLikeExtensionsFromText(lower) {
 		add("ext:" + ext)
 	}
@@ -254,7 +272,7 @@ func (s *Server) buildNaturalLanguageSearchPlan(description string) searchPlan {
 	plan.Clauses = clausesFromTokens(plan.Tokens)
 	plan.Notes = append(plan.Notes,
 		"Natural-language planning used a deterministic local English/Russian fallback.",
-		"Configure a local LLM endpoint to replace the fallback; remote APIs are not used by default.",
+		"Configure a local LLM endpoint for answer synthesis; remote APIs are not used by default.",
 	)
 	plan.Warnings = searchWarnings(plan.Tokens)
 	return plan
@@ -278,6 +296,87 @@ func storageLikeExtensionsFromText(text string) []string {
 		}
 	}
 	return uniqueStrings(out)
+}
+
+func dateConstraintTokens(text string) []string {
+	var out []string
+	hasMonthRange := false
+	for _, match := range naturalMonthRangeRE.FindAllStringSubmatch(text, -1) {
+		startMonth, okStart := monthNumber(match[1])
+		endMonth, okEnd := monthNumber(match[2])
+		if !okStart || !okEnd {
+			continue
+		}
+		year := match[3]
+		if startMonth > endMonth {
+			startMonth, endMonth = endMonth, startMonth
+		}
+		out = append(out, fmt.Sprintf("%s-%02d..%s-%02d", year, startMonth, year, endMonth))
+		hasMonthRange = true
+	}
+	for _, match := range naturalYearRangeRE.FindAllStringSubmatch(text, -1) {
+		out = append(out, fmt.Sprintf("%s..%s", match[1], match[2]))
+	}
+	if !hasMonthRange {
+		for _, match := range naturalSingleMonthRE.FindAllStringSubmatch(text, -1) {
+			month, ok := monthNumber(match[1])
+			if !ok {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s-%02d", match[2], month))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return uniqueStrings(out)
+}
+
+func monthNumber(value string) (int, bool) {
+	word := strings.Trim(strings.ToLower(value), `"'!?.,:;()[]`)
+	switch {
+	case strings.HasPrefix(word, "jan"), strings.HasPrefix(word, "январ"):
+		return 1, true
+	case strings.HasPrefix(word, "feb"), strings.HasPrefix(word, "феврал"):
+		return 2, true
+	case strings.HasPrefix(word, "mar"), strings.HasPrefix(word, "март"):
+		return 3, true
+	case strings.HasPrefix(word, "apr"), strings.HasPrefix(word, "апрел"):
+		return 4, true
+	case word == "may", word == "май", word == "мая", strings.HasPrefix(word, "майс"):
+		return 5, true
+	case strings.HasPrefix(word, "jun"), strings.HasPrefix(word, "июн"):
+		return 6, true
+	case strings.HasPrefix(word, "jul"), strings.HasPrefix(word, "июл"):
+		return 7, true
+	case strings.HasPrefix(word, "aug"), strings.HasPrefix(word, "август"):
+		return 8, true
+	case strings.HasPrefix(word, "sep"), strings.HasPrefix(word, "сентябр"):
+		return 9, true
+	case strings.HasPrefix(word, "oct"), strings.HasPrefix(word, "октябр"):
+		return 10, true
+	case strings.HasPrefix(word, "nov"), strings.HasPrefix(word, "ноябр"):
+		return 11, true
+	case strings.HasPrefix(word, "dec"), strings.HasPrefix(word, "декабр"):
+		return 12, true
+	default:
+		return 0, false
+	}
+}
+
+func isNaturalDateWord(word string) bool {
+	if _, ok := monthNumber(word); ok {
+		return true
+	}
+	if naturalYearWithWordRE.MatchString(word) {
+		return true
+	}
+	for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == '-' || r == '–' || r == '—' }) {
+		if _, ok := monthNumber(part); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func quotedPhrases(text string) []string {
@@ -305,6 +404,7 @@ func significantSearchWords(text string) []string {
 	stop := map[string]struct{}{
 		"find": {}, "show": {}, "me": {}, "with": {}, "from": {}, "and": {}, "or": {}, "the": {}, "a": {}, "an": {}, "in": {}, "on": {}, "near": {},
 		"найди": {}, "покажи": {}, "мне": {}, "с": {}, "со": {}, "и": {}, "или": {}, "в": {}, "на": {}, "около": {}, "рядом": {}, "где": {},
+		"год": {}, "года": {}, "году": {}, "лето": {}, "летом": {}, "пожалуйста": {},
 	}
 	fields := strings.FieldsFunc(text, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\n' || r == ',' || r == ';' || r == ':' || r == '(' || r == ')' || r == '[' || r == ']'
@@ -318,8 +418,11 @@ func significantSearchWords(text string) []string {
 		if _, ok := stop[word]; ok {
 			continue
 		}
+		if isNaturalDateWord(word) {
+			continue
+		}
 		switch word {
-		case "photo", "photos", "image", "images", "video", "videos", "audio", "track", "tracks", "фото", "видео", "аудио", "трек", "маршрут":
+		case "photo", "photos", "image", "images", "picture", "pictures", "video", "videos", "audio", "track", "tracks", "фото", "фотографии", "фотография", "снимки", "изображения", "видео", "аудио", "трек", "маршрут":
 			continue
 		}
 		out = append(out, word)

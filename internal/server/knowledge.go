@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 )
@@ -231,6 +234,19 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 		}
 	}
 	answer := buildKnowledgeAnswer(message, facts, relations)
+	llmStatus := "not_used"
+	note := "Local deterministic tool runner. Configure a local LLM endpoint to synthesize richer answers; remote LLM APIs are not used by default."
+	if runtimeStringSetting("knowledge.runner_mode", "deterministic") == "local_llm" {
+		llmAnswer, status, llmNote, err := s.synthesizeKnowledgeWithLocalLLM(ctx, message, plan, facts, relations)
+		llmStatus = status
+		note = llmNote
+		toolCalls = append(toolCalls, map[string]any{"tool": "local_llm_synthesis", "status": status, "error": errorString(err)})
+		if err == nil && strings.TrimSpace(llmAnswer) != "" {
+			answer = llmAnswer
+		} else if err != nil {
+			note = note + " Deterministic answer is shown because local LLM synthesis failed: " + err.Error()
+		}
+	}
 	return knowledgeChatResponse{
 		Answer:    answer,
 		Planner:   plan,
@@ -238,9 +254,166 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 		Facts:     facts,
 		Relations: relations,
 		Limit:     limit,
-		LLMStatus: runtimeStringSetting("knowledge.llm_status", runtimeStringSetting("search.llm_status", "not_configured")),
-		Note:      "Local deterministic tool runner. A local LLM can be configured later, but remote LLM APIs are not used by default.",
+		LLMStatus: llmStatus,
+		Note:      note,
 	}, nil
+}
+
+func (s *Server) synthesizeKnowledgeWithLocalLLM(ctx context.Context, message string, plan searchPlan, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation) (string, string, string, error) {
+	provider := strings.ToLower(strings.TrimSpace(runtimeStringSetting("knowledge.llm_provider", "ollama")))
+	endpoint := strings.TrimRight(strings.TrimSpace(runtimeStringSetting("knowledge.llm_endpoint", "http://127.0.0.1:11434")), "/")
+	model := strings.TrimSpace(runtimeStringSetting("knowledge.llm_model", ""))
+	if model == "" {
+		return "", "local_llm_missing_model", "Set knowledge.llm_model in Settings before using local LLM mode.", fmt.Errorf("knowledge.llm_model is empty")
+	}
+	if endpoint == "" {
+		return "", "local_llm_missing_endpoint", "Set knowledge.llm_endpoint in Settings before using local LLM mode.", fmt.Errorf("knowledge.llm_endpoint is empty")
+	}
+	timeoutSeconds := runtimeIntSetting("knowledge.llm_timeout_seconds", 60)
+	if timeoutSeconds < 5 {
+		timeoutSeconds = 5
+	}
+	if timeoutSeconds > 300 {
+		timeoutSeconds = 300
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	prompt := knowledgeLLMPrompt(message, plan, facts, relations)
+	switch provider {
+	case "ollama":
+		answer, err := postOllamaChat(ctx, endpoint, model, prompt)
+		if err != nil {
+			return "", "local_llm_error", "Ollama-compatible local LLM failed; deterministic answer is still available.", err
+		}
+		return answer, "local_llm_ollama", "Answer synthesized by local Ollama-compatible endpoint from read-only tool results.", nil
+	case "openai_compatible", "vllm", "openai-compatible":
+		answer, err := postOpenAICompatibleChat(ctx, endpoint, model, prompt)
+		if err != nil {
+			return "", "local_llm_error", "OpenAI-compatible local LLM failed; deterministic answer is still available.", err
+		}
+		return answer, "local_llm_openai_compatible", "Answer synthesized by local OpenAI-compatible endpoint from read-only tool results.", nil
+	default:
+		return "", "local_llm_bad_provider", "Unsupported local LLM provider. Use ollama or openai_compatible.", fmt.Errorf("unsupported local LLM provider %q", provider)
+	}
+}
+
+func knowledgeLLMPrompt(message string, plan searchPlan, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation) string {
+	maxItems := runtimeIntSetting("knowledge.llm_max_context_items", 24)
+	if maxItems < 4 {
+		maxItems = 4
+	}
+	if maxItems > 80 {
+		maxItems = 80
+	}
+	var builder strings.Builder
+	builder.WriteString("You are Cartolensia, a local read-only multimedia archive assistant. ")
+	builder.WriteString("Answer only from the provided facts and relations. If the evidence is insufficient, say so. ")
+	builder.WriteString("Mention relevant asset names or IDs as clickable candidates for the UI. Do not invent external facts.\n\n")
+	builder.WriteString("User request:\n")
+	builder.WriteString(message)
+	builder.WriteString("\n\nParsed safe query:\n")
+	builder.WriteString(searchPlanPreview(plan))
+	builder.WriteString("\n\nFacts:\n")
+	for i, fact := range facts {
+		if i >= maxItems {
+			builder.WriteString(fmt.Sprintf("- plus %d more facts not shown to the model\n", len(facts)-i))
+			break
+		}
+		builder.WriteString(fmt.Sprintf("- asset=%s subject=%s predicate=%s object=%s evidence=%s\n",
+			firstNonEmpty(fact.AssetID, "(none)"), compactFactObject(fact.Subject), fact.Predicate, compactFactObject(fact.Object), compactFactObject(fact.Evidence)))
+	}
+	builder.WriteString("\nRelations:\n")
+	for i, relation := range relations {
+		if i >= maxItems {
+			builder.WriteString(fmt.Sprintf("- plus %d more relations not shown to the model\n", len(relations)-i))
+			break
+		}
+		builder.WriteString(fmt.Sprintf("- from_asset=%s from=%s relation=%s to_asset=%s to=%s evidence=%s\n",
+			firstNonEmpty(relation.FromAssetID, "(none)"), compactFactObject(relation.FromEntity), relation.Relation,
+			firstNonEmpty(relation.ToAssetID, "(none)"), compactFactObject(relation.ToEntity), compactFactObject(relation.Evidence)))
+	}
+	return builder.String()
+}
+
+func postOllamaChat(ctx context.Context, endpoint, model, prompt string) (string, error) {
+	payload := map[string]any{
+		"model":  model,
+		"stream": false,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You answer archive questions using only provided local evidence."},
+			{"role": "user", "content": prompt},
+		},
+	}
+	var response struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		Error string `json:"error"`
+	}
+	if err := postLocalLLMJSON(ctx, endpoint+"/api/chat", payload, &response); err != nil {
+		return "", err
+	}
+	if response.Error != "" {
+		return "", fmt.Errorf("%s", response.Error)
+	}
+	return strings.TrimSpace(response.Message.Content), nil
+}
+
+func postOpenAICompatibleChat(ctx context.Context, endpoint, model, prompt string) (string, error) {
+	payload := map[string]any{
+		"model":       model,
+		"temperature": 0.1,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You answer archive questions using only provided local evidence."},
+			{"role": "user", "content": prompt},
+		},
+	}
+	var response struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error any `json:"error"`
+	}
+	if err := postLocalLLMJSON(ctx, endpoint+"/v1/chat/completions", payload, &response); err != nil {
+		return "", err
+	}
+	if response.Error != nil {
+		return "", fmt.Errorf("local LLM returned error: %v", response.Error)
+	}
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("local LLM returned no choices")
+	}
+	return strings.TrimSpace(response.Choices[0].Message.Content), nil
+}
+
+func postLocalLLMJSON(ctx context.Context, url string, payload any, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("local LLM HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	if err := json.Unmarshal(responseBody, out); err != nil {
+		return err
+	}
+	return nil
 }
 
 func knowledgeQueryFromRequest(r *http.Request) catalog.KnowledgeQuery {

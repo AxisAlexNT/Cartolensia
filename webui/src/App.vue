@@ -100,6 +100,7 @@ const nav = [
   "Face Gallery",
   "Safety Review",
   "Search",
+  "Console",
   "Knowledge Base",
   "Knowledge Graph",
   "Geo Align",
@@ -134,6 +135,8 @@ const navPageAliases: Record<string, string> = {
   "safety-review": "Safety Review",
   search: "Search",
   "universal-search": "Search",
+  console: "Console",
+  logs: "Console",
   "knowledge-base": "Knowledge Base",
   knowledge: "Knowledge Base",
   "knowledge-graph": "Knowledge Graph",
@@ -191,6 +194,7 @@ function navIcon(label: string): string {
     "Face Gallery": "bi-person-bounding-box",
     "Safety Review": "bi-shield-exclamation",
     Search: "bi-search-heart",
+    Console: "bi-terminal",
     "Knowledge Base": "bi-journal-richtext",
     "Knowledge Graph": "bi-diagram-3",
     "Geo Align": "bi-crosshair",
@@ -236,6 +240,10 @@ const knowledgePredicate = ref("");
 const knowledgeRelationFilter = ref("");
 const knowledgeFactsTotal = ref(0);
 const knowledgeRelationsTotal = ref(0);
+const knowledgeFactLimit = ref(100);
+const knowledgeRelationLimit = ref(100);
+const knowledgeFactOffset = ref(0);
+const knowledgeRelationOffset = ref(0);
 const knowledgeLoading = ref(false);
 const knowledgeMessage = ref("");
 const knowledgeExtraction = ref<KnowledgeExtractionResult | null>(null);
@@ -243,6 +251,9 @@ const knowledgeChatInput = ref("");
 const knowledgeChatConversationID = ref("");
 const knowledgeChat = ref<KnowledgeChatResponse | null>(null);
 const knowledgeChatBusy = ref(false);
+const uiLogs = ref<Array<{ id: number; level: string; message: string; created_at: string; stack?: string }>>([]);
+const consoleFilter = ref("");
+let uiLogSeq = 0;
 const searchPlaceCache = ref<SearchPlacesResponse | null>(null);
 const editablePlaces = ref<PlaceCacheEntry[]>([]);
 const placeCacheQuery = ref("");
@@ -601,6 +612,35 @@ function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
 }
 
+function recordUILog(level: string, message: unknown, stack = "") {
+  const text = message instanceof Error ? message.message : typeof message === "string" ? message : JSON.stringify(message);
+  uiLogs.value = [{
+    id: ++uiLogSeq,
+    level,
+    message: text || String(message),
+    stack,
+    created_at: new Date().toISOString()
+  }, ...uiLogs.value].slice(0, 1000);
+}
+
+function routeHref(label: string): string {
+  const url = new URL(window.location.href);
+  url.searchParams.set("page", pageSlug(safeRoute(label)));
+  if (safeRoute(label) !== "Asset Detail") {
+    url.searchParams.delete("asset_id");
+    url.searchParams.delete("seek_ms");
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function openRouteLink(event: MouseEvent, label: string) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  setActive(label);
+}
+
 function setActive(next: string, updateURL = true) {
   const route = safeRoute(next);
   active.value = route;
@@ -616,6 +656,8 @@ function setActive(next: string, updateURL = true) {
   if (updateURL && route !== "Asset Detail") {
     const url = new URL(window.location.href);
     url.searchParams.set("page", pageSlug(route));
+    url.searchParams.delete("asset_id");
+    url.searchParams.delete("seek_ms");
     window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }
 }
@@ -1048,6 +1090,13 @@ const visibleTranscriptRows = computed(() => {
   const query = transcriptQuery.value.trim().toLowerCase();
   if (!query) return transcriptRows.value;
   return transcriptRows.value.filter((transcript) => transcriptMatchesQuery(transcript, query));
+});
+const filteredUILogs = computed(() => {
+  const query = consoleFilter.value.trim().toLowerCase();
+  if (!query) return uiLogs.value;
+  return uiLogs.value.filter((entry) =>
+    [entry.level, entry.message, entry.stack, entry.created_at].some((value) => String(value ?? "").toLowerCase().includes(query))
+  );
 });
 const visibleAssetFaces = computed(() => {
   const faces = asArray(assetDetail.value?.face_detections as unknown[]) as FaceDetection[];
@@ -2337,6 +2386,85 @@ async function selectTranscodeOption(assetId: string, event: Event) {
 }
 
 const supportedTranscodeEncoders = computed(() => asArray(transcodingCapabilities.value?.encoders));
+const settingsTabs = computed(() => asArray(settings.value?.tabs));
+const yamlBoundFields = computed(() => asArray(settings.value?.yaml_bound_fields));
+const ffmpegAvailable = computed(() => Boolean((transcodingCapabilities.value?.ffmpeg as Record<string, unknown> | undefined)?.available));
+const ffprobeAvailable = computed(() => Boolean((transcodingCapabilities.value?.ffprobe as Record<string, unknown> | undefined)?.available));
+const knowledgeMode = computed(() => runtimeTextSetting("knowledge.runner_mode", "deterministic"));
+const searchPlannerMode = computed(() => runtimeTextSetting("search.runner_mode", "deterministic"));
+
+type KnowledgeGraphNode = {
+  id: string;
+  label: string;
+  kind: string;
+  asset_id?: string;
+  x: number;
+  y: number;
+};
+
+type KnowledgeGraphEdge = {
+  id: string;
+  from: string;
+  to: string;
+  relation: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
+
+function compactGraphLabel(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 32) return trimmed;
+  return `${trimmed.slice(0, 29)}...`;
+}
+
+const knowledgeGraphPreview = computed(() => {
+  const width = 760;
+  const height = 420;
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.min(width, height) * 0.36;
+  const nodes = new Map<string, KnowledgeGraphNode>();
+  const addNode = (id: string, label: string, kind: string, assetID = "") => {
+    if (!id || nodes.has(id)) return;
+    nodes.set(id, { id, label: compactGraphLabel(label || id), kind, asset_id: assetID || undefined, x: centerX, y: centerY });
+  };
+  const relationSample = knowledgeRelations.value.slice(0, 90);
+  for (const relation of relationSample) {
+    const fromID = relation.from_asset_id ? `asset:${relation.from_asset_id}` : `entity:${relation.from_entity || "unknown"}`;
+    const toID = relation.to_asset_id ? `asset:${relation.to_asset_id}` : `entity:${relation.to_entity || "unknown"}`;
+    addNode(fromID, relation.from_entity || relation.from_asset_id || "asset", relation.from_asset_id ? "asset" : "entity", relation.from_asset_id);
+    addNode(toID, relation.to_entity || relation.to_asset_id || "asset", relation.to_asset_id ? "asset" : "entity", relation.to_asset_id);
+  }
+  const nodeList = Array.from(nodes.values()).slice(0, 120);
+  nodeList.forEach((node, idx) => {
+    const angle = (idx / Math.max(1, nodeList.length)) * Math.PI * 2 - Math.PI / 2;
+    const ring = idx % 3 === 0 ? radius * 0.62 : radius;
+    node.x = Math.round(centerX + Math.cos(angle) * ring);
+    node.y = Math.round(centerY + Math.sin(angle) * ring);
+  });
+  const nodeByID = new Map(nodeList.map((node) => [node.id, node]));
+  const edges: KnowledgeGraphEdge[] = [];
+  for (const relation of relationSample) {
+    const fromID = relation.from_asset_id ? `asset:${relation.from_asset_id}` : `entity:${relation.from_entity || "unknown"}`;
+    const toID = relation.to_asset_id ? `asset:${relation.to_asset_id}` : `entity:${relation.to_entity || "unknown"}`;
+    const from = nodeByID.get(fromID);
+    const to = nodeByID.get(toID);
+    if (!from || !to) continue;
+    edges.push({
+      id: relation.id,
+      from: fromID,
+      to: toID,
+      relation: relation.relation,
+      x1: from.x,
+      y1: from.y,
+      x2: to.x,
+      y2: to.y
+    });
+  }
+  return { width, height, nodes: nodeList, edges };
+});
 
 const groupedTranscodeHardware = computed(() => {
 	const hardware = transcodingCapabilities.value?.hardware ?? {};
@@ -3284,33 +3412,53 @@ async function runReadOnlySQLSearch() {
   sqlSearchMessage.value = `${sqlSearchResult.value.count} rows returned from ${sqlSearchResult.value.views.join(", ")}`;
 }
 
-async function loadKnowledgeBase() {
+async function loadKnowledgeBase(options: { append?: boolean; loadAll?: boolean } = {}) {
   knowledgeLoading.value = true;
   try {
+    const factOffset = options.append ? knowledgeFacts.value.length : 0;
+    const relationOffset = options.append ? knowledgeRelations.value.length : 0;
+    const factLimit = options.loadAll ? Math.max(knowledgeFactsTotal.value - factOffset, 0) || 5000 : knowledgeFactLimit.value;
+    const relationLimit = options.loadAll ? Math.max(knowledgeRelationsTotal.value - relationOffset, 0) || 5000 : knowledgeRelationLimit.value;
     const [factPage, relationPage] = await Promise.all([
       api.knowledgeFacts({
         q: knowledgeQ.value.trim(),
         predicate: knowledgePredicate.value.trim(),
-        limit: 100,
-        offset: 0
+        limit: factLimit,
+        offset: factOffset
       }),
       api.knowledgeRelations({
         q: knowledgeQ.value.trim(),
         relation: knowledgeRelationFilter.value.trim(),
-        limit: 100,
-        offset: 0
+        limit: relationLimit,
+        offset: relationOffset
       })
     ]);
-    knowledgeFacts.value = factPage.facts;
-    knowledgeRelations.value = relationPage.relations;
+    knowledgeFacts.value = options.append ? knowledgeFacts.value.concat(factPage.facts) : factPage.facts;
+    knowledgeRelations.value = options.append ? knowledgeRelations.value.concat(relationPage.relations) : relationPage.relations;
     knowledgeFactsTotal.value = factPage.page.total;
     knowledgeRelationsTotal.value = relationPage.page.total;
-    knowledgeMessage.value = `${knowledgeFactsTotal.value} facts · ${knowledgeRelationsTotal.value} graph relations`;
+    knowledgeFactOffset.value = knowledgeFacts.value.length;
+    knowledgeRelationOffset.value = knowledgeRelations.value.length;
+    knowledgeMessage.value = `${knowledgeFacts.value.length} / ${knowledgeFactsTotal.value} facts · ${knowledgeRelations.value.length} / ${knowledgeRelationsTotal.value} graph relations`;
   } catch (err) {
     knowledgeMessage.value = err instanceof Error ? err.message : String(err);
   } finally {
     knowledgeLoading.value = false;
   }
+}
+
+function resetKnowledgePagingAndLoad() {
+  knowledgeFactOffset.value = 0;
+  knowledgeRelationOffset.value = 0;
+  void loadKnowledgeBase();
+}
+
+function loadMoreKnowledge() {
+  void loadKnowledgeBase({ append: true });
+}
+
+function loadAllKnowledge() {
+  void loadKnowledgeBase({ append: true, loadAll: true });
 }
 
 async function extractKnowledgeBatch() {
@@ -4287,6 +4435,11 @@ function setRuntimeSetting(key: string, value: string) {
   settings.value.runtime_settings[key] = value;
 }
 
+async function applyRuntimeSetting(key: string, value: string) {
+  setRuntimeSetting(key, value);
+  await saveRuntimeSettings();
+}
+
 function pendingObject(path: string): Record<string, unknown> {
   if (!path) return pendingConfig.value;
   const parts = path.split(".");
@@ -5242,8 +5395,43 @@ function formatDuration(value: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+const originalConsole = {
+  error: console.error.bind(console),
+  warn: console.warn.bind(console)
+};
+
+function installUILogCapture() {
+  window.addEventListener("error", handleWindowError);
+  window.addEventListener("unhandledrejection", handleUnhandledRejection);
+  console.error = (...args: unknown[]) => {
+    recordUILog("error", args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(" "), args.find((arg) => arg instanceof Error)?.stack ?? "");
+    originalConsole.error(...args);
+  };
+  console.warn = (...args: unknown[]) => {
+    recordUILog("warn", args.map((arg) => String(arg)).join(" "));
+    originalConsole.warn(...args);
+  };
+}
+
+function uninstallUILogCapture() {
+  window.removeEventListener("error", handleWindowError);
+  window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+  console.error = originalConsole.error;
+  console.warn = originalConsole.warn;
+}
+
+function handleWindowError(event: ErrorEvent) {
+  recordUILog("error", event.message, event.error?.stack ?? "");
+}
+
+function handleUnhandledRejection(event: PromiseRejectionEvent) {
+  const reason = event.reason;
+  recordUILog("error", reason instanceof Error ? reason.message : String(reason), reason instanceof Error ? reason.stack ?? "" : "");
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
+  installUILogCapture();
   await refresh();
   const assetID = new URLSearchParams(window.location.search).get("asset_id");
   if (active.value === "Asset Detail" && assetID) {
@@ -5263,6 +5451,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeydown);
+  uninstallUILogCapture();
   stopVideoTrackPlaybackLoop();
   destroyVideoTrackMap();
   destroyGalleryTrackMap();
@@ -5294,16 +5483,16 @@ onBeforeUnmount(() => {
 
     <div class="layout">
       <nav class="sidebar" aria-label="Primary">
-        <button
+        <a
           v-for="item in nav"
           :key="item"
-          type="button"
+          :href="routeHref(item)"
           :class="{ active: item === active }"
-          @click="setActive(item)"
+          @click="openRouteLink($event, item)"
 	        >
 	          <i :class="['bi', navIcon(item)]" aria-hidden="true"></i>
 	          {{ item }}
-	        </button>
+	        </a>
       </nav>
 
       <section class="content">
@@ -6944,7 +7133,7 @@ onBeforeUnmount(() => {
         <section v-else-if="active === 'Transcoding'" class="panel">
           <header class="panel-head">
             <h2>Transcoding</h2>
-            <span>{{ transcodingCapabilities?.ffmpeg.available ? "ffmpeg detected" : "ffmpeg unavailable" }}</span>
+            <span>{{ ffmpegAvailable ? "ffmpeg detected" : "ffmpeg unavailable" }}</span>
           </header>
           <div class="settings-tabs secondary-tabs">
             <button v-for="tab in ['capabilities', 'presets', 'rules', 'templates', 'planner', 'metrics']" :key="tab" type="button" :class="{ active: transcodePageTab === tab }" @click="transcodePageTab = tab">
@@ -6952,9 +7141,9 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <div class="metrics">
-            <article><strong>{{ transcodingCapabilities?.ffmpeg.available ? "yes" : "no" }}</strong><span>ffmpeg</span></article>
-            <article><strong>{{ transcodingCapabilities?.ffprobe.available ? "yes" : "no" }}</strong><span>ffprobe</span></article>
-            <article><strong>{{ transcodingCapabilities?.encoders.length ?? 0 }}</strong><span>Video encoders</span></article>
+            <article><strong>{{ ffmpegAvailable ? "yes" : "no" }}</strong><span>ffmpeg</span></article>
+            <article><strong>{{ ffprobeAvailable ? "yes" : "no" }}</strong><span>ffprobe</span></article>
+            <article><strong>{{ supportedTranscodeEncoders.length }}</strong><span>Video encoders</span></article>
             <article><strong>immutable</strong><span>Originals</span></article>
           </div>
           <div v-if="transcodePageTab === 'capabilities'" class="settings-grid">
@@ -6973,7 +7162,7 @@ onBeforeUnmount(() => {
               <table>
                 <thead><tr><th>Encoder</th><th>Codec</th><th>Hardware</th></tr></thead>
                 <tbody>
-                  <tr v-for="encoder in transcodingCapabilities?.encoders ?? []" :key="encoder.name">
+                  <tr v-for="encoder in supportedTranscodeEncoders" :key="encoder.name">
                     <td>{{ encoder.name }}</td>
                     <td>{{ encoder.codec_family }}</td>
                     <td>{{ encoder.hardware || "cpu/software" }}</td>
@@ -7556,6 +7745,25 @@ onBeforeUnmount(() => {
           <section class="settings-form search-planner-card">
             <h3><i class="bi bi-magic" aria-hidden="true"></i> Ask Cartolensia</h3>
             <p class="muted">Describe the files you want in English or Russian. Local planning is deterministic unless a local LLM endpoint is configured; no remote API is used.</p>
+            <div class="segmented-control compact-segmented" role="group" aria-label="Search planner mode">
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="searchPlannerMode === 'deterministic' ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="applyRuntimeSetting('search.runner_mode', 'deterministic')"
+              >
+                Deterministic
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="searchPlannerMode === 'local_llm' ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="applyRuntimeSetting('search.runner_mode', 'local_llm')"
+              >
+                Local LLM
+              </button>
+              <span class="muted">Mode: {{ searchPlannerMode }}</span>
+            </div>
             <div class="inline-form-row">
               <input v-model="naturalSearchQ" type="search" placeholder="find videos with trains in May 2026 / покажи видео с поездом" @keyup.enter="planNaturalLanguageSearch" />
               <button type="button" class="btn btn-outline-primary" @click="planNaturalLanguageSearch">Plan query</button>
@@ -7684,6 +7892,36 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
+        <section v-else-if="active === 'Console'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Console</h2>
+              <span>Last 1000 WebUI warnings and errors captured in this browser session.</span>
+            </div>
+            <button type="button" class="btn btn-outline-secondary" @click="uiLogs = []">Clear</button>
+          </header>
+          <section class="settings-form">
+            <div class="inline-form-row">
+              <input v-model="consoleFilter" type="search" placeholder="Filter logs, errors, stack frames..." />
+              <span class="status-badge">{{ filteredUILogs.length }} shown</span>
+            </div>
+            <div v-if="filteredUILogs.length === 0" class="empty-state">No captured WebUI errors or warnings.</div>
+            <div v-else class="console-log-list">
+              <article v-for="entry in filteredUILogs" :key="entry.id" :class="['console-log-row', entry.level]">
+                <div class="section-title compact-title">
+                  <span :class="['status-badge', entry.level === 'error' ? 'bad' : 'warn']">{{ entry.level }}</span>
+                  <small>{{ entry.created_at }}</small>
+                </div>
+                <pre>{{ entry.message }}</pre>
+                <details v-if="entry.stack">
+                  <summary>Stack</summary>
+                  <pre>{{ entry.stack }}</pre>
+                </details>
+              </article>
+            </div>
+          </section>
+        </section>
+
         <section v-else-if="active === 'Knowledge Base'" class="panel knowledge-page">
           <header class="panel-head">
             <div>
@@ -7697,6 +7935,25 @@ onBeforeUnmount(() => {
           <section class="settings-form">
             <h3><i class="bi bi-magic" aria-hidden="true"></i> Ask The Local Knowledge Base</h3>
             <p class="muted">The current runner uses deterministic local tools. It plans the request, searches facts and graph relations, and records the conversation. No remote LLM API is used by default.</p>
+            <div class="segmented-control compact-segmented" role="group" aria-label="Knowledge runner mode">
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="knowledgeMode === 'deterministic' ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="applyRuntimeSetting('knowledge.runner_mode', 'deterministic')"
+              >
+                Deterministic
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="knowledgeMode === 'local_llm' ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="applyRuntimeSetting('knowledge.runner_mode', 'local_llm')"
+              >
+                Local LLM
+              </button>
+              <span class="muted">Mode: {{ knowledgeMode }}</span>
+            </div>
             <div class="inline-form-row">
               <input v-model="knowledgeChatInput" type="search" placeholder="What was recorded near Lake Ladoga? / Что снято рядом с поездом?" @keyup.enter="askKnowledgeBase" />
               <button type="button" class="btn btn-primary" :disabled="knowledgeChatBusy" @click="askKnowledgeBase">Ask</button>
@@ -7705,6 +7962,28 @@ onBeforeUnmount(() => {
             <article v-if="knowledgeChat" class="knowledge-answer">
               <h4>Answer</h4>
               <pre>{{ knowledgeChat.answer }}</pre>
+              <div v-if="knowledgeChat.facts.length || knowledgeChat.relations.length" class="knowledge-citation-list">
+                <a
+                  v-for="fact in knowledgeChat.facts.filter((item) => item.asset_id).slice(0, 12)"
+                  :key="`chat-fact-${fact.id}`"
+                  class="knowledge-citation"
+                  :href="assetHref(fact.asset_id as string)"
+                  @click="openAssetLink($event, fact.asset_id as string)"
+                >
+                  {{ fact.subject }}
+                  <small>{{ fact.predicate }} · {{ fact.object }}</small>
+                </a>
+                <a
+                  v-for="relation in knowledgeChat.relations.filter((item) => item.from_asset_id || item.to_asset_id).slice(0, 12)"
+                  :key="`chat-relation-${relation.id}`"
+                  class="knowledge-citation"
+                  :href="assetHref((relation.from_asset_id || relation.to_asset_id) as string)"
+                  @click="openAssetLink($event, (relation.from_asset_id || relation.to_asset_id) as string)"
+                >
+                  {{ relation.from_entity || relation.from_asset_id || 'entity' }}
+                  <small>{{ relation.relation }} {{ relation.to_entity || relation.to_asset_id || 'entity' }}</small>
+                </a>
+              </div>
               <details>
                 <summary>Tool calls and parsed plan</summary>
                 <div class="chip-row">
@@ -7719,9 +7998,11 @@ onBeforeUnmount(() => {
           <section class="settings-form">
             <h3><i class="bi bi-filter" aria-hidden="true"></i> Browse Facts</h3>
             <div class="inline-form-row">
-              <input v-model="knowledgeQ" type="search" placeholder="Filter subject, predicate, object, evidence, asset name..." @keyup.enter="loadKnowledgeBase" />
-              <input v-model="knowledgePredicate" type="search" placeholder="predicate, e.g. caption, captured_with, ocr_text" @keyup.enter="loadKnowledgeBase" />
-              <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="loadKnowledgeBase">Search</button>
+              <input v-model="knowledgeQ" type="search" placeholder="Filter subject, predicate, object, evidence, asset name..." @keyup.enter="resetKnowledgePagingAndLoad" />
+              <input v-model="knowledgePredicate" type="search" placeholder="predicate, e.g. caption, captured_with, ocr_text" @keyup.enter="resetKnowledgePagingAndLoad" />
+              <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="resetKnowledgePagingAndLoad">Search</button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="knowledgeLoading || knowledgeFacts.length >= knowledgeFactsTotal" @click="loadMoreKnowledge">Load more</button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="knowledgeLoading || knowledgeFacts.length >= knowledgeFactsTotal" @click="loadAllKnowledge">Load all</button>
             </div>
             <p v-if="knowledgeMessage" class="alert">{{ knowledgeMessage }}</p>
             <p v-if="knowledgeExtraction" class="muted">
@@ -7738,7 +8019,7 @@ onBeforeUnmount(() => {
                 <small v-if="fact.evidence">{{ fact.evidence }}</small>
                 <div class="tile-actions">
                   <span class="muted">{{ fact.source_kind }} · {{ fact.language || 'any language' }}</span>
-                  <button v-if="fact.asset_id" type="button" class="btn btn-sm btn-outline-secondary" @click="openKnowledgeAsset(fact.asset_id)">Open asset</button>
+                  <a v-if="fact.asset_id" class="btn btn-sm btn-outline-secondary" :href="assetHref(fact.asset_id)" @click="openAssetLink($event, fact.asset_id)">Open asset</a>
                 </div>
               </article>
             </div>
@@ -7751,14 +8032,16 @@ onBeforeUnmount(() => {
               <h2>Knowledge Graph</h2>
               <span>Relations between assets, devices, folders, tracks, transcripts, document text, tags, and extracted knowledge entities.</span>
             </div>
-            <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="loadKnowledgeBase">Refresh</button>
+            <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="resetKnowledgePagingAndLoad">Refresh</button>
           </header>
           <section class="settings-form">
             <h3><i class="bi bi-search" aria-hidden="true"></i> Relation Search</h3>
             <div class="inline-form-row">
-              <input v-model="knowledgeQ" type="search" placeholder="Filter relation endpoints, evidence, asset name..." @keyup.enter="loadKnowledgeBase" />
-              <input v-model="knowledgeRelationFilter" type="search" placeholder="relation, e.g. stored_in_folder, linked_to_track" @keyup.enter="loadKnowledgeBase" />
-              <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="loadKnowledgeBase">Search graph</button>
+              <input v-model="knowledgeQ" type="search" placeholder="Filter relation endpoints, evidence, asset name..." @keyup.enter="resetKnowledgePagingAndLoad" />
+              <input v-model="knowledgeRelationFilter" type="search" placeholder="relation, e.g. stored_in_folder, linked_to_track" @keyup.enter="resetKnowledgePagingAndLoad" />
+              <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="resetKnowledgePagingAndLoad">Search graph</button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="knowledgeLoading || knowledgeRelations.length >= knowledgeRelationsTotal" @click="loadMoreKnowledge">Load more</button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="knowledgeLoading || knowledgeRelations.length >= knowledgeRelationsTotal" @click="loadAllKnowledge">Load all</button>
             </div>
             <p class="muted">{{ knowledgeRelationsTotal }} relations match. Showing the first {{ knowledgeRelations.length }} for responsiveness.</p>
           </section>
@@ -7766,11 +8049,35 @@ onBeforeUnmount(() => {
             <article class="settings-form">
               <h3>Graph Preview</h3>
               <div class="knowledge-graph-preview">
-                <div v-for="relation in knowledgeRelations.slice(0, 24)" :key="`graph-${relation.id}`" class="knowledge-edge">
-                  <span>{{ relation.from_entity || relation.from_asset_id || 'entity' }}</span>
-                  <strong>{{ relation.relation }}</strong>
-                  <span>{{ relation.to_entity || relation.to_asset_id || 'entity' }}</span>
-                </div>
+                <svg
+                  v-if="knowledgeGraphPreview.nodes.length"
+                  class="knowledge-graph-svg"
+                  :viewBox="`0 0 ${knowledgeGraphPreview.width} ${knowledgeGraphPreview.height}`"
+                  role="img"
+                  aria-label="Knowledge graph preview"
+                >
+                  <line
+                    v-for="edge in knowledgeGraphPreview.edges"
+                    :key="`edge-${edge.id}`"
+                    :x1="edge.x1"
+                    :y1="edge.y1"
+                    :x2="edge.x2"
+                    :y2="edge.y2"
+                    class="knowledge-graph-edge-line"
+                  />
+                  <g v-for="node in knowledgeGraphPreview.nodes" :key="node.id" class="knowledge-graph-node">
+                    <a v-if="node.asset_id" :href="assetHref(node.asset_id)" @click="openAssetLink($event, node.asset_id)">
+                      <circle :cx="node.x" :cy="node.y" r="8" :class="node.kind === 'asset' ? 'asset-node' : 'entity-node'" />
+                      <text :x="node.x + 12" :y="node.y + 4">{{ node.label }}</text>
+                    </a>
+                    <template v-else>
+                      <circle :cx="node.x" :cy="node.y" r="6" :class="node.kind === 'asset' ? 'asset-node' : 'entity-node'" />
+                      <text :x="node.x + 10" :y="node.y + 4">{{ node.label }}</text>
+                    </template>
+                  </g>
+                </svg>
+                <div v-else class="empty-state">No graph relations match this filter yet.</div>
+                <p class="muted">Preview renders up to 90 current-page relations and 120 nodes. Use filters and pagination for large graphs.</p>
               </div>
             </article>
             <article class="settings-form">
@@ -7778,14 +8085,14 @@ onBeforeUnmount(() => {
               <div v-if="knowledgeRelations.length === 0" class="empty-state">No graph relations match this filter yet.</div>
               <div v-else class="relation-list">
                 <article v-for="relation in knowledgeRelations" :key="relation.id" class="relation-row">
-                  <button v-if="relation.from_asset_id" type="button" class="link-button" @click="openKnowledgeAsset(relation.from_asset_id)">
+                  <a v-if="relation.from_asset_id" class="link-button" :href="assetHref(relation.from_asset_id)" @click="openAssetLink($event, relation.from_asset_id)">
                     {{ relation.from_entity || relation.from_asset_id }}
-                  </button>
+                  </a>
                   <span v-else>{{ relation.from_entity || 'entity' }}</span>
                   <strong>{{ relation.relation }}</strong>
-                  <button v-if="relation.to_asset_id" type="button" class="link-button" @click="openKnowledgeAsset(relation.to_asset_id)">
+                  <a v-if="relation.to_asset_id" class="link-button" :href="assetHref(relation.to_asset_id)" @click="openAssetLink($event, relation.to_asset_id)">
                     {{ relation.to_entity || relation.to_asset_id }}
-                  </button>
+                  </a>
                   <span v-else>{{ relation.to_entity || 'entity' }}</span>
                   <small v-if="relation.evidence">{{ relation.evidence }}</small>
                 </article>
@@ -8214,7 +8521,7 @@ onBeforeUnmount(() => {
           <p v-if="settingsMessage" class="alert">{{ settingsMessage }}</p>
           <div class="settings-tabs">
             <button
-              v-for="tab in settings?.tabs ?? []"
+              v-for="tab in settingsTabs"
               :key="tab.id"
               type="button"
               :class="{ active: settingsTab === tab.id }"
@@ -8235,7 +8542,7 @@ onBeforeUnmount(() => {
             <article class="settings-form">
               <h3>Restart Required</h3>
               <p>{{ settings?.restart_required.note }}</p>
-              <code>{{ (settings?.yaml_bound_fields ?? []).join(", ") }}</code>
+              <code>{{ yamlBoundFields.join(", ") }}</code>
             </article>
           </div>
 
@@ -8473,8 +8780,8 @@ onBeforeUnmount(() => {
             </article>
             <article v-if="settingsTab === 'transcoding'" class="settings-form">
               <h3><i class="bi bi-film" aria-hidden="true"></i> Detected Encoders</h3>
-              <p>ffmpeg {{ transcodingCapabilities?.ffmpeg.available ? 'available' : 'missing' }}</p>
-              <p>{{ transcodingCapabilities?.encoders.length ?? 0 }} encoders detected.</p>
+              <p>ffmpeg {{ ffmpegAvailable ? 'available' : 'missing' }}</p>
+              <p>{{ supportedTranscodeEncoders.length }} encoders detected.</p>
               <p class="muted">HLS sessions are written only under Cartolensia cache directories and never beside originals.</p>
             </article>
           </div>

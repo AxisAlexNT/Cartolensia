@@ -28,6 +28,19 @@ func TestNaturalLanguageSearchPlanRussianFallback(t *testing.T) {
 	}
 }
 
+func TestNaturalLanguageSearchPlanRussianMonthRange(t *testing.T) {
+	plan := (&Server{}).buildNaturalLanguageSearchPlan("найди фотографии май-август 2025 года с поездом")
+	if !containsString(plan.Tokens, "kind:photo") {
+		t.Fatalf("expected photo token in %#v", plan.Tokens)
+	}
+	if !containsString(plan.Tokens, "2025-05..2025-08") {
+		t.Fatalf("expected date range token in %#v", plan.Tokens)
+	}
+	if containsString(plan.Tokens, "май-август") || containsString(plan.Tokens, "2025") {
+		t.Fatalf("month range should not be emitted as plain text terms: %#v", plan.Tokens)
+	}
+}
+
 func TestKnowledgeChatTermsIgnoreMediaKindTokens(t *testing.T) {
 	plan := (&Server{}).buildNaturalLanguageSearchPlan("покажи видео с поездом и станцией")
 	terms := knowledgeChatTerms("покажи видео с поездом и станцией", plan)

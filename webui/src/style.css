@@ -98,18 +98,21 @@ a {
   padding: 16px;
 }
 
-.sidebar button {
+.sidebar a {
   align-items: center;
   background: transparent;
-  border-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: #24292f;
   display: inline-flex;
   gap: 8px;
   justify-content: flex-start;
+  padding: 6px 10px;
+  text-decoration: none;
   text-align: left;
 }
 
-.sidebar button.active {
+.sidebar a.active {
   background: #ddf4ff;
   border-color: #54aeef;
   color: #0969da;
@@ -2814,6 +2817,18 @@ td {
   margin-bottom: 12px;
 }
 
+.segmented-control {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+
+.compact-segmented .btn {
+  min-width: 112px;
+}
+
 .knowledge-page .settings-form {
   margin-bottom: 12px;
 }
@@ -2828,6 +2843,36 @@ td {
   overflow: auto;
   padding: 12px;
   white-space: pre-wrap;
+}
+
+.knowledge-citation-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  margin: 10px 0;
+}
+
+.knowledge-citation {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  color: #c9d1d9;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  text-decoration: none;
+}
+
+.knowledge-citation:hover {
+  border-color: #58a6ff;
+  color: #f0f6fc;
+}
+
+.knowledge-citation small {
+  color: #8b949e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .knowledge-fact-grid {
@@ -2878,6 +2923,74 @@ td {
   gap: 8px;
 }
 
+.knowledge-graph-svg {
+  aspect-ratio: 16 / 9;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  display: block;
+  max-height: 520px;
+  min-height: 260px;
+  width: 100%;
+}
+
+.knowledge-graph-edge-line {
+  stroke: rgba(88, 166, 255, 0.35);
+  stroke-width: 1.1;
+}
+
+.knowledge-graph-node circle {
+  stroke: #f0f6fc;
+  stroke-width: 1.5;
+}
+
+.knowledge-graph-node .asset-node {
+  fill: #1f6feb;
+}
+
+.knowledge-graph-node .entity-node {
+  fill: #238636;
+}
+
+.knowledge-graph-node text {
+  fill: #c9d1d9;
+  font: 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #0d1117;
+  stroke-width: 3px;
+}
+
+.console-log-list {
+  display: grid;
+  gap: 8px;
+  max-height: 65vh;
+  overflow: auto;
+}
+
+.console-log-row {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.console-log-row.error {
+  border-color: rgba(248, 81, 73, 0.65);
+}
+
+.console-log-row.warn {
+  border-color: rgba(210, 153, 34, 0.65);
+}
+
+.console-log-row pre {
+  color: #c9d1d9;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 6px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
 .knowledge-edge,
 .relation-row {
   align-items: center;
@@ -2888,7 +3001,8 @@ td {
 
 .knowledge-edge span,
 .relation-row span,
-.relation-row button {
+.relation-row button,
+.relation-row a {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2955,7 +3069,7 @@ td {
     z-index: 50;
   }
 
-  .sidebar button {
+  .sidebar a {
     flex: 0 0 auto;
     min-width: max-content;
     padding: 0 10px;
