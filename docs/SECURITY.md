@@ -256,3 +256,6 @@ The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not u
 - The AI sidecar reads media through Cartolensia and writes only metadata to PostgreSQL. It must not write temp files, models, OCR cache, ASR cache, or components under originals/Samba storage.
 - pgvector stores embeddings in PostgreSQL metadata. It does not copy or modify original files.
 - Large archive backfill should be low-concurrency and missing-work based. Avoid broad AI jobs that would repeatedly reread the same originals or create unbounded write amplification.
+- Explorer pagination and folder aggregation are metadata-only PostgreSQL reads. They must not trigger discovery, hashing, missing-file marking, AI inference, or storage writes.
+- Optional NAS/original storage unavailability is a health state only. Cartolensia must not delete metadata, previews, embeddings, OCR, transcripts, captions, or DB rows because a read-only original mount is temporarily missing.
+- Full archive hashing is read-only but high-impact; treat it as an explicit operator maintenance action because it can read many terabytes from NAS storage and compete with interactive use.

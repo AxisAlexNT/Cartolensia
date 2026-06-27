@@ -365,3 +365,15 @@ Production AI execution is split from the main service:
 - long archive-wide AI work is driven by small missing-work batches rather than one monolithic job.
 
 For large NAS-backed deployments, discovery and metadata enrichment remain the first pipeline stages. AI/OCR/ASR/caption/embedding work is opt-in, resumable by metadata state, and should be tuned with conservative batch sizes.
+
+## 2026-06-27 Explorer Scale Path
+
+Explorer folder mode now has a PostgreSQL implementation for production stores. Instead of loading every asset and grouping paths in the application, the store computes:
+
+- immediate child folders with aggregate counts/bytes/latest mtime;
+- direct file count and bytes for the current path;
+- a paged direct-file result set using `limit`/`offset`.
+
+Supporting indexes are added in migration `017_explorer_scale_indexes.sql`, including path-pattern indexes for prefix scans and sort-specific indexes for common folder orders. The in-memory catalog grouping remains as a fallback for non-PostgreSQL stores and tests.
+
+The WebUI consumes this as a paged folder API. It renders the first page, shows the total, and asks for additional pages only when requested. This prevents a single folder with thousands of media files from freezing the browser or forcing a catalog-wide backend scan.

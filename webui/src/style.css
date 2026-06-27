@@ -315,25 +315,76 @@ td {
   padding: 16px;
 }
 
-.month-strip {
+.month-filter-bar {
   align-items: center;
   border-bottom: 1px solid #d8dee4;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
   padding: 10px 12px;
 }
 
-.month-strip button {
+.month-filter-bar label {
+  color: #57606a;
+  display: grid;
+  font-size: 13px;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.month-filter-bar select {
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  font: inherit;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.month-filter-details {
+  min-width: min(680px, 100%);
+}
+
+.month-filter-details summary {
+  color: #0969da;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.month-filter-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.month-filter-buttons button {
   background: #ffffff;
   border-color: #d8dee4;
   color: #24292f;
 }
 
-.month-strip button.active {
+.month-filter-buttons button.active {
   background: #ddf4ff;
   border-color: #54aeef;
   color: #0969da;
+}
+
+.paged-file-controls {
+  align-items: center;
+  border-top: 1px solid #d8dee4;
+  color: #57606a;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+  padding: 14px 16px 18px;
+}
+
+.paged-file-sentinel {
+  display: block;
+  height: 1px;
+  width: 1px;
 }
 
 .tile-grid {

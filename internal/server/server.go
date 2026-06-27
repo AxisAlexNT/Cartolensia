@@ -2586,16 +2586,11 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	assets, err := s.deps.Store.ListAssets(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	query := r.URL.Query()
 	if query.Get("view") == "folders" || query.Get("path") != "" || query.Get("storage") != "" || query.Get("storage_name") != "" {
 		limit, _ := strconv.Atoi(query.Get("limit"))
 		offset, _ := strconv.Atoi(query.Get("offset"))
-		view, err := catalog.BuildExplorerView(assets, catalog.ExplorerOptions{
+		opts := catalog.ExplorerOptions{
 			Storage:    firstNonEmpty(query.Get("storage"), query.Get("storage_name")),
 			Path:       query.Get("path"),
 			Q:          query.Get("q"),
@@ -2605,12 +2600,34 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 			Limit:      limit,
 			Offset:     offset,
 			Sort:       query.Get("sort"),
-		})
+		}
+		if store, ok := s.deps.Store.(interface {
+			ExplorerView(context.Context, catalog.ExplorerOptions) (catalog.ExplorerView, error)
+		}); ok {
+			view, err := store.ExplorerView(r.Context(), opts)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, view)
+			return
+		}
+		assets, err := s.deps.Store.ListAssets(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		view, err := catalog.BuildExplorerView(assets, opts)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, view)
+		return
+	}
+	assets, err := s.deps.Store.ListAssets(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	rows := make([]explorerRow, 0, len(assets))

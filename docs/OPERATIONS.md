@@ -830,3 +830,26 @@ For pgvector, the PostgreSQL runtime must have the `vector` extension installed 
 ```bash
 curl -k -b <authenticated-cookie> https://127.0.0.1:18443/api/v1/vector/status
 ```
+
+## Large Explorer And Background AI Operations
+
+For million-file or large NAS-backed archives, Explorer folder browsing should use `/api/v1/explorer?view=folders&path=...&limit=200&offset=...`. The production PostgreSQL store computes immediate folders and direct file pages in SQL. The WebUI loads the first page and exposes Load More rather than trying to materialize an entire folder in the browser.
+
+Operational checks:
+
+```bash
+curl -k -b <authenticated-cookie> "https://127.0.0.1:18443/api/v1/explorer?view=folders&path=2026/May2026&limit=200&offset=0"
+curl -k -b <authenticated-cookie> "https://127.0.0.1:18443/api/v1/jobs?limit=20"
+```
+
+The AI backfill driver is safe to leave running while discovery proceeds. It submits small authenticated batches and records successful no-result checks under `/var/lib/cartolensia/run/ai-backfill-state`. If the web service restarts, restart the driver with a valid `CARTOLENSIA_DATABASE_URL` derived from production config:
+
+```bash
+ds=$(awk '$1=="url:" {print $2; exit}' /opt/cartolensia/current/config/production-bundle.yaml | tr -d '"')
+nohup env CARTOLENSIA_DATABASE_URL="$ds" \
+  CARTOLENSIA_BACKFILL_BASE_URL=https://127.0.0.1:18443 \
+  python3 /var/lib/cartolensia/run/run-ai-backfill.py \
+  >>/var/lib/cartolensia/logs/ai-backfill-$(date -u +%Y%m%dT%H%M%SZ).log 2>&1 &
+```
+
+Do not launch full-archive hashing casually on remote NAS storage. Hashing is read-only, but it can still read many terabytes and compete with previewing, discovery, and AI. Prefer discovery and metadata enrichment first, then scoped hashing for duplicates/integrity work.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,201 @@ import (
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 	"github.com/AxisAlexNT/Cartolensia/internal/id"
 )
+
+func (db *DB) ExplorerView(ctx context.Context, opts catalog.ExplorerOptions) (catalog.ExplorerView, error) {
+	current, err := normalizeExplorerDBPath(opts.Path)
+	if err != nil {
+		return catalog.ExplorerView{}, err
+	}
+	limit, offset := normalizeDBPage(opts.Limit, opts.Offset)
+	prefix := ""
+	substrStart := 1
+	if current != "" {
+		prefix = current + "/"
+		substrStart = len(prefix) + 1
+	}
+	where, args := explorerLocationWhere(opts, current, prefix)
+	remainingExpr := fmt.Sprintf("case when $%d = '' then l.relative_path else substr(l.relative_path, $%d) end", len(args)+1, len(args)+2)
+	argsWithPath := append(append([]any(nil), args...), current, substrStart)
+	filteredSQL := ` from asset_locations l
+		join assets a on a.id=l.asset_id
+		join storage_backends s on s.id=l.storage_id
+		left join contents c on c.id=l.content_id`
+	if where != "" {
+		filteredSQL += " where " + where
+	}
+	folderNameExpr := `split_part(` + remainingExpr + `, '/', 1)`
+	folderSQL := `select ` + folderNameExpr + ` as folder_name,
+			count(*)::bigint,
+			coalesce(sum(l.size_bytes), 0)::bigint,
+			max(l.mtime)
+		` + filteredSQL + `
+		group by ` + folderNameExpr + `
+		having ` + folderNameExpr + ` <> '' and count(*) filter (where position('/' in ` + remainingExpr + `) > 0) > 0
+		order by ` + folderNameExpr
+	rows, err := db.pool.Query(ctx, folderSQL, argsWithPath...)
+	if err != nil {
+		return catalog.ExplorerView{}, err
+	}
+	view := catalog.ExplorerView{
+		CurrentPath: current,
+		ParentPath:  parentExplorerDBPath(current),
+		Folders:     []catalog.ExplorerFolder{},
+		Files:       []catalog.ExplorerFile{},
+		Limit:       limit,
+		Offset:      offset,
+	}
+	for rows.Next() {
+		var name string
+		var count int64
+		var bytes int64
+		var latest time.Time
+		if err := rows.Scan(&name, &count, &bytes, &latest); err != nil {
+			rows.Close()
+			return catalog.ExplorerView{}, err
+		}
+		view.Folders = append(view.Folders, catalog.ExplorerFolder{
+			Name:        name,
+			Path:        joinExplorerDBPath(current, name),
+			FileCount:   int(count),
+			TotalBytes:  bytes,
+			LatestMTime: latest,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return catalog.ExplorerView{}, err
+	}
+	rows.Close()
+	view.FolderCount = len(view.Folders)
+
+	totalSQL := `select count(*)::bigint, coalesce(sum(l.size_bytes), 0)::bigint
+		` + filteredSQL + `
+		and ` + remainingExpr + ` <> ''
+		and position('/' in ` + remainingExpr + `) = 0`
+	if where == "" {
+		totalSQL = `select count(*)::bigint, coalesce(sum(l.size_bytes), 0)::bigint
+			` + filteredSQL + `
+			where ` + remainingExpr + ` <> ''
+			and position('/' in ` + remainingExpr + `) = 0`
+	}
+	var fileCount int64
+	var directBytes int64
+	if err := db.pool.QueryRow(ctx, totalSQL, argsWithPath...).Scan(&fileCount, &directBytes); err != nil {
+		return catalog.ExplorerView{}, err
+	}
+	view.FileCount = int(fileCount)
+	view.TotalBytes = directBytes
+	for _, folder := range view.Folders {
+		view.TotalBytes += folder.TotalBytes
+	}
+
+	fileArgs := append(append([]any(nil), argsWithPath...), limit, offset)
+	fileSQL := `select a.id::text, l.file_name, l.media_kind, l.url, l.relative_path,
+			l.size_bytes, l.mtime, l.hash_status, coalesce(encode(c.sha512, 'hex'), '')
+		` + filteredSQL + `
+		and ` + remainingExpr + ` <> ''
+		and position('/' in ` + remainingExpr + `) = 0
+		order by ` + explorerLocationOrderBy(opts.Sort) + fmt.Sprintf(" limit $%d offset $%d", len(fileArgs)-1, len(fileArgs))
+	if where == "" {
+		fileSQL = `select a.id::text, l.file_name, l.media_kind, l.url, l.relative_path,
+				l.size_bytes, l.mtime, l.hash_status, coalesce(encode(c.sha512, 'hex'), '')
+			` + filteredSQL + `
+			where ` + remainingExpr + ` <> ''
+			and position('/' in ` + remainingExpr + `) = 0
+			order by ` + explorerLocationOrderBy(opts.Sort) + fmt.Sprintf(" limit $%d offset $%d", len(fileArgs)-1, len(fileArgs))
+	}
+	rows, err = db.pool.Query(ctx, fileSQL, fileArgs...)
+	if err != nil {
+		return catalog.ExplorerView{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var file catalog.ExplorerFile
+		if err := rows.Scan(&file.AssetID, &file.Name, &file.MediaKind, &file.StorageURL, &file.RelativePath, &file.SizeBytes, &file.MTime, &file.HashStatus, &file.SHA512Hex); err != nil {
+			return catalog.ExplorerView{}, err
+		}
+		view.Files = append(view.Files, file)
+	}
+	return view, rows.Err()
+}
+
+func explorerLocationWhere(opts catalog.ExplorerOptions, current, prefix string) (string, []any) {
+	var parts []string
+	var args []any
+	if opts.Storage != "" {
+		args = append(args, opts.Storage)
+		parts = append(parts, fmt.Sprintf("s.name=$%d", len(args)))
+	}
+	if opts.MediaKind != "" {
+		args = append(args, opts.MediaKind)
+		parts = append(parts, fmt.Sprintf("l.media_kind=$%d", len(args)))
+	}
+	if opts.HashStatus != "" {
+		args = append(args, opts.HashStatus)
+		parts = append(parts, fmt.Sprintf("l.hash_status=$%d", len(args)))
+	}
+	if opts.Extension != "" {
+		args = append(args, strings.TrimPrefix(strings.ToLower(opts.Extension), "."))
+		parts = append(parts, fmt.Sprintf("lower(trim(leading '.' from l.extension))=$%d", len(args)))
+	}
+	if q := strings.TrimSpace(opts.Q); q != "" {
+		args = append(args, "%"+strings.ToLower(q)+"%")
+		parts = append(parts, fmt.Sprintf("lower(a.display_name || ' ' || l.file_name || ' ' || l.relative_path) like $%d", len(args)))
+	}
+	if current != "" {
+		args = append(args, prefix+"%")
+		parts = append(parts, fmt.Sprintf("l.relative_path like $%d", len(args)))
+	}
+	return strings.Join(parts, " and "), args
+}
+
+func explorerLocationOrderBy(sortKey string) string {
+	switch strings.TrimSpace(strings.ToLower(sortKey)) {
+	case "mtime", "modified", "taken_at":
+		return "l.mtime desc, lower(l.file_name), l.id"
+	case "size":
+		return "l.size_bytes desc, lower(l.file_name), l.id"
+	case "media_kind", "kind":
+		return "l.media_kind, lower(l.file_name), l.id"
+	default:
+		return "lower(l.file_name), l.file_name, l.id"
+	}
+}
+
+func normalizeExplorerDBPath(value string) (string, error) {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	value = strings.Trim(value, "/")
+	if value == "" || value == "." {
+		return "", nil
+	}
+	clean := path.Clean(value)
+	if clean == "." {
+		return "", nil
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", fmt.Errorf("invalid explorer path %q", value)
+	}
+	return clean, nil
+}
+
+func parentExplorerDBPath(value string) string {
+	if value == "" {
+		return ""
+	}
+	parent := path.Dir(value)
+	if parent == "." {
+		return ""
+	}
+	return parent
+}
+
+func joinExplorerDBPath(base, name string) string {
+	if base == "" {
+		return name
+	}
+	return base + "/" + name
+}
 
 func (db *DB) QueryAssets(ctx context.Context, query catalog.AssetQuery) (catalog.AssetPage, error) {
 	limit, offset := normalizeDBPage(query.Limit, query.Offset)

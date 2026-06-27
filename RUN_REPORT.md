@@ -3311,6 +3311,128 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-27 OCR/Captions Asset Navigation Fix
+
+Fixed and deployed to rjazhenka:
+
+- The global `openAsset` path now opens Asset Detail immediately after loading the asset record instead of waiting for related/context and video stream option calls.
+- Related/context and stream options now hydrate asynchronously after the page is visible, preventing large-database context queries from leaving the UI stuck on `Loading`.
+- OCR and Captions page rows now use real asset-detail anchors with the shared `openAssetLink`/OCR-highlight handlers.
+- OCR/Captions rows guard against missing asset IDs and show a warning badge instead of trying to navigate to an invalid asset URL.
+- Middle-click/Ctrl-click/Meta-click behavior is preserved for Captions and OCR asset links.
+
+Tests run:
+
+- `npm --prefix webui run build`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `git diff --check`
+- WebUI assets synced to rjazhenka; no service restart was required.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-27 Explorer Load All Control
+
+Fixed and deployed to rjazhenka:
+
+- Explorer pagination now has two explicit controls:
+  - `Load more` fetches the next page;
+  - `Load all` fetches every remaining page for the current folder/filter.
+- Bottom-scroll auto-loading remains active and fetches only the next page at a time.
+- `Load all` uses larger paged requests internally and deduplicates by asset/location key while appending.
+
+Tests run:
+
+- `npm --prefix webui run build`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `git diff --check`
+- WebUI assets synced to rjazhenka; no service restart was required.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-27 Explorer Scale, AI Backfill, And Remote Deployment Update
+
+Implemented locally and deployed to rjazhenka:
+
+- Replaced the folder-mode Explorer fallback that could load the full asset catalog with a PostgreSQL-backed folder aggregation and direct-file page query.
+- Added production path indexes for Explorer-scale browsing:
+  - `relative_path text_pattern_ops`;
+  - `(storage_id, relative_path text_pattern_ops)`;
+  - folder sort helpers for name, mtime, and size.
+- Updated the WebUI Explorer to request a first page of 200 files and expose a Load More control. Large folders no longer silently stop at the first slice.
+- Added near-bottom automatic loading with an IntersectionObserver sentinel, with Load More retained as a manual fallback.
+- Replaced the hundreds-of-buttons month strip with a compact month selector plus a short quick-month disclosure.
+- Split the new Explorer controls into `MonthFilterBar.vue` and `PagedFileControls.vue`.
+- Added Vite manual chunks for Vue, OpenLayers, and HLS; HLS is loaded dynamically only when HLS playback needs it.
+
+Remote rjazhenka validation after deploy:
+
+- Production URL remains `https://192.168.237.126:18443/`.
+- Authenticated stats at latest poll:
+  - `249,219` assets;
+  - `218,903` photos;
+  - `20,592` videos;
+  - `2,359` audio files;
+  - `5,560` documents;
+  - `1,806` GPS/KML tracks;
+  - about `12.26 TB` indexed metadata footprint.
+- pgvector is active:
+  - backend `pgvector_ivfflat`;
+  - 512 dimensions;
+  - `257` embedded assets at the validation poll and increasing through backfill.
+- AI sidecar is active and CUDA-backed. The restarted AI backfill is running as PID `1746707`, latest log `/var/lib/cartolensia/logs/ai-backfill-20260627T131128Z.log`.
+- Latest AI backfill entries show successful classification, NSFW safety, captions, embeddings, OCR, audio feature extraction, and audio/video transcript jobs.
+- Explorer performance checks:
+  - root folder page: about `168 ms`;
+  - `2026`: about `26 ms`;
+  - `2026/May2026`: about `23 ms` for `200 / 1,894` files;
+  - offsets `200`, `400`, and `1800` returned in about `17-18 ms`, with the final page correctly returning `94` files.
+- Read-only discovery jobs were queued for currently available storages:
+  - `old_nokia5228`: `61069b05-b450-4c27-b8b3-cb59f47a3c6d`;
+  - `old_x12_los20`: `a1004700-8e5f-47c7-970e-6426ec3ad1f7`;
+  - `originals`: `6a17fd7b-ef0c-4f6b-86f0-2ab5b46a0966`.
+- Metadata enrichment was queued as job `3804c8e9-e48d-4b9d-b514-f872e3930c28`.
+- Optional storage health remains metadata-preserving:
+  - `originals`, `old_x12_los20`, and `old_nokia5228` available;
+  - `old_p770` and `old_ze554kl` reported missing/unavailable;
+  - no metadata was deleted for unavailable originals.
+
+Tests run:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- authenticated remote production checks for health, stats, vector status, AI status, Explorer paging, storage health, queued jobs, and AI backfill logs.
+
+Known limitations:
+
+- The queued discovery jobs will start as production workers free capacity; AI backfill is actively submitting small synchronous API jobs, so discovery may wait briefly behind current work.
+- Full archive hashing was intentionally not launched in this pass because hashing would read many terabytes over SMB/NAS and compete with interactive preview/search/AI workloads.
+- HLS remains a separate large lazy chunk because the dependency itself is large; it no longer inflates the initial Explorer bundle.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-27 Remote HTTPS, pgvector, AI Sidecar, And Backfill Stabilization
 
 Implemented locally:

@@ -17,7 +17,6 @@ import Point from "ol/geom/Point";
 import LineString from "ol/geom/LineString";
 import MultiLineString from "ol/geom/MultiLineString";
 import { Circle as CircleStyle, Fill, Icon, RegularShape, Stroke, Style, Text } from "ol/style";
-import Hls from "hls.js";
 import "ol/ol.css";
 import {
   api,
@@ -68,6 +67,8 @@ import {
   type VideoTrackPlayerSession,
   type DBExport
 } from "./api";
+import MonthFilterBar from "./components/MonthFilterBar.vue";
+import PagedFileControls from "./components/PagedFileControls.vue";
 
 const nav = [
   "Explorer",
@@ -183,6 +184,10 @@ const loading = ref(false);
 const error = ref("");
 const rows = ref<ExplorerRow[]>([]);
 const explorer = ref<ExplorerView | null>(null);
+const explorerPageLimit = 200;
+const explorerBulkPageLimit = 500;
+const explorerLoadingMore = ref(false);
+const explorerLoadingAll = ref(false);
 const explorerPath = ref("");
 const explorerQ = ref("");
 const explorerMediaKind = ref("");
@@ -342,7 +347,11 @@ let geoAlignSuppressNextClick = false;
 const geoAlignTrackSource = new VectorSource();
 const geoAlignMarkerSource = new VectorSource();
 let mapOverlay: Overlay | null = null;
-let activeHls: Hls | null = null;
+type HlsInstance = import("hls.js").default;
+type HlsConstructor = typeof import("hls.js").default;
+
+let activeHls: HlsInstance | null = null;
+let hlsConstructorPromise: Promise<HlsConstructor> | null = null;
 let mapHasInitialFit = false;
 const mapAssetSource = new VectorSource();
 const mapTrackSource = new VectorSource();
@@ -620,10 +629,14 @@ window.addEventListener("popstate", () => {
 const visibleExplorerRows = computed(() => {
 	const files = asArray(explorer.value?.files);
 	const searchRows = searchResults.value.map((result) => assetToExplorerRow(result.asset)).filter((row): row is ExplorerRow => row !== null);
-	const base = explorerQ.value.trim() ? searchRows : (files.length > 0 || explorerPath.value ? files : rows.value);
+	const base = explorerQ.value.trim() ? searchRows : files;
 	if (!monthFilter.value) return base;
 	return base.filter((row) => monthKey(row.mtime) === monthFilter.value);
 });
+
+const explorerTotalFiles = computed(() => explorer.value?.file_count ?? visibleExplorerRows.value.length);
+const explorerLoadedFiles = computed(() => asArray(explorer.value?.files).length);
+const explorerHasMoreFiles = computed(() => !explorerQ.value.trim() && explorerLoadedFiles.value < explorerTotalFiles.value);
 
 const searchExplanationByAsset = computed(() => {
 	const explanations = new Map<string, string>();
@@ -712,6 +725,11 @@ const captionPredictionRows = computed(() => {
       .some((value) => value.includes(query));
   });
 });
+
+function recordAssetID(row: unknown): string {
+  return String((row as Record<string, unknown> | null | undefined)?.asset_id ?? "").trim();
+}
+
 const aiFaces = computed(() => asArray((aiFacePayload.value?.faces as unknown[]) ?? []));
 const aiSafetyCandidates = computed(() => asArray((aiSafetyPayload.value?.candidates as unknown[]) ?? []));
 const faceClusters = computed(() => asArray(faceClustersPayload.value?.clusters));
@@ -778,13 +796,16 @@ function monthKey(value?: string): string {
   return value && value.length >= 7 ? value.slice(0, 7) : "";
 }
 
-function explorerQueryString(): string {
+function explorerQueryString(extra: Record<string, string | number> = {}): string {
 	const params = new URLSearchParams();
   if (explorerQ.value.trim()) params.set("q", explorerQ.value.trim());
   if (explorerMediaKind.value) params.set("media_kind", explorerMediaKind.value);
   if (explorerHashStatus.value) params.set("hash_status", explorerHashStatus.value);
   if (explorerExtension.value.trim()) params.set("extension", explorerExtension.value.trim());
   if (explorerSort.value) params.set("sort", explorerSort.value);
+  for (const [key, value] of Object.entries(extra)) {
+    params.set(key, String(value));
+  }
 	return params.toString();
 }
 
@@ -2211,6 +2232,11 @@ function canPlayNativeHLS(): boolean {
   return video.canPlayType("application/vnd.apple.mpegurl") !== "" || video.canPlayType("application/x-mpegURL") !== "";
 }
 
+async function loadHLSConstructor(): Promise<HlsConstructor> {
+  hlsConstructorPromise ??= import("hls.js").then((module) => module.default);
+  return hlsConstructorPromise;
+}
+
 async function attachHLSPlayback() {
   const session = transcodeSession.value;
   if (!session?.playlist_url) return;
@@ -2230,11 +2256,12 @@ async function attachHLSPlayback() {
     await video.play().catch(() => undefined);
     return;
   }
-  if (!Hls.isSupported()) {
+  const HlsConstructor = await loadHLSConstructor();
+  if (!HlsConstructor.isSupported()) {
     throw new Error("This browser cannot play HLS natively and hls.js is unavailable.");
   }
   if (activeHls) activeHls.destroy();
-  activeHls = new Hls({
+  activeHls = new HlsConstructor({
     lowLatencyMode: false,
     backBufferLength: 90,
     xhrSetup: (xhr) => {
@@ -2248,7 +2275,7 @@ async function attachHLSPlayback() {
   });
   activeHls.loadSource(session.playlist_url);
   activeHls.attachMedia(video);
-  activeHls.on(Hls.Events.ERROR, (_event, data) => {
+  activeHls.on(HlsConstructor.Events.ERROR, (_event, data) => {
     if (data.fatal) {
       transcodeMessage.value = `HLS playback error: ${data.details || data.type}. Reverting to Original/direct.`;
       void stopActiveTranscode();
@@ -2363,7 +2390,6 @@ async function refresh() {
     }
     publicAssets.value = [];
     const [
-      explorerRows,
       jobRows,
       jobStatData,
       storageRows,
@@ -2398,7 +2424,6 @@ async function refresh() {
 	      readinessPayload,
 	      exportRows
     ] = await Promise.all([
-      api.explorer(explorerQueryString()),
       api.jobs(),
       api.jobStats(),
       api.storages(),
@@ -2433,8 +2458,8 @@ async function refresh() {
 	      api.readiness(),
       api.dbExports()
 		]);
-		rows.value = asArray(explorerRows);
-		explorer.value = await api.explorerFolders(explorerPath.value, explorerQueryString());
+		explorer.value = await api.explorerFolders(explorerPath.value, explorerQueryString({ limit: explorerPageLimit, offset: 0 }));
+		rows.value = asArray(explorer.value.files);
 		if (explorerQ.value.trim()) {
 			const search = await api.search(explorerQ.value.trim(), 100);
 			searchResults.value = asArray(search.results);
@@ -3938,20 +3963,80 @@ async function createDBExport() {
 
 async function openFolder(path: string) {
   explorerPath.value = path;
+  monthFilter.value = "";
   setActive("Explorer");
   await refresh();
 }
 
+async function loadMoreExplorerFiles() {
+  if (!explorer.value || explorerLoadingMore.value || explorerLoadingAll.value || !explorerHasMoreFiles.value) return;
+  explorerLoadingMore.value = true;
+  error.value = "";
+  try {
+    await appendExplorerFiles(explorerPageLimit);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    explorerLoadingMore.value = false;
+  }
+}
+
+async function loadAllExplorerFiles() {
+  if (!explorer.value || explorerLoadingAll.value || !explorerHasMoreFiles.value) return;
+  explorerLoadingAll.value = true;
+  error.value = "";
+  try {
+    while (explorerHasMoreFiles.value && !explorerQ.value.trim()) {
+      const before = explorerLoadedFiles.value;
+      await appendExplorerFiles(explorerBulkPageLimit);
+      if (explorerLoadedFiles.value <= before) break;
+      await nextTick();
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    explorerLoadingAll.value = false;
+  }
+}
+
+async function appendExplorerFiles(limit: number) {
+  const current = explorer.value;
+  if (!current) return;
+  const requestPath = explorerPath.value;
+  const requestQuery = explorerQueryString({ limit, offset: asArray(current.files).length });
+  const nextPage = await api.explorerFolders(requestPath, requestQuery);
+  if (explorerPath.value !== requestPath) return;
+  const existing = asArray(explorer.value?.files);
+  const seen = new Set(existing.map((file) => `${file.asset_id}\x00${file.relative_path}`));
+  const appended = asArray(nextPage.files).filter((file) => {
+    const key = `${file.asset_id}\x00${file.relative_path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  explorer.value = {
+    ...nextPage,
+    folders: asArray(explorer.value?.folders),
+    files: [...existing, ...appended]
+  };
+  rows.value = asArray(explorer.value.files);
+}
+
 async function openAsset(id: string, options: { seekMs?: number | null } = {}) {
+  id = id.trim();
+  if (!id) {
+    error.value = "Cannot open asset: missing asset id.";
+    return;
+  }
   loading.value = true;
   error.value = "";
   try {
     assetDetailSeekMs.value = options.seekMs ?? null;
-    assetDetail.value = await api.asset(id);
-    assetRelated.value = await api.assetRelated(id).catch(() => null);
+    const detail = await api.asset(id);
+    assetDetail.value = detail;
+    assetRelated.value = null;
     assetAIActionStatus.value = {};
-    streamOptions.value =
-      assetDetail.value.asset.media_kind === "video" ? await api.streamOptions(id).catch(() => null) : null;
+    streamOptions.value = null;
     setActive("Asset Detail", false);
     const url = new URL(window.location.href);
     url.searchParams.set("page", "asset-detail");
@@ -3959,11 +4044,22 @@ async function openAsset(id: string, options: { seekMs?: number | null } = {}) {
     window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
     await nextTick();
     await applyAssetDetailSeek();
+    void hydrateAssetDetailExtras(id, detail.asset.media_kind);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     loading.value = false;
   }
+}
+
+async function hydrateAssetDetailExtras(id: string, mediaKind: string) {
+  const [related, streams] = await Promise.all([
+    api.assetRelated(id).catch(() => null),
+    mediaKind === "video" ? api.streamOptions(id).catch(() => null) : Promise.resolve(null)
+  ]);
+  if (assetDetail.value?.asset.id !== id) return;
+  assetRelated.value = related;
+  streamOptions.value = streams;
 }
 
 async function openPublicAsset(id: string, options: { seekMs?: number | null } = {}) {
@@ -4007,6 +4103,14 @@ async function openAssetOCR(assetID: string, blockID: string) {
     selectedAssetOCRId.value = blockID;
     showAssetOCRBoxes.value = true;
   }
+}
+
+function openAssetOCRLink(event: MouseEvent, assetID: string, blockID: string) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  void openAssetOCR(assetID, blockID);
 }
 
 async function openGalleryAssetDetail(id: string) {
@@ -4797,7 +4901,7 @@ onBeforeUnmount(() => {
           <header class="panel-head">
             <h2>Explorer</h2>
             <div class="actions">
-              <span>{{ explorer?.folder_count ?? 0 }} folders · {{ visibleExplorerRows.length }} files</span>
+              <span>{{ explorer?.folder_count ?? 0 }} folders · {{ visibleExplorerRows.length }} / {{ explorerTotalFiles }} files</span>
               <button type="button" @click="explorerViewMode = explorerViewMode === 'table' ? 'tile' : 'table'">
                 {{ explorerViewMode === "table" ? "Tile view" : "Table view" }}
               </button>
@@ -4862,19 +4966,8 @@ onBeforeUnmount(() => {
 	            <span>{{ visibleExplorerRows.length }} results for "{{ explorerQ.trim() }}"</span>
 	            <span v-for="warning in searchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
 	          </div>
-          <div class="month-strip" v-if="monthBuckets.length > 0">
-            <button type="button" :class="{ active: monthFilter === '' }" @click="monthFilter = ''">All months</button>
-            <button
-              v-for="bucket in monthBuckets"
-              :key="bucket.month"
-              type="button"
-              :class="{ active: monthFilter === bucket.month }"
-              @click="monthFilter = bucket.month"
-            >
-              {{ bucket.month }} · {{ bucket.count }}
-            </button>
-          </div>
-          <p v-if="rows.length === 0 && asArray(explorer?.folders).length === 0" class="empty-state">No assets indexed yet.</p>
+          <MonthFilterBar v-if="monthBuckets.length > 0" v-model="monthFilter" :buckets="monthBuckets" />
+          <p v-if="visibleExplorerRows.length === 0 && asArray(explorer?.folders).length === 0" class="empty-state">No assets indexed yet.</p>
           <table v-if="explorerViewMode === 'table'">
             <thead>
               <tr>
@@ -4971,6 +5064,15 @@ onBeforeUnmount(() => {
               <small>{{ row.mtime }}</small>
             </article>
           </div>
+          <PagedFileControls
+            v-if="!explorerQ.trim()"
+            :shown="explorerLoadedFiles"
+            :total="explorerTotalFiles"
+            :loading="explorerLoadingMore"
+            :loading-all="explorerLoadingAll"
+            @load-more="loadMoreExplorerFiles"
+            @load-all="loadAllExplorerFiles"
+          />
         </section>
 
         <section v-else-if="active === 'Discovery'" class="panel">
@@ -6736,9 +6838,15 @@ onBeforeUnmount(() => {
                   <td>{{ (row as Record<string, unknown>).model_name }}</td>
                   <td>{{ (row as Record<string, unknown>).created_at }}</td>
                   <td>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="openAssetOCR(String((row as Record<string, unknown>).asset_id), String((row as Record<string, unknown>).id))">
+                    <a
+                      v-if="recordAssetID(row)"
+                      class="btn btn-sm btn-outline-secondary"
+                      :href="assetHref(recordAssetID(row))"
+                      @click="openAssetOCRLink($event, recordAssetID(row), String((row as Record<string, unknown>).id ?? ''))"
+                    >
                       Open + highlight
-                    </button>
+                    </a>
+                    <span v-else class="status-badge warn">missing asset id</span>
                   </td>
                 </tr>
               </tbody>
@@ -6773,7 +6881,17 @@ onBeforeUnmount(() => {
                   <td>{{ (row as Record<string, unknown>).task }}</td>
                   <td>{{ (row as Record<string, unknown>).model_name }}</td>
                   <td>{{ (row as Record<string, unknown>).created_at }}</td>
-                  <td><button type="button" class="btn btn-sm btn-outline-secondary" @click="openAsset(String((row as Record<string, unknown>).asset_id))">Open asset</button></td>
+                  <td>
+                    <a
+                      v-if="recordAssetID(row)"
+                      class="btn btn-sm btn-outline-secondary"
+                      :href="assetHref(recordAssetID(row))"
+                      @click="openAssetLink($event, recordAssetID(row))"
+                    >
+                      Open asset
+                    </a>
+                    <span v-else class="status-badge warn">missing asset id</span>
+                  </td>
                 </tr>
               </tbody>
             </table>

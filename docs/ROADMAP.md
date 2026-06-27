@@ -285,6 +285,8 @@ Recent progress:
 - Low-concurrency missing-work AI backfill exists for large archives and avoids repeated no-result OCR/ASR work through local state files.
 - Discovery can intentionally scan a storage root or all configured storages, while missing marking remains blocked for read-only/original storage.
 - The WebUI shell has a mobile-friendly navigation and overlay pass.
+- Explorer folder views now use PostgreSQL aggregation and paged direct-file queries, with WebUI Load More pagination and compact month filtering.
+- Vite chunks are split for Vue/OpenLayers/HLS; HLS is lazy-loaded only when video transcoding playback requires it.
 
 Next high-value work:
 
