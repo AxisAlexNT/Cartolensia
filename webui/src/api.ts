@@ -3,8 +3,20 @@ export type StorageConfig = {
   kind: string;
   root: string;
   mode: string;
+  source_url?: string;
+  smb?: {
+    host?: string;
+    share?: string;
+    path?: string;
+    domain?: string;
+    username?: string;
+    credentials_file?: string;
+    password_env?: string;
+  };
   health?: string;
+  health_code?: string;
   health_message?: string;
+  details?: Record<string, unknown>;
   last_checked_at?: string;
 };
 

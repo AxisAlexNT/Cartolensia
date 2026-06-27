@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -589,7 +590,7 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.ValidateOnly {
-			writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": cfg, "warnings": warnings})
+			writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": cfg, "warnings": warnings, "diagnostic": diagnoseStorageRoot(cfg, 750*time.Millisecond)})
 			return
 		}
 		added, err := s.deps.Registry.AddStorage(cfg)
@@ -605,9 +606,11 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request) {
 
 type storageStatus struct {
 	storage.Config
-	Health        string `json:"health"`
-	HealthMessage string `json:"health_message,omitempty"`
-	LastCheckedAt string `json:"last_checked_at"`
+	Health        string         `json:"health"`
+	HealthCode    string         `json:"health_code,omitempty"`
+	HealthMessage string         `json:"health_message,omitempty"`
+	LastCheckedAt string         `json:"last_checked_at"`
+	Details       map[string]any `json:"details,omitempty"`
 }
 
 func (s *Server) storageStatuses() []storageStatus {
@@ -615,27 +618,245 @@ func (s *Server) storageStatuses() []storageStatus {
 	out := make([]storageStatus, 0, len(configs))
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, cfg := range configs {
-		status := storageStatus{Config: cfg, Health: "available", LastCheckedAt: now}
-		stat, err := os.Stat(cfg.Root)
-		switch {
-		case err == nil && stat.IsDir():
-			status.Health = "available"
-		case err == nil:
-			status.Health = "unavailable"
-			status.HealthMessage = "storage root is not a directory"
-		case errors.Is(err, os.ErrNotExist):
-			status.Health = "missing"
-			status.HealthMessage = "storage root path does not exist or NAS path is currently unavailable"
-		case errors.Is(err, os.ErrPermission):
-			status.Health = "unavailable"
-			status.HealthMessage = "storage root exists but is not readable by Cartolensia"
-		default:
-			status.Health = "unavailable"
-			status.HealthMessage = err.Error()
+		diag := diagnoseStorageRoot(cfg, 750*time.Millisecond)
+		status := storageStatus{
+			Config:        cfg,
+			Health:        diag.Health,
+			HealthCode:    diag.Code,
+			HealthMessage: diag.Message,
+			LastCheckedAt: now,
+			Details:       diag.Details,
 		}
 		out = append(out, status)
 	}
 	return out
+}
+
+type storageDiagnostic struct {
+	Health  string
+	Code    string
+	Message string
+	Details map[string]any
+}
+
+func diagnoseStorageRoot(cfg storage.Config, timeout time.Duration) storageDiagnostic {
+	smb := effectiveSMBConfig(cfg)
+	details := map[string]any{
+		"name":       cfg.Name,
+		"root":       cfg.Root,
+		"kind":       cfg.Kind,
+		"mode":       cfg.Mode,
+		"source_url": cfg.SourceURL,
+	}
+	if smb != nil {
+		details["smb_host"] = smb.Host
+		details["smb_share"] = smb.Share
+		details["smb_path"] = smb.Path
+		details["smb_credentials_configured"] = smb.CredentialsFile != "" || smb.PasswordEnv != ""
+		if smb.CredentialsFile != "" {
+			details["smb_credentials_file"] = smb.CredentialsFile
+		}
+	}
+
+	rootErr := probeReadableDirBounded(cfg.Root, timeout)
+	if rootErr == nil {
+		return storageDiagnostic{Health: "available", Code: "available", Message: "storage root is readable", Details: details}
+	}
+	details["root_error"] = rootErr.Error()
+
+	if smb == nil || smb.Host == "" {
+		return classifyFilesystemStorageError(rootErr, details)
+	}
+
+	hostCode, hostMsg := probeSMBHost(smb.Host, timeout)
+	details["smb_host_status"] = hostCode
+	if hostCode != "host_reachable" {
+		return storageDiagnostic{Health: "unavailable", Code: hostCode, Message: hostMsg, Details: details}
+	}
+
+	if shareDiag, ok := probeSMBShareWithClient(*smb, 2*time.Second); ok {
+		for key, value := range shareDiag.Details {
+			details[key] = value
+		}
+		if shareDiag.Code != "share_available" {
+			shareDiag.Details = details
+			return shareDiag
+		}
+	}
+
+	code, message := classifyMountBackedStorageError(rootErr)
+	return storageDiagnostic{Health: "unavailable", Code: code, Message: message, Details: details}
+}
+
+func classifyFilesystemStorageError(err error, details map[string]any) storageDiagnostic {
+	switch {
+	case errors.Is(err, os.ErrPermission):
+		return storageDiagnostic{Health: "unavailable", Code: "permission_denied", Message: "storage root exists but Cartolensia cannot read it", Details: details}
+	case errors.Is(err, os.ErrNotExist):
+		return storageDiagnostic{Health: "unavailable", Code: "path_missing", Message: "storage root path does not exist", Details: details}
+	case strings.Contains(strings.ToLower(err.Error()), "timed out"):
+		return storageDiagnostic{Health: "unavailable", Code: "probe_timeout", Message: "storage root probe timed out", Details: details}
+	default:
+		return storageDiagnostic{Health: "unavailable", Code: "unavailable", Message: "storage root is unavailable: " + err.Error(), Details: details}
+	}
+}
+
+func classifyMountBackedStorageError(err error) (string, string) {
+	lower := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, os.ErrPermission) || strings.Contains(lower, "permission denied"):
+		return "credentials_or_permission_denied", "SMB host is reachable, but the mounted export is not readable; check Samba credentials and share ACLs"
+	case errors.Is(err, os.ErrNotExist):
+		return "export_or_path_unavailable", "SMB host is reachable, but the configured export/path is not mounted or does not exist"
+	case strings.Contains(lower, "no such device"), strings.Contains(lower, "not connected"), strings.Contains(lower, "host is down"):
+		return "export_or_mount_unavailable", "SMB host is reachable, but the local CIFS mount/export is unavailable"
+	case strings.Contains(lower, "timed out"):
+		return "export_or_mount_timeout", "SMB host is reachable, but the local CIFS mount/export did not become available before the timeout"
+	default:
+		return "export_or_mount_unavailable", "SMB host is reachable, but the local storage root is unavailable: " + err.Error()
+	}
+}
+
+func effectiveSMBConfig(cfg storage.Config) *storage.SMBConfig {
+	if cfg.SMB != nil && cfg.SMB.Host != "" {
+		out := *cfg.SMB
+		return &out
+	}
+	if cfg.SourceURL == "" {
+		return cfg.SMB
+	}
+	u, err := url.Parse(cfg.SourceURL)
+	if err != nil || (u.Scheme != "smb" && u.Scheme != "cifs") {
+		return cfg.SMB
+	}
+	out := storage.SMBConfig{Host: u.Hostname()}
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	if len(parts) > 0 && parts[0] != "" {
+		if share, err := url.PathUnescape(parts[0]); err == nil {
+			out.Share = share
+		}
+	}
+	if len(parts) > 1 {
+		decoded := make([]string, 0, len(parts)-1)
+		for _, part := range parts[1:] {
+			if value, err := url.PathUnescape(part); err == nil {
+				decoded = append(decoded, value)
+			}
+		}
+		out.Path = strings.Join(decoded, "/")
+	}
+	if cfg.SMB != nil {
+		if cfg.SMB.Share != "" {
+			out.Share = cfg.SMB.Share
+		}
+		if cfg.SMB.Path != "" {
+			out.Path = cfg.SMB.Path
+		}
+		out.Domain = cfg.SMB.Domain
+		out.Username = cfg.SMB.Username
+		out.CredentialsFile = cfg.SMB.CredentialsFile
+		out.PasswordEnv = cfg.SMB.PasswordEnv
+	}
+	return &out
+}
+
+func probeSMBHost(host string, timeout time.Duration) (string, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "445"))
+	if err == nil {
+		_ = conn.Close()
+		return "host_reachable", "SMB host is reachable on TCP 445"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "host_unresolved", "SMB host cannot be resolved: " + err.Error()
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "host_offline", "SMB host did not respond on TCP 445 before timeout"
+	}
+	return "host_offline", "SMB host is not reachable on TCP 445: " + err.Error()
+}
+
+func probeSMBShareWithClient(smb storage.SMBConfig, timeout time.Duration) (storageDiagnostic, bool) {
+	if smb.Host == "" || smb.Share == "" || smb.CredentialsFile == "" {
+		return storageDiagnostic{}, false
+	}
+	if info, err := os.Stat(smb.CredentialsFile); err != nil {
+		code := "credentials_file_unreadable"
+		message := "SMB credentials file is configured, but Cartolensia cannot read it"
+		if errors.Is(err, os.ErrNotExist) {
+			code = "credentials_file_missing"
+			message = "SMB credentials file is configured, but the file does not exist"
+		} else if errors.Is(err, os.ErrPermission) {
+			message = "SMB credentials file exists, but Cartolensia does not have permission to read it"
+		}
+		return storageDiagnostic{
+			Health:  "unavailable",
+			Code:    code,
+			Message: message,
+			Details: map[string]any{
+				"smbclient_checked":        false,
+				"smb_credentials_file":     smb.CredentialsFile,
+				"smb_credentials_file_err": err.Error(),
+			},
+		}, true
+	} else if info.IsDir() {
+		return storageDiagnostic{
+			Health:  "unavailable",
+			Code:    "credentials_file_unreadable",
+			Message: "SMB credentials path points to a directory, not a credentials file",
+			Details: map[string]any{
+				"smbclient_checked":    false,
+				"smb_credentials_file": smb.CredentialsFile,
+			},
+		}, true
+	}
+	bin, err := exec.LookPath("smbclient")
+	if err != nil {
+		return storageDiagnostic{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	unc := "//" + smb.Host + "/" + smb.Share
+	args := []string{unc, "-A", smb.CredentialsFile, "-m", "SMB3", "-t", strconv.Itoa(max(1, int(timeout.Seconds()))), "-c", "pwd"}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	details := map[string]any{"smbclient_checked": true}
+	if text != "" {
+		details["smbclient_output"] = redactSMBProbeOutput(text)
+	}
+	if err == nil {
+		return storageDiagnostic{Health: "unavailable", Code: "share_available", Message: "SMB share accepted the configured credentials; local mount/path is still unavailable", Details: details}, true
+	}
+	lower := strings.ToLower(text + " " + err.Error())
+	switch {
+	case strings.Contains(lower, "logon_failure"), strings.Contains(lower, "access_denied"), strings.Contains(lower, "session setup failed"):
+		return storageDiagnostic{Health: "unavailable", Code: "credentials_invalid", Message: "SMB host is reachable, but configured credentials were rejected", Details: details}, true
+	case strings.Contains(lower, "bad_network_name"), strings.Contains(lower, "tree connect failed"), strings.Contains(lower, "object_name_not_found"):
+		return storageDiagnostic{Health: "unavailable", Code: "export_unavailable", Message: "SMB host is reachable, but the configured share/export is not available", Details: details}, true
+	case strings.Contains(lower, "could not resolve"), strings.Contains(lower, "name or service not known"):
+		return storageDiagnostic{Health: "unavailable", Code: "host_unresolved", Message: "SMB host cannot be resolved by smbclient", Details: details}, true
+	case strings.Contains(lower, "timeout"), strings.Contains(lower, "connection refused"), strings.Contains(lower, "no route to host"):
+		return storageDiagnostic{Health: "unavailable", Code: "host_offline", Message: "SMB host is not reachable by smbclient", Details: details}, true
+	default:
+		return storageDiagnostic{Health: "unavailable", Code: "smb_probe_failed", Message: "SMB probe failed: " + firstNonEmpty(text, err.Error()), Details: details}, true
+	}
+}
+
+func redactSMBProbeOutput(value string) string {
+	lines := strings.Split(value, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), "password") {
+			out = append(out, "[redacted password line]")
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func (s *Server) handleStorageByName(w http.ResponseWriter, r *http.Request) {
@@ -665,7 +886,7 @@ func (s *Server) handleStorageByName(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"valid": false, "storage": cfg, "error": err.Error(), "warnings": warnings})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": validated, "warnings": warnings})
+		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": validated, "warnings": warnings, "diagnostic": diagnoseStorageRoot(validated, 750*time.Millisecond)})
 		return
 	}
 	if len(parts) != 1 {
@@ -697,7 +918,7 @@ func (s *Server) handleStorageByName(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.ValidateOnly {
-			writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": updated, "warnings": warnings})
+			writeJSON(w, http.StatusOK, map[string]any{"valid": true, "storage": updated, "warnings": warnings, "diagnostic": diagnoseStorageRoot(updated, 750*time.Millisecond)})
 			return
 		}
 		applied, err := s.deps.Registry.UpdateStorage(name, updated)
@@ -712,15 +933,17 @@ func (s *Server) handleStorageByName(w http.ResponseWriter, r *http.Request) {
 }
 
 type storageMutationRequest struct {
-	Name         string `json:"name"`
-	Kind         string `json:"kind"`
-	Root         string `json:"root"`
-	Mode         string `json:"mode"`
-	ValidateOnly bool   `json:"validate_only"`
+	Name         string             `json:"name"`
+	Kind         string             `json:"kind"`
+	Root         string             `json:"root"`
+	Mode         string             `json:"mode"`
+	SourceURL    string             `json:"source_url"`
+	SMB          *storage.SMBConfig `json:"smb"`
+	ValidateOnly bool               `json:"validate_only"`
 }
 
 func (r storageMutationRequest) Config() storage.Config {
-	return storage.Config{Name: r.Name, Kind: r.Kind, Root: r.Root, Mode: r.Mode}
+	return storage.Config{Name: r.Name, Kind: r.Kind, Root: r.Root, Mode: r.Mode, SourceURL: r.SourceURL, SMB: r.SMB}
 }
 
 func validateStorageMutation(cfg storage.Config, currentName string) (storage.Config, []string, error) {
@@ -6083,13 +6306,54 @@ func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request, assetID 
 	}
 	file, info, err := s.deps.Registry.OpenByURL(loc.StorageURL)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		s.writeStorageOpenError(w, loc, err)
 		return
 	}
 	defer file.Close()
 	w.Header().Set("Content-Type", info.MIME)
 	w.Header().Set("X-Cartolensia-Storage-URL", info.StorageURL)
 	http.ServeContent(w, r, info.Name, info.MTime, file)
+}
+
+func (s *Server) writeStorageOpenError(w http.ResponseWriter, loc catalog.Location, openErr error) {
+	status := http.StatusServiceUnavailable
+	code := "storage_unavailable"
+	message := "original storage is unavailable; metadata and cached data remain available"
+	details := map[string]any{
+		"storage":       loc.StorageName,
+		"relative_path": loc.RelativePath,
+		"error":         openErr.Error(),
+	}
+	if cfg, err := s.deps.Registry.GetStorage(loc.StorageName); err == nil {
+		diag := diagnoseStorageRoot(cfg, 750*time.Millisecond)
+		details["storage_health"] = diag.Code
+		details["storage_message"] = diag.Message
+		for key, value := range diag.Details {
+			details[key] = value
+		}
+		if diag.Code == "available" && errors.Is(openErr, os.ErrNotExist) {
+			status = http.StatusNotFound
+			code = "original_file_missing"
+			message = "storage is available, but the original file is missing at the indexed path"
+		} else if diag.Code == "credentials_invalid" || diag.Code == "credentials_or_permission_denied" || diag.Code == "credentials_file_missing" || diag.Code == "credentials_file_unreadable" || errors.Is(openErr, os.ErrPermission) {
+			status = http.StatusForbidden
+			code = "storage_credentials_or_permission_denied"
+			message = "storage is reachable, but Cartolensia cannot read the original; check Samba credentials and share permissions"
+		}
+	} else if errors.Is(openErr, os.ErrNotExist) {
+		status = http.StatusNotFound
+		code = "original_file_missing"
+		message = "original file is missing at the indexed path"
+	} else if errors.Is(openErr, os.ErrPermission) {
+		status = http.StatusForbidden
+		code = "storage_credentials_or_permission_denied"
+		message = "Cartolensia cannot read the original; check storage credentials and permissions"
+	}
+	writeJSON(w, status, map[string]any{
+		"error":   message,
+		"code":    code,
+		"details": details,
+	})
 }
 
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID string) {

@@ -274,3 +274,27 @@ Operational constraints:
 - redacted config exports must not include database passwords, admin password file contents, API tokens, SMB credentials, or local secret files.
 
 The `create-essential-export.sh` helper intentionally excludes originals, thumbnails, model caches, component caches, and secret files. Operators who need a full disaster-recovery bundle must separately back up secrets and external original storage according to their own access-control policy.
+
+## 2026-06-27 Samba Credential And Outage Diagnostics
+
+SMB/CIFS diagnostics are designed to improve operator feedback without weakening the originals safety model.
+
+Security rules:
+
+- Store Samba passwords in root-owned credentials files or service environment files, not in source control, WebUI text fields, reports, or logs.
+- A credentials file used by Cartolensia diagnostics may be `root:cartolensia` with mode `0640`; it must not be world-readable.
+- The WebUI stores and displays only non-secret metadata such as host, share, subpath, credentials-file path, or password environment-variable name.
+- `smbclient` probes use `-A <credentials_file>` so the password is not placed on the process command line.
+- Probe output is redacted for password-looking lines before it is returned in API details.
+- Optional original-storage outages must not trigger deletion, missing-file marking, or metadata cleanup.
+
+When an original-media request fails, Cartolensia returns a structured error that separates:
+
+- host offline/unresolved;
+- share/export unavailable;
+- credentials rejected;
+- credentials file unreadable;
+- local mount unavailable;
+- original file missing while storage is otherwise readable.
+
+These diagnostics are metadata about storage reachability only. They do not grant write access, remount shares, alter credentials, or modify originals.

@@ -233,7 +233,7 @@ const jobs = ref<Job[]>([]);
 const jobStats = ref<JobStats | null>(null);
 const selectedJob = ref<Job | null>(null);
 const storages = ref<StorageConfig[]>([]);
-const storageDraft = ref<StorageConfig>({ name: "", kind: "fs", root: "", mode: "strict_read_only" });
+const storageDraft = ref<StorageConfig>({ name: "", kind: "fs", root: "", mode: "strict_read_only", source_url: "", smb: {} });
 const storageMessage = ref("");
 const plugins = ref<PluginManifest[]>([]);
 const stats = ref<Stats | null>(null);
@@ -3760,6 +3760,10 @@ async function deletePlace(place: PlaceCacheEntry) {
   }
 }
 
+function setStorageDraftSMBField(key: keyof NonNullable<StorageConfig["smb"]>, value: string) {
+  storageDraft.value.smb = { ...(storageDraft.value.smb ?? {}), [key]: value };
+}
+
 async function validateStorageDraft() {
   storageMessage.value = "Validating storage draft...";
   try {
@@ -3844,6 +3848,10 @@ function selectFilePickerPath(path = filePickerPath.value) {
   const selected = filePickerAbsolute(path);
   if (filePickerTarget.value === "storageDraft.root") {
     storageDraft.value.root = selected;
+  } else if (filePickerTarget.value === "storageDraft.smb.credentials_file") {
+    setStorageDraftSMBField("credentials_file", selected);
+  } else if (filePickerTarget.value === "pending:storages.0.smb.credentials_file") {
+    setPendingStorageSMBField(0, "credentials_file", selected);
   } else if (filePickerTarget.value === "pending:storages.0.root") {
     setPendingStorageField(0, "root", selected);
   } else if (filePickerTarget.value.startsWith("pending:")) {
@@ -4186,6 +4194,21 @@ function setPendingStorageField(index: number, key: string, value: string) {
 function pendingStorageField(index: number, key: string): string {
   const storages = Array.isArray(pendingConfig.value.storages) ? pendingConfig.value.storages as Record<string, unknown>[] : [];
   return String(storages[index]?.[key] ?? "");
+}
+
+function setPendingStorageSMBField(index: number, key: string, value: string) {
+  const storages = Array.isArray(pendingConfig.value.storages) ? pendingConfig.value.storages as Record<string, unknown>[] : [];
+  while (storages.length <= index) storages.push({});
+  const smb = storages[index].smb && typeof storages[index].smb === "object" ? storages[index].smb as Record<string, unknown> : {};
+  storages[index] = { ...storages[index], smb: { ...smb, [key]: value } };
+  pendingConfig.value.storages = storages;
+}
+
+function pendingStorageSMBField(index: number, key: string): string {
+  const storages = Array.isArray(pendingConfig.value.storages) ? pendingConfig.value.storages as Record<string, unknown>[] : [];
+  const smb = storages[index]?.smb;
+  if (!smb || typeof smb !== "object" || Array.isArray(smb)) return "";
+  return String((smb as Record<string, unknown>)[key] ?? "");
 }
 
 async function savePendingSettings() {
@@ -6225,7 +6248,7 @@ onBeforeUnmount(() => {
         <section v-else-if="active === 'Storages'" class="panel">
           <header class="panel-head"><h2>Storages</h2></header>
           <table>
-            <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Health</th><th>Root</th></tr></thead>
+            <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Health</th><th>SMB / Source</th><th>Root</th></tr></thead>
             <tbody>
               <tr v-for="storage in storages" :key="storage.name">
                 <td>{{ storage.name }}</td>
@@ -6233,7 +6256,12 @@ onBeforeUnmount(() => {
                 <td>{{ storage.mode }}</td>
                 <td>
                   <span :class="['status-badge', storage.health === 'available' ? 'ok' : 'warn']">{{ storage.health || 'unknown' }}</span>
+                  <code v-if="storage.health_code" class="d-block">{{ storage.health_code }}</code>
                   <small v-if="storage.health_message" class="muted d-block">{{ storage.health_message }}</small>
+                </td>
+                <td>
+                  <small v-if="storage.source_url" class="d-block">{{ storage.source_url }}</small>
+                  <small v-if="storage.smb?.host" class="d-block">SMB {{ storage.smb.host }}/{{ storage.smb.share || '?' }}</small>
                 </td>
                 <td>{{ storage.root }}</td>
               </tr>
@@ -8187,6 +8215,28 @@ onBeforeUnmount(() => {
                   </button>
                 </span>
               </label>
+              <label>Source URL
+                <input v-model="storageDraft.source_url" type="text" placeholder="smb://tnsmmi.local/share/path" />
+                <small class="muted">Optional diagnostic URL. For SMB/CIFS, Cartolensia uses this to distinguish host, share, auth, and missing-file failures.</small>
+              </label>
+              <div class="settings-subgrid">
+                <label>SMB host <input :value="storageDraft.smb?.host || ''" type="text" placeholder="tnsmmi.local" @input="setStorageDraftSMBField('host', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB share/export <input :value="storageDraft.smb?.share || ''" type="text" placeholder="multimedia" @input="setStorageDraftSMBField('share', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB subpath <input :value="storageDraft.smb?.path || ''" type="text" placeholder="optional/path" @input="setStorageDraftSMBField('path', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB domain <input :value="storageDraft.smb?.domain || ''" type="text" placeholder="WORKGROUP" @input="setStorageDraftSMBField('domain', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB username <input :value="storageDraft.smb?.username || ''" type="text" autocomplete="username" @input="setStorageDraftSMBField('username', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB credentials file
+                  <span class="input-with-button">
+                    <input :value="storageDraft.smb?.credentials_file || ''" type="text" placeholder="/etc/cartolensia/smb-storage.credentials" @input="setStorageDraftSMBField('credentials_file', ($event.target as HTMLInputElement).value)" />
+                    <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker('storageDraft.smb.credentials_file', 'file')">
+                      <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                      Browse
+                    </button>
+                  </span>
+                </label>
+                <label>Password env name <input :value="storageDraft.smb?.password_env || ''" type="text" placeholder="CARTOLENSIA_SMB_PASSWORD" @input="setStorageDraftSMBField('password_env', ($event.target as HTMLInputElement).value)" /></label>
+              </div>
+              <p class="muted">Secrets are not displayed here. Prefer a root-owned credentials file or an environment variable name; do not paste Samba passwords into the UI.</p>
               <label>Mode
                 <select v-model="storageDraft.mode">
                   <option value="strict_read_only">strict_read_only</option>
@@ -8214,6 +8264,21 @@ onBeforeUnmount(() => {
                   </button>
                 </span>
               </label>
+              <label>Source URL <input :value="pendingStorageField(0, 'source_url')" type="text" placeholder="smb://tnsmmi.local/share/path" @input="setPendingStorageField(0, 'source_url', ($event.target as HTMLInputElement).value)" /></label>
+              <div class="settings-subgrid">
+                <label>SMB host <input :value="pendingStorageSMBField(0, 'host')" type="text" @input="setPendingStorageSMBField(0, 'host', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB share/export <input :value="pendingStorageSMBField(0, 'share')" type="text" @input="setPendingStorageSMBField(0, 'share', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB subpath <input :value="pendingStorageSMBField(0, 'path')" type="text" @input="setPendingStorageSMBField(0, 'path', ($event.target as HTMLInputElement).value)" /></label>
+                <label>SMB credentials file
+                  <span class="input-with-button">
+                    <input :value="pendingStorageSMBField(0, 'credentials_file')" type="text" @input="setPendingStorageSMBField(0, 'credentials_file', ($event.target as HTMLInputElement).value)" />
+                    <button type="button" class="btn btn-outline-secondary btn-sm" @click="openFilePicker('pending:storages.0.smb.credentials_file', 'file')">
+                      <i class="bi bi-folder2-open" aria-hidden="true"></i>
+                      Browse
+                    </button>
+                  </span>
+                </label>
+              </div>
               <label>Mode
                 <select :value="pendingStorageField(0, 'mode')" @change="setPendingStorageField(0, 'mode', ($event.target as HTMLSelectElement).value)">
                   <option value="strict_read_only">strict_read_only</option>
@@ -8226,15 +8291,28 @@ onBeforeUnmount(() => {
               <h3>Configured Storages</h3>
               <div v-if="storageMessage" class="alert"><pre>{{ storageMessage }}</pre></div>
               <table>
-                <thead><tr><th>Name</th><th>Root</th><th>Mode</th><th>Health</th><th>Action</th></tr></thead>
+                <thead><tr><th>Name</th><th>Root</th><th>Source / SMB</th><th>Mode</th><th>Health</th><th>Action</th></tr></thead>
                 <tbody>
                   <tr v-for="storage in storages" :key="storage.name">
                     <td>{{ storage.name }}</td>
                     <td>{{ storage.root }}</td>
+                    <td>
+                      <small v-if="storage.source_url" class="d-block">{{ storage.source_url }}</small>
+                      <small v-if="storage.smb?.host" class="d-block">
+                        {{ storage.smb.host }}/{{ storage.smb.share || '?' }}<span v-if="storage.smb.path">/{{ storage.smb.path }}</span>
+                      </small>
+                      <small v-if="storage.smb?.credentials_file" class="muted d-block">credentials file configured</small>
+                      <small v-else-if="storage.smb?.password_env" class="muted d-block">password env configured</small>
+                    </td>
                     <td>{{ storage.mode }}</td>
                     <td>
                       <span :class="['status-badge', storage.health === 'available' ? 'ok' : 'warn']">{{ storage.health || 'unknown' }}</span>
+                      <code v-if="storage.health_code" class="d-block">{{ storage.health_code }}</code>
                       <small v-if="storage.health_message" class="muted d-block">{{ storage.health_message }}</small>
+                      <details v-if="storage.details" class="storage-details">
+                        <summary>Probe details</summary>
+                        <pre>{{ JSON.stringify(storage.details, null, 2) }}</pre>
+                      </details>
                     </td>
                     <td><button type="button" @click="validateExistingStorage(storage.name)">Validate</button></td>
                   </tr>

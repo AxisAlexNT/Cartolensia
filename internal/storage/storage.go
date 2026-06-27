@@ -25,10 +25,22 @@ var (
 )
 
 type Config struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-	Root string `json:"root"`
-	Mode string `json:"mode"`
+	Name      string     `json:"name"`
+	Kind      string     `json:"kind"`
+	Root      string     `json:"root"`
+	Mode      string     `json:"mode"`
+	SourceURL string     `json:"source_url,omitempty"`
+	SMB       *SMBConfig `json:"smb,omitempty"`
+}
+
+type SMBConfig struct {
+	Host            string `json:"host,omitempty"`
+	Share           string `json:"share,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Domain          string `json:"domain,omitempty"`
+	Username        string `json:"username,omitempty"`
+	CredentialsFile string `json:"credentials_file,omitempty"`
+	PasswordEnv     string `json:"password_env,omitempty"`
 }
 
 type Registry struct {
@@ -103,7 +115,7 @@ func NewRegistry(configs []Config) (*Registry, error) {
 			return nil, fmt.Errorf("duplicate storage %q", cfg.Name)
 		}
 		reg.adapters[cfg.Name] = adapter
-		reg.configs[cfg.Name] = Config{Name: cfg.Name, Kind: cfg.Kind, Root: adapter.Root(), Mode: cfg.Mode}
+		reg.configs[cfg.Name] = Config{Name: cfg.Name, Kind: cfg.Kind, Root: adapter.Root(), Mode: cfg.Mode, SourceURL: cfg.SourceURL, SMB: cloneSMBConfig(cfg.SMB)}
 	}
 	return reg, nil
 }
@@ -118,7 +130,7 @@ func (r *Registry) ListStorages() []Config {
 	sort.Strings(names)
 	out := make([]Config, 0, len(names))
 	for _, name := range names {
-		out = append(out, r.configs[name])
+		out = append(out, cloneConfig(r.configs[name]))
 	}
 	return out
 }
@@ -130,7 +142,7 @@ func (r *Registry) GetStorage(name string) (Config, error) {
 	if !ok {
 		return Config{}, fmt.Errorf("%w: %s", ErrUnknownStorage, name)
 	}
-	return cfg, nil
+	return cloneConfig(cfg), nil
 }
 
 func (r *Registry) AddStorage(cfg Config) (Config, error) {
@@ -176,6 +188,7 @@ func normalizeConfig(cfg Config) (Config, *FSAdapter, error) {
 	cfg.Name = strings.TrimSpace(cfg.Name)
 	cfg.Kind = strings.TrimSpace(cfg.Kind)
 	cfg.Mode = strings.TrimSpace(cfg.Mode)
+	cfg.SourceURL = strings.TrimSpace(cfg.SourceURL)
 	if cfg.Kind == "" {
 		cfg.Kind = "fs"
 	}
@@ -193,7 +206,31 @@ func normalizeConfig(cfg Config) (Config, *FSAdapter, error) {
 		return Config{}, nil, err
 	}
 	cfg.Root = adapter.Root()
+	cfg.SMB = cloneSMBConfig(cfg.SMB)
 	return cfg, adapter, nil
+}
+
+func cloneSMBConfig(in *SMBConfig) *SMBConfig {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Host = strings.TrimSpace(out.Host)
+	out.Share = strings.Trim(strings.TrimSpace(out.Share), "/")
+	out.Path = strings.Trim(strings.TrimSpace(out.Path), "/")
+	out.Domain = strings.TrimSpace(out.Domain)
+	out.Username = strings.TrimSpace(out.Username)
+	out.CredentialsFile = strings.TrimSpace(out.CredentialsFile)
+	out.PasswordEnv = strings.TrimSpace(out.PasswordEnv)
+	if out.Host == "" && out.Share == "" && out.Path == "" && out.Domain == "" && out.Username == "" && out.CredentialsFile == "" && out.PasswordEnv == "" {
+		return nil
+	}
+	return &out
+}
+
+func cloneConfig(in Config) Config {
+	in.SMB = cloneSMBConfig(in.SMB)
+	return in
 }
 
 func (r *Registry) Adapter(name string) (*FSAdapter, error) {

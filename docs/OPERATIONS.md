@@ -897,3 +897,46 @@ scp <cartolensia-host>:/var/lib/cartolensia/exports/cartolensia-essential-YYYYMM
 ```
 
 Restore notes are included inside the archive. In short, restore the DB with `pg_restore`, recreate local secrets/config from the redacted template, and remount originals read-only.
+
+### Samba/CIFS Storage Health Codes
+
+Cartolensia must keep running even when optional original storages are unavailable. Metadata, maps, OCR, captions, transcripts, embeddings, and cached previews remain browsable from PostgreSQL/cache. Original media streaming is the only part that should fail for an unavailable storage.
+
+For SMB/CIFS-backed filesystem mounts, configure each storage with non-secret diagnostic metadata:
+
+```yaml
+storages:
+  - name: originals
+    kind: fs
+    root: /originals
+    mode: strict_read_only
+    source_url: smb://nas.example.local/multimedia/
+    smb:
+      host: nas.example.local
+      share: multimedia
+      path: ""
+      credentials_file: /etc/cartolensia/smb-originals.credentials
+```
+
+The credentials file should be readable by the Cartolensia service account, but not world-readable:
+
+```bash
+sudo chgrp cartolensia /etc/cartolensia/smb-originals.credentials
+sudo chmod 0640 /etc/cartolensia/smb-originals.credentials
+```
+
+Do not paste Samba passwords into the WebUI. Settings -> Storage accepts a credentials-file path or a password environment-variable name so secrets remain outside browser-visible config.
+
+Common health codes:
+
+- `available`: the configured local root is readable.
+- `host_unresolved`: DNS/mDNS cannot resolve the SMB host.
+- `host_offline`: the host did not respond on TCP 445.
+- `credentials_file_missing`: a configured credentials file path does not exist.
+- `credentials_file_unreadable`: the file exists, but the Cartolensia service account cannot read it.
+- `credentials_invalid`: the SMB host is reachable, but rejected the configured credentials.
+- `export_unavailable`: the SMB host is reachable and credentials are usable, but the configured share/export is unavailable.
+- `export_or_mount_unavailable`: the host is reachable, but the local CIFS mount is down or stale.
+- `original_file_missing`: the storage root is available, but the indexed original file is missing at the recorded path.
+
+Use Settings -> Readiness or Settings -> Storage -> Validate to inspect these codes. Do not run missing-file marking after an outage just because a NAS is offline or a share is not exported.

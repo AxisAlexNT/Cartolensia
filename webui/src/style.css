@@ -2157,6 +2157,23 @@ td {
   padding: 18px;
 }
 
+.settings-subgrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  min-width: 0;
+}
+
+.storage-details {
+  margin-top: 6px;
+}
+
+.storage-details pre {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
 .related-context-grid {
   display: grid;
   gap: 14px;
@@ -2407,6 +2424,7 @@ td {
 }
 
 .form-stack label,
+.settings-subgrid label,
 .settings-form > label {
   display: grid;
   gap: 6px;
@@ -2414,6 +2432,7 @@ td {
 }
 
 .form-stack label > span,
+.settings-subgrid label > span,
 .settings-form > label > span {
   font-weight: 600;
 }

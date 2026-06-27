@@ -3311,6 +3311,68 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-27 Samba Storage Diagnostics And Settings
+
+Implemented:
+
+- Added per-storage SMB diagnostic metadata:
+  - `source_url`;
+  - `smb.host`;
+  - `smb.share`;
+  - `smb.path`;
+  - `smb.domain`;
+  - `smb.username`;
+  - `smb.credentials_file`;
+  - `smb.password_env`.
+- Runtime and YAML-bound storage settings now expose these fields in Settings -> Storage.
+- Storage readiness and `/api/v1/storages` now return specific health codes:
+  - `host_unresolved`;
+  - `host_offline`;
+  - `export_unavailable`;
+  - `credentials_invalid`;
+  - `credentials_file_missing`;
+  - `credentials_file_unreadable`;
+  - `export_or_mount_unavailable`;
+  - `original_file_missing` for original-media requests when the storage is readable but the indexed file path is gone.
+- Original-media failures now return structured JSON with storage name, relative path, health code, and action-oriented message instead of a generic server error.
+- Settings UI now shows source URL, SMB host/share/path, credentials-file status, health code, and probe details.
+
+Remote rjazhenka validation:
+
+- Deployed updated backend and WebUI to `/opt/cartolensia/current`.
+- Added non-secret SMB metadata to the active production config; Samba credentials remain in `/etc/cartolensia/smb-multimedia.credentials`.
+- Set the credentials file to `root:cartolensia` mode `0640` so the service can probe SMB without exposing the secret in UI or command arguments.
+- Live status now distinguishes the current outage as:
+  - host reachable on TCP 445;
+  - credentials file readable;
+  - configured exports unavailable (`export_unavailable`, `NT_STATUS_BAD_NETWORK_NAME`).
+- Authenticated checks confirmed metadata-only service still works while exports are unavailable:
+  - stats returned `615353` assets;
+  - asset metadata listing returned rows from PostgreSQL;
+  - original-media request returned `503 storage_unavailable` with storage health `export_unavailable`.
+
+Tests:
+
+- `gofmt -w internal/storage/storage.go internal/config/config.go internal/app/app.go internal/database/database.go internal/server/server.go internal/server/readiness.go internal/server/readiness_test.go internal/storage/storage_test.go internal/config/config_test.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/config ./internal/storage ./internal/database ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Known limitations:
+
+- If `smbclient` is unavailable on a deployment host, Cartolensia still distinguishes host reachability and local mount/path failures, but cannot independently verify share names or credentials through SMB protocol.
+- The current rjazhenka Samba server is reachable, but reports the configured shares as unavailable. No metadata was deleted and no missing-file marking was run.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-27 Post-Outage Remote Startup And Offline Storage Degradation
 
 Issue:

@@ -52,7 +52,14 @@ func New(ctx context.Context, configPath string) (*App, error) {
 	}
 	storageConfigs := make([]storage.Config, 0, len(cfg.Storages))
 	for _, st := range cfg.Storages {
-		storageConfigs = append(storageConfigs, storage.Config{Name: st.Name, Kind: st.Kind, Root: st.Root, Mode: st.Mode})
+		storageConfigs = append(storageConfigs, storage.Config{
+			Name:      st.Name,
+			Kind:      st.Kind,
+			Root:      st.Root,
+			Mode:      st.Mode,
+			SourceURL: st.SourceURL,
+			SMB:       smbConfigFromConfig(st.SMB),
+		})
 	}
 	registry, err := storage.NewRegistry(storageConfigs)
 	if err != nil {
@@ -168,6 +175,21 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		app.Workers = manager
 	}
 	return app, nil
+}
+
+func smbConfigFromConfig(in *config.SMBStorageConfig) *storage.SMBConfig {
+	if in == nil {
+		return nil
+	}
+	return &storage.SMBConfig{
+		Host:            in.Host,
+		Share:           in.Share,
+		Path:            in.Path,
+		Domain:          in.Domain,
+		Username:        in.Username,
+		CredentialsFile: in.CredentialsFile,
+		PasswordEnv:     in.PasswordEnv,
+	}
 }
 
 func (a *App) Close() {

@@ -49,6 +49,30 @@ func TestLoadYAMLAndEnvOverride(t *testing.T) {
 	}
 }
 
+func TestStorageSMBSourceURLPopulatesDiagnosticFields(t *testing.T) {
+	cfg := Defaults()
+	cfg.Storages = []StorageConfig{{
+		Name:      "nas",
+		Kind:      "fs",
+		Root:      "/mnt/nas/share",
+		Mode:      ModeStrictReadOnly,
+		SourceURL: "smb://nas.local/media/photos/2026",
+		SMB: &SMBStorageConfig{
+			CredentialsFile: "/etc/cartolensia/smb-nas.credentials",
+		},
+	}}
+	if err := Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	smb := cfg.Storages[0].SMB
+	if smb == nil || smb.Host != "nas.local" || smb.Share != "media" || smb.Path != "photos/2026" {
+		t.Fatalf("unexpected SMB metadata %#v", smb)
+	}
+	if smb.CredentialsFile != "/etc/cartolensia/smb-nas.credentials" {
+		t.Fatalf("credentials file was not preserved: %#v", smb)
+	}
+}
+
 func TestValidateRejectsDuplicateStorage(t *testing.T) {
 	cfg := Defaults()
 	cfg.Storages = append(cfg.Storages, cfg.Storages[0])

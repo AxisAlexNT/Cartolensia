@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,10 +47,22 @@ type CacheConfig struct {
 }
 
 type StorageConfig struct {
-	Name string `json:"name" yaml:"name"`
-	Kind string `json:"kind" yaml:"kind"`
-	Root string `json:"root" yaml:"root"`
-	Mode string `json:"mode" yaml:"mode"`
+	Name      string            `json:"name" yaml:"name"`
+	Kind      string            `json:"kind" yaml:"kind"`
+	Root      string            `json:"root" yaml:"root"`
+	Mode      string            `json:"mode" yaml:"mode"`
+	SourceURL string            `json:"source_url,omitempty" yaml:"source_url,omitempty"`
+	SMB       *SMBStorageConfig `json:"smb,omitempty" yaml:"smb,omitempty"`
+}
+
+type SMBStorageConfig struct {
+	Host            string `json:"host,omitempty" yaml:"host,omitempty"`
+	Share           string `json:"share,omitempty" yaml:"share,omitempty"`
+	Path            string `json:"path,omitempty" yaml:"path,omitempty"`
+	Domain          string `json:"domain,omitempty" yaml:"domain,omitempty"`
+	Username        string `json:"username,omitempty" yaml:"username,omitempty"`
+	CredentialsFile string `json:"credentials_file,omitempty" yaml:"credentials_file,omitempty"`
+	PasswordEnv     string `json:"password_env,omitempty" yaml:"password_env,omitempty"`
 }
 
 type PluginConfig struct {
@@ -199,6 +212,10 @@ func Validate(cfg *Config) error {
 		st.Name = strings.TrimSpace(st.Name)
 		st.Kind = strings.TrimSpace(st.Kind)
 		st.Mode = strings.TrimSpace(st.Mode)
+		st.SourceURL = strings.TrimSpace(st.SourceURL)
+		if err := normalizeStorageSMBConfig(st); err != nil {
+			return fmt.Errorf("storage %q SMB config: %w", st.Name, err)
+		}
 		if st.Mode == "" {
 			st.Mode = ModeStrictReadOnly
 		}
@@ -218,6 +235,54 @@ func Validate(cfg *Config) error {
 		if strings.TrimSpace(st.Root) == "" {
 			return fmt.Errorf("storage %q root is required", st.Name)
 		}
+	}
+	return nil
+}
+
+func normalizeStorageSMBConfig(st *StorageConfig) error {
+	if st.SMB != nil {
+		st.SMB.Host = strings.TrimSpace(st.SMB.Host)
+		st.SMB.Share = strings.Trim(strings.TrimSpace(st.SMB.Share), "/")
+		st.SMB.Path = strings.Trim(strings.TrimSpace(st.SMB.Path), "/")
+		st.SMB.Domain = strings.TrimSpace(st.SMB.Domain)
+		st.SMB.Username = strings.TrimSpace(st.SMB.Username)
+		st.SMB.CredentialsFile = strings.TrimSpace(st.SMB.CredentialsFile)
+		st.SMB.PasswordEnv = strings.TrimSpace(st.SMB.PasswordEnv)
+	}
+	if st.SourceURL == "" {
+		return nil
+	}
+	u, err := url.Parse(st.SourceURL)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "smb" && u.Scheme != "cifs" {
+		return nil
+	}
+	if st.SMB == nil {
+		st.SMB = &SMBStorageConfig{}
+	}
+	if st.SMB.Host == "" {
+		st.SMB.Host = u.Hostname()
+	}
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	if st.SMB.Share == "" && len(parts) > 0 && parts[0] != "" {
+		share, err := url.PathUnescape(parts[0])
+		if err != nil {
+			return err
+		}
+		st.SMB.Share = share
+	}
+	if st.SMB.Path == "" && len(parts) > 1 {
+		decoded := make([]string, 0, len(parts)-1)
+		for _, part := range parts[1:] {
+			value, err := url.PathUnescape(part)
+			if err != nil {
+				return err
+			}
+			decoded = append(decoded, value)
+		}
+		st.SMB.Path = strings.Join(decoded, "/")
 	}
 	return nil
 }

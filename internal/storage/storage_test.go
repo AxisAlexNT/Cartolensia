@@ -302,3 +302,36 @@ func TestRegistryAddUpdateAndValidateStorage(t *testing.T) {
 		t.Fatal("expected disabled write mode error")
 	}
 }
+
+func TestRegistryPreservesSMBMetadata(t *testing.T) {
+	root := t.TempDir()
+	reg, err := NewRegistry([]Config{{
+		Name:      "nas",
+		Kind:      "fs",
+		Root:      root,
+		Mode:      "strict_read_only",
+		SourceURL: "smb://nas.local/media/photos",
+		SMB: &SMBConfig{
+			Host:            "nas.local",
+			Share:           "media",
+			Path:            "photos",
+			Username:        "reader",
+			CredentialsFile: "/etc/cartolensia/smb-nas.credentials",
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := reg.GetStorage("nas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SourceURL != "smb://nas.local/media/photos" || cfg.SMB == nil || cfg.SMB.Host != "nas.local" || cfg.SMB.Share != "media" {
+		t.Fatalf("SMB metadata was not preserved: %#v", cfg)
+	}
+	cfg.SMB.Host = "mutated"
+	cfg2, _ := reg.GetStorage("nas")
+	if cfg2.SMB.Host != "nas.local" {
+		t.Fatalf("registry exposed mutable SMB config: %#v", cfg2.SMB)
+	}
+}

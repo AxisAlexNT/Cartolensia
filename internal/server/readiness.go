@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
+	"github.com/AxisAlexNT/Cartolensia/internal/config"
+	"github.com/AxisAlexNT/Cartolensia/internal/storage"
 )
 
 type readinessCheck struct {
@@ -128,17 +130,23 @@ func (s *Server) storageReadinessChecks() []readinessCheck {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			diag := diagnoseStorageRoot(storage.Config{
+				Name:      st.Name,
+				Kind:      st.Kind,
+				Root:      st.Root,
+				Mode:      st.Mode,
+				SourceURL: st.SourceURL,
+				SMB:       storageSMBConfigFromRuntime(st.SMB),
+			}, 750*time.Millisecond)
 			status := "ok"
-			summary := "storage root is readable and strict read-only"
-			details := map[string]any{"name": st.Name, "root": st.Root, "mode": st.Mode, "kind": st.Kind}
+			summary := diag.Message
+			details := diag.Details
 			if st.Mode != "strict_read_only" {
 				status = "warn"
 				summary = "storage is not strict_read_only"
 			}
-			if err := probeReadableDirBounded(st.Root, 750*time.Millisecond); err != nil {
+			if diag.Code != "available" {
 				status = "warn"
-				summary = "storage root is unavailable: " + err.Error()
-				details["error"] = err.Error()
 			}
 			results[i] = readinessCheck{
 				ID:       "storage." + st.Name,
@@ -152,6 +160,21 @@ func (s *Server) storageReadinessChecks() []readinessCheck {
 	}
 	wg.Wait()
 	return results
+}
+
+func storageSMBConfigFromRuntime(in *config.SMBStorageConfig) *storage.SMBConfig {
+	if in == nil {
+		return nil
+	}
+	return &storage.SMBConfig{
+		Host:            in.Host,
+		Share:           in.Share,
+		Path:            in.Path,
+		Domain:          in.Domain,
+		Username:        in.Username,
+		CredentialsFile: in.CredentialsFile,
+		PasswordEnv:     in.PasswordEnv,
+	}
 }
 
 func probeReadableDir(path string) error {

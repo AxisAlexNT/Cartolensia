@@ -230,11 +230,22 @@ func (db *DB) SnapshotConfig(ctx context.Context, cfg config.Config) error {
 
 func (db *DB) UpsertStorages(ctx context.Context, storages []config.StorageConfig) error {
 	for _, st := range storages {
-		if _, err := db.ensureStorage(ctx, st.Name, st.Kind, st.Root, st.Mode); err != nil {
+		if _, err := db.ensureStorage(ctx, st.Name, st.Kind, st.Root, st.Mode, storageConfigJSON(st)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func storageConfigJSON(st config.StorageConfig) []byte {
+	data, err := json.Marshal(map[string]any{
+		"source_url": st.SourceURL,
+		"smb":        st.SMB,
+	})
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return data
 }
 
 func (db *DB) UpsertPlugins(ctx context.Context, manifests []plugins.Manifest) error {
@@ -447,7 +458,7 @@ func (db *DB) RevokeAPIToken(ctx context.Context, userID, tokenID string) error 
 }
 
 func (db *DB) UpsertDiscoveredFile(ctx context.Context, info storage.FileInfo) (catalog.UpsertResult, error) {
-	storageID, err := db.ensureStorage(ctx, info.StorageName, "fs", "", "strict_read_only")
+	storageID, err := db.ensureStorage(ctx, info.StorageName, "fs", "", "strict_read_only", []byte(`{}`))
 	if err != nil {
 		return catalog.UpsertResult{}, err
 	}
@@ -1259,12 +1270,12 @@ func (db *DB) ReleaseExpiredLeases(ctx context.Context, now time.Time) (int64, e
 	return cmd.RowsAffected(), nil
 }
 
-func (db *DB) ensureStorage(ctx context.Context, name, kind, root, mode string) (string, error) {
+func (db *DB) ensureStorage(ctx context.Context, name, kind, root, mode string, configJSON []byte) (string, error) {
 	var storageID string
 	err := db.pool.QueryRow(ctx, `select id::text from storage_backends where name=$1`, name).Scan(&storageID)
 	if err == nil {
 		if root != "" {
-			_, _ = db.pool.Exec(ctx, `update storage_backends set kind=$2, root=$3, mode=$4, updated_at=now() where id=$1`, storageID, kind, root, mode)
+			_, _ = db.pool.Exec(ctx, `update storage_backends set kind=$2, root=$3, mode=$4, config_json=$5, updated_at=now() where id=$1`, storageID, kind, root, mode, configJSON)
 		}
 		return storageID, nil
 	}
@@ -1278,7 +1289,7 @@ func (db *DB) ensureStorage(ctx context.Context, name, kind, root, mode string) 
 	if mode == "" {
 		mode = "strict_read_only"
 	}
-	_, err = db.pool.Exec(ctx, `insert into storage_backends(id, name, kind, root, mode) values($1, $2, $3, $4, $5)`, storageID, name, kind, root, mode)
+	_, err = db.pool.Exec(ctx, `insert into storage_backends(id, name, kind, root, mode, config_json) values($1, $2, $3, $4, $5, $6)`, storageID, name, kind, root, mode, configJSON)
 	return storageID, err
 }
 
