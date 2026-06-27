@@ -846,10 +846,19 @@ func ffmpegFilterAvailable(filter string) (bool, map[string]any) {
 }
 
 func pythonImportAvailable(module string) (bool, string, map[string]any) {
-	python := filepath.Join(".cartolensia", "ai-venv", "bin", "python")
+	python := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_PYTHON"))
+	if python == "" {
+		var err error
+		python, err = exec.LookPath("python3")
+		if err != nil {
+			python = filepath.Join(".cartolensia", "ai-venv", "bin", "python")
+		}
+	}
 	script := "import importlib; m=importlib.import_module('" + module + "'); print(getattr(m, '__version__', 'installed'))"
-	out, err := exec.Command(python, "-c", script).CombinedOutput()
+	cmd := exec.Command(python, "-c", script)
+	cmd.Env = os.Environ()
 	meta := map[string]any{"module": module, "python": python}
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		meta["error"] = strings.TrimSpace(string(out))
 		return false, "", meta
@@ -863,18 +872,43 @@ func pythonImportAvailable(module string) (bool, string, map[string]any) {
 
 func firstExistingExpected(paths []string) (string, int64, error) {
 	for _, value := range paths {
-		candidate := value
-		if !filepath.IsAbs(candidate) {
-			candidate = filepath.Clean(candidate)
-		}
-		if info, err := os.Stat(candidate); err == nil {
-			if info.IsDir() {
-				return candidate, pathSize(candidate), nil
+		for _, candidate := range componentExpectedCandidates(value) {
+			if info, err := os.Stat(candidate); err == nil {
+				if info.IsDir() {
+					return candidate, pathSize(candidate), nil
+				}
+				return candidate, info.Size(), nil
 			}
-			return candidate, info.Size(), nil
 		}
 	}
 	return "", 0, fmt.Errorf("none of the expected paths exists: %s", strings.Join(paths, ", "))
+}
+
+func componentExpectedCandidates(value string) []string {
+	var out []string
+	add := func(path string) {
+		path = filepath.Clean(path)
+		for _, existing := range out {
+			if existing == path {
+				return
+			}
+		}
+		out = append(out, path)
+	}
+	if filepath.IsAbs(value) {
+		add(value)
+		return out
+	}
+	if strings.HasPrefix(value, ".cartolensia/models/") {
+		relative := strings.TrimPrefix(value, ".cartolensia/models/")
+		for _, root := range []string{os.Getenv("CARTOLENSIA_MODEL_DIR"), os.Getenv("CARTOLENSIA_AI_MODEL_DIR")} {
+			if strings.TrimSpace(root) != "" {
+				add(filepath.Join(root, relative))
+			}
+		}
+	}
+	add(value)
+	return out
 }
 
 func pathSize(root string) int64 {

@@ -144,7 +144,58 @@ func New(deps Dependencies) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.publicRequest(r) {
+		if _, err := s.deps.Authenticator.Authenticate(r); err != nil {
+			writeError(w, http.StatusUnauthorized, err)
+			return
+		}
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) publicRequest(r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return true
+	}
+	if s.deps.AuthService == nil {
+		return true
+	}
+	switch {
+	case r.URL.Path == "/api/v1/health",
+		r.URL.Path == "/api/v1/version",
+		r.URL.Path == "/api/v1/diagnostics/readiness",
+		r.URL.Path == "/api/v1/auth/me",
+		r.URL.Path == "/api/v1/auth/csrf",
+		r.URL.Path == "/api/v1/auth/login":
+		return true
+	case strings.HasPrefix(r.URL.Path, "/api/v1/public/"):
+		return true
+	case s.publicMediaRequest(r):
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) publicMediaRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/media/")
+	if rest == r.URL.Path {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	switch parts[1] {
+	case "original", "preview", "track-preview", "track-thumbnail":
+	default:
+		return false
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), parts[0])
+	return err == nil && assetIsPublic(asset)
 }
 
 func (s *Server) routes() {
@@ -197,6 +248,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/assets/months", s.handleAssetMonths)
 	s.mux.HandleFunc("/api/v1/assets", s.handleAssets)
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
+	s.mux.HandleFunc("/api/v1/public/assets", s.handlePublicAssets)
+	s.mux.HandleFunc("/api/v1/public/assets/", s.handlePublicAssetByID)
 	s.mux.HandleFunc("/api/v1/search", s.handleSearch)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
@@ -293,6 +346,10 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 	principal, err := s.deps.Authenticator.Authenticate(r)
 	if err != nil {
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			writeJSON(w, http.StatusOK, map[string]any{"principal": nil, "auth": s.authStatus()})
+			return
+		}
 		writeError(w, http.StatusUnauthorized, err)
 		return
 	}
@@ -346,6 +403,8 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	req.Email = strings.TrimSpace(req.Email)
+	req.Password = strings.TrimRight(req.Password, "\r\n")
 	result, secret, err := s.deps.AuthService.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err)
@@ -509,7 +568,7 @@ func (s *Server) handleAuthTokenByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.deps.Registry.ListStorages())
+		writeJSON(w, http.StatusOK, s.storageStatuses())
 	case http.MethodPost:
 		if !s.requireWrite(w, r, "storages.create") {
 			return
@@ -537,6 +596,41 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+type storageStatus struct {
+	storage.Config
+	Health        string `json:"health"`
+	HealthMessage string `json:"health_message,omitempty"`
+	LastCheckedAt string `json:"last_checked_at"`
+}
+
+func (s *Server) storageStatuses() []storageStatus {
+	configs := s.deps.Registry.ListStorages()
+	out := make([]storageStatus, 0, len(configs))
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, cfg := range configs {
+		status := storageStatus{Config: cfg, Health: "available", LastCheckedAt: now}
+		stat, err := os.Stat(cfg.Root)
+		switch {
+		case err == nil && stat.IsDir():
+			status.Health = "available"
+		case err == nil:
+			status.Health = "unavailable"
+			status.HealthMessage = "storage root is not a directory"
+		case errors.Is(err, os.ErrNotExist):
+			status.Health = "missing"
+			status.HealthMessage = "storage root path does not exist or NAS path is currently unavailable"
+		case errors.Is(err, os.ErrPermission):
+			status.Health = "unavailable"
+			status.HealthMessage = "storage root exists but is not readable by Cartolensia"
+		default:
+			status.Health = "unavailable"
+			status.HealthMessage = err.Error()
+		}
+		out = append(out, status)
+	}
+	return out
 }
 
 func (s *Server) handleStorageByName(w http.ResponseWriter, r *http.Request) {
@@ -1296,6 +1390,68 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Total-Count", strconv.Itoa(page.Page.Total))
 	writeJSON(w, http.StatusOK, page.Assets)
+}
+
+func assetIsPublic(asset catalog.Asset) bool {
+	for _, key := range []string{"public", "is_public", "visibility_public"} {
+		if value, ok := asset.Metadata[key].(bool); ok {
+			return value
+		}
+	}
+	if value, ok := asset.Metadata["visibility"].(string); ok {
+		return strings.EqualFold(value, "public")
+	}
+	return false
+}
+
+func (s *Server) handlePublicAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit := parsePositiveInt(r.URL.Query().Get("limit"), 60, 200)
+	offset := queryInt(r, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	page, err := s.deps.Store.QueryAssets(r.Context(), catalog.AssetQuery{
+		PublicOnly: true,
+		Limit:      limit,
+		Offset:     offset,
+		Sort:       firstNonEmpty(r.URL.Query().Get("sort"), "taken_at"),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(page.Page.Total))
+	writeJSON(w, http.StatusOK, page.Assets)
+}
+
+func (s *Server) handlePublicAssetByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	assetID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/public/assets/"), "/")
+	if assetID == "" || strings.Contains(assetID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	asset, err := s.deps.Store.GetAsset(r.Context(), assetID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !assetIsPublic(asset) {
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.assetDetail(r.Context(), asset))
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -2303,6 +2459,38 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "asset_id": asset.ID, "block_id": parts[2]})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "visibility" {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "public": assetIsPublic(asset)})
+			return
+		}
+		if r.Method != http.MethodPatch {
+			methodNotAllowed(w)
+			return
+		}
+		var payload struct {
+			Public *bool `json:"public"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if payload.Public == nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("public is required"))
+			return
+		}
+		if err := s.deps.Store.UpdateAssetMetadata(r.Context(), asset.ID, nil, map[string]any{"public": *payload.Public}); err != nil {
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		asset.Metadata["public"] = *payload.Public
+		writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "public": *payload.Public})
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -5595,6 +5783,7 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 		"locations":    asset.Locations,
 		"preview":      preview.InfoForAsset(s.deps.Config.Cache.Dir, asset),
 		"metadata":     asset.Metadata,
+		"visibility":   map[string]any{"public": assetIsPublic(asset)},
 		"timestamps":   map[string]any{"first_seen_at": asset.FirstSeenAt, "updated_at": asset.UpdatedAt},
 		"content":      map[string]any{"hash_status": "unhashed"},
 		"original_url": "",

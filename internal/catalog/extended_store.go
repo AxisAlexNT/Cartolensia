@@ -48,9 +48,11 @@ func (s *MemoryStore) QueryAssets(ctx context.Context, query AssetQuery) (AssetP
 
 func filterAssets(assets []Asset, query AssetQuery, store *MemoryStore) []Asset {
 	assets = SearchAssets(assets, query.Q)
-	if query.MediaKind == "" && query.HashStatus == "" && query.Storage == "" && query.Extension == "" &&
+	if query.MediaKind == "" && query.HashStatus == "" && query.Storage == "" && query.Extension == "" && len(query.Prefixes) == 0 &&
 		query.AlbumID == "" && query.GeoSource == "" && query.TakenFrom == nil && query.TakenTo == nil {
-		return assets
+		if !query.PublicOnly {
+			return assets
+		}
 	}
 	albumAssets := map[string]struct{}{}
 	if query.AlbumID != "" && store != nil {
@@ -60,6 +62,9 @@ func filterAssets(assets []Asset, query AssetQuery, store *MemoryStore) []Asset 
 	}
 	out := make([]Asset, 0, len(assets))
 	for _, asset := range assets {
+		if query.PublicOnly && !assetMetadataPublic(asset.Metadata) {
+			continue
+		}
 		if query.AlbumID != "" {
 			if _, ok := albumAssets[asset.ID]; !ok {
 				continue
@@ -84,8 +89,20 @@ func filterAssets(assets []Asset, query AssetQuery, store *MemoryStore) []Asset 
 	return out
 }
 
+func assetMetadataPublic(metadata map[string]any) bool {
+	for _, key := range []string{"public", "is_public", "visibility_public"} {
+		if value, ok := metadata[key].(bool); ok {
+			return value
+		}
+	}
+	if value, ok := metadata["visibility"].(string); ok {
+		return strings.EqualFold(value, "public")
+	}
+	return false
+}
+
 func assetLocationMatches(asset Asset, query AssetQuery) bool {
-	if query.MediaKind == "" && query.HashStatus == "" && query.Storage == "" && query.Extension == "" {
+	if query.MediaKind == "" && query.HashStatus == "" && query.Storage == "" && query.Extension == "" && len(query.Prefixes) == 0 {
 		return true
 	}
 	for _, loc := range asset.Locations {
@@ -98,10 +115,24 @@ func assetLocationMatches(asset Asset, query AssetQuery) bool {
 		if query.Storage != "" && loc.StorageName != query.Storage {
 			continue
 		}
+		if len(query.Prefixes) > 0 && !relativePathInAnyPrefix(loc.RelativePath, query.Prefixes) {
+			continue
+		}
 		if query.Extension != "" && strings.TrimPrefix(strings.ToLower(loc.Extension), ".") != strings.TrimPrefix(strings.ToLower(query.Extension), ".") {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+func relativePathInAnyPrefix(relativePath string, prefixes []string) bool {
+	relativePath = strings.Trim(strings.TrimSpace(relativePath), "/")
+	for _, prefix := range prefixes {
+		prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+		if prefix != "" && (relativePath == prefix || strings.HasPrefix(relativePath, prefix+"/")) {
+			return true
+		}
 	}
 	return false
 }

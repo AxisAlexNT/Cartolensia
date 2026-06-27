@@ -1002,7 +1002,26 @@ func TestLocalAuthEndpoints(t *testing.T) {
 	if _, _, err := authService.Bootstrap(context.Background(), "password"); err != nil {
 		t.Fatal(err)
 	}
-	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "public.txt"), []byte("public fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: root, Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := catalog.NewMemoryStore()
+	publicAsset, err := store.UpsertDiscoveredFile(context.Background(), storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/public.txt",
+		RelativePath: "public.txt",
+		Name:         "public.txt",
+		Extension:    "txt",
+		MIME:         "text/plain",
+		MediaKind:    "document",
+		SizeBytes:    int64(len("public fixture")),
+		MTime:        time.Now().UTC(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1013,7 +1032,7 @@ func TestLocalAuthEndpoints(t *testing.T) {
 		Config:        cfg,
 		Plugins:       plugins.BuiltIns(),
 		Registry:      registry,
-		Store:         catalog.NewMemoryStore(),
+		Store:         store,
 		StoreBackend:  "memory",
 		Authenticator: authService,
 		Authorizer:    authService,
@@ -1021,11 +1040,16 @@ func TestLocalAuthEndpoints(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected unauthenticated me, got %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"principal":null`) {
+		t.Fatalf("expected public auth status with null principal, got %d %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
-	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"email":"admin@example.local","password":"password"}`))
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected protected stats without login, got %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader("{\"email\":\" admin@example.local \",\"password\":\"password\\n\"}"))
 	srv.ServeHTTP(rec, login)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login status %d body %s", rec.Code, rec.Body.String())
@@ -1054,6 +1078,49 @@ func TestLocalAuthEndpoints(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &csrf); err != nil {
 		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	privateOriginal := httptest.NewRequest(http.MethodHead, "/api/v1/media/"+publicAsset.Asset.ID+"/original", nil)
+	srv.ServeHTTP(rec, privateOriginal)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected private media to require auth, got %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	publicToggle := httptest.NewRequest(http.MethodPatch, "/api/v1/assets/"+publicAsset.Asset.ID+"/visibility", strings.NewReader(`{"public":true}`))
+	publicToggle.AddCookie(cookies[0])
+	publicToggle.Header.Set(csrf.Header, csrf.Token)
+	srv.ServeHTTP(rec, publicToggle)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"public":true`) {
+		t.Fatalf("public toggle status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/public/assets?limit=10", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), publicAsset.Asset.ID) {
+		t.Fatalf("public list status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/public/assets/"+publicAsset.Asset.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"original_url"`) {
+		t.Fatalf("public detail status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	publicOriginal := httptest.NewRequest(http.MethodHead, "/api/v1/media/"+publicAsset.Asset.ID+"/original", nil)
+	srv.ServeHTTP(rec, publicOriginal)
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("public original status %d content-type %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	rec = httptest.NewRecorder()
+	privateToggle := httptest.NewRequest(http.MethodPatch, "/api/v1/assets/"+publicAsset.Asset.ID+"/visibility", strings.NewReader(`{"public":false}`))
+	privateToggle.AddCookie(cookies[0])
+	privateToggle.Header.Set(csrf.Header, csrf.Token)
+	srv.ServeHTTP(rec, privateToggle)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"public":false`) {
+		t.Fatalf("private toggle status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/api/v1/media/"+publicAsset.Asset.ID+"/original", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unmarked media to require auth again, got %d", rec.Code)
 	}
 	rec = httptest.NewRecorder()
 	protectedNoCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/start", nil)

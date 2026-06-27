@@ -184,8 +184,15 @@ read-only. A typical `/etc/fstab` entry looks like:
 must never be committed. Confirm the mount with `findmnt -T /originals` and a
 negative write test as the `cartolensia` user before indexing. Runtime writes
 belong under `/var/lib/cartolensia`; the bootstrap sets
-`CARTOLENSIA_COMPONENT_DIR=/var/lib/cartolensia/components` and keeps cache,
-exports, logs, and PostgreSQL data under `/var/lib/cartolensia`.
+`CARTOLENSIA_COMPONENT_DIR=/var/lib/cartolensia/components`,
+`CARTOLENSIA_MODEL_DIR=/var/lib/cartolensia/models`, and
+`CARTOLENSIA_AI_MODEL_DIR=/var/lib/cartolensia/models`. Optional Python
+packages installed after deployment should go under
+`/var/lib/cartolensia/ai-extra-site`, which the generated service environment
+adds to `PYTHONPATH`. This keeps mutable AI/runtime additions outside the
+immutable release directory while still allowing the Component Manager and AI
+sidecar to find them. Cache, exports, logs, and PostgreSQL data also stay under
+`/var/lib/cartolensia`.
 
 For NVIDIA AI/transcoding the host must provide the NVIDIA driver and, for
 containerized GPU use, NVIDIA Container Toolkit. For Ryzen/Radeon VAAPI

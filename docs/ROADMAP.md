@@ -267,6 +267,7 @@ Completed:
 - Search and Explorer counts are synchronized for MP4 extension queries; `mp4` and `ext:mp4` both report the full live set.
 - Search syntax now supports AND terms, comma OR groups, wildcards, explicit filename/path/extension/kind tokens, and in-page help.
 - Major asset-detail navigation links now preserve browser middle-click/new-tab behavior.
+- Storage/prefix-scoped metadata enrichment now uses paginated shared asset queries instead of flattening the full catalog first.
 
 Next:
 

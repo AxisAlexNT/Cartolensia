@@ -94,3 +94,72 @@ func TestTranscodePresetValidationAndNVENCArgs(t *testing.T) {
 		t.Fatalf("expected AV1 HLS disabled error, got %v", err)
 	}
 }
+
+func TestBuiltInTranscodingPresetsExposeGPUWhenAvailable(t *testing.T) {
+	caps := transcoding.Capabilities{
+		FFmpeg: transcoding.ToolInfo{Available: true},
+		Hardware: transcoding.HardwareHints{
+			NvidiaSMI: true,
+			VAAPI:     true,
+			DevDRI:    true,
+		},
+		Encoders: []transcoding.Encoder{
+			{Name: "libx264"},
+			{Name: "libsvtav1"},
+			{Name: "h264_nvenc"},
+			{Name: "h264_vaapi"},
+			{Name: "av1_nvenc"},
+			{Name: "av1_vaapi"},
+		},
+	}
+	presets := builtInTranscodingPresets(caps)
+	byID := map[string]catalog.TranscodingPreset{}
+	for _, preset := range presets {
+		byID[preset.ID] = preset
+	}
+	for _, id := range []string{"h264_nvenc_720p_lan", "h264_vaapi_720p_lan", "av1_nvenc_low_bitrate", "av1_vaapi_low_bitrate"} {
+		if !byID[id].Available {
+			t.Fatalf("expected %s to be available in %#v", id, byID[id])
+		}
+	}
+}
+
+func TestVAAPITranscodeArgsIncludeDeviceAndUploadFilter(t *testing.T) {
+	t.Setenv("CARTOLENSIA_VAAPI_DEVICE", "/dev/dri/renderD128")
+	preset := catalog.TranscodingPreset{
+		ID:             "vaapi-test",
+		Name:           "VAAPI test",
+		Hardware:       "vaapi",
+		Codec:          "h264",
+		FFmpegEncoder:  "h264_vaapi",
+		Mode:           "quantizer",
+		ParameterValue: "24",
+		Container:      "hls",
+	}
+	args, err := hlsArgsForPreset(preset, "/tmp/input.mp4", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-vaapi_device", "/dev/dri/renderD128", "h264_vaapi", "format=nv12,hwupload"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in args %q", want, joined)
+		}
+	}
+	if strings.Contains(joined, "-pix_fmt yuv420p") {
+		t.Fatalf("VAAPI command should not force software pix_fmt: %s", joined)
+	}
+	dryRunArgs, err := ffmpegDryRunArgs(preset, "/tmp/input.mp4", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinedDryRun := strings.Join(dryRunArgs, " ")
+	for _, want := range []string{"-vaapi_device", "/dev/dri/renderD128", "h264_vaapi", "format=nv12,hwupload"} {
+		if !strings.Contains(joinedDryRun, want) {
+			t.Fatalf("expected %q in dry-run args %q", want, joinedDryRun)
+		}
+	}
+	if strings.Contains(joinedDryRun, "-pix_fmt yuv420p") {
+		t.Fatalf("VAAPI dry-run command should not force software pix_fmt: %s", joinedDryRun)
+	}
+}

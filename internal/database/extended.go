@@ -103,6 +103,23 @@ func assetQueryWhere(query catalog.AssetQuery) (string, []any) {
 	if query.Storage != "" {
 		add("s.name=$%d", query.Storage)
 	}
+	if len(query.Prefixes) > 0 {
+		var prefixClauses []string
+		for _, prefix := range query.Prefixes {
+			prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+			if prefix == "" {
+				continue
+			}
+			args = append(args, prefix)
+			exactIdx := len(args)
+			args = append(args, prefix+"/%")
+			childIdx := len(args)
+			prefixClauses = append(prefixClauses, fmt.Sprintf("(trim(both '/' from coalesce(l.relative_path, '')) = $%d or trim(both '/' from coalesce(l.relative_path, '')) like $%d)", exactIdx, childIdx))
+		}
+		if len(prefixClauses) > 0 {
+			clauses = append(clauses, "("+strings.Join(prefixClauses, " or ")+")")
+		}
+	}
 	if query.Extension != "" {
 		add("lower(trim(leading '.' from l.extension))=$%d", strings.TrimPrefix(strings.ToLower(query.Extension), "."))
 	}
@@ -117,6 +134,9 @@ func assetQueryWhere(query catalog.AssetQuery) (string, []any) {
 	}
 	if query.GeoSource != "" {
 		add("g.source=$%d", query.GeoSource)
+	}
+	if query.PublicOnly {
+		clauses = append(clauses, `(a.metadata_json @> '{"public": true}'::jsonb or a.metadata_json @> '{"is_public": true}'::jsonb or a.metadata_json @> '{"visibility_public": true}'::jsonb or lower(coalesce(a.metadata_json->>'visibility', '')) = 'public')`)
 	}
 	return strings.Join(clauses, " and "), args
 }

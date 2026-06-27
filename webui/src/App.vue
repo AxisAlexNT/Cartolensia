@@ -230,6 +230,7 @@ const duplicatePage = ref<DuplicatePage | null>(null);
 const backendMonthBuckets = ref<MonthBucket[]>([]);
 const backend = ref<BackendStatus | null>(null);
 const principal = ref<Principal | null>(null);
+const publicAssets = ref<Asset[]>([]);
 const loginEmail = ref("");
 const loginPassword = ref("");
 const oldPassword = ref("");
@@ -612,7 +613,7 @@ window.addEventListener("popstate", () => {
   active.value = page;
   const assetID = new URLSearchParams(window.location.search).get("asset_id");
   if (page === "Asset Detail" && assetID) {
-    void openAsset(assetID);
+    void (principal.value ? openAsset(assetID) : openPublicAsset(assetID));
   }
 });
 
@@ -1873,6 +1874,83 @@ function assetHasGeo(asset: AssetDetail["asset"]): boolean {
   return typeof metadata.lat === "number" && typeof metadata.lon === "number";
 }
 
+function assetPrimaryExtension(asset?: Asset | null): string {
+  const locationExt = asArray(asset?.locations).find((location) => location.extension)?.extension;
+  const fileExt = asset?.display_name?.split(".").pop();
+  return String(locationExt || fileExt || "").trim().toLowerCase().replace(/^\./, "");
+}
+
+function assetDocumentText(detail: AssetDetail | null | undefined): string {
+  return detail?.document?.markdown || detail?.document?.text || "";
+}
+
+function isPDFDocument(detail: AssetDetail | null | undefined): boolean {
+  return assetPrimaryExtension(detail?.asset) === "pdf";
+}
+
+function isMarkdownDocument(detail: AssetDetail | null | undefined): boolean {
+  const extension = assetPrimaryExtension(detail?.asset);
+  return extension === "md" || extension === "markdown" || Boolean(detail?.document?.markdown);
+}
+
+function isTextDocument(detail: AssetDetail | null | undefined): boolean {
+  const extension = assetPrimaryExtension(detail?.asset);
+  return extension === "txt" || isMarkdownDocument(detail);
+}
+
+type MarkdownPreviewBlock = {
+  kind: "heading" | "list" | "code" | "quote" | "paragraph" | "blank";
+  text: string;
+  level?: number;
+};
+
+function markdownPreviewBlocks(text: string): MarkdownPreviewBlock[] {
+  const blocks: MarkdownPreviewBlock[] = [];
+  let inCode = false;
+  let codeBuffer: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim().startsWith("```")) {
+      if (inCode) {
+        blocks.push({ kind: "code", text: codeBuffer.join("\n") });
+        codeBuffer = [];
+      }
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) {
+      codeBuffer.push(line);
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!trimmed) {
+      blocks.push({ kind: "blank", text: "" });
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      blocks.push({ kind: "heading", text: heading[2], level: heading[1].length });
+      continue;
+    }
+    if (/^[-*+]\s+/.test(trimmed)) {
+      blocks.push({ kind: "list", text: trimmed.replace(/^[-*+]\s+/, "") });
+      continue;
+    }
+    if (/^\d+[.)]\s+/.test(trimmed)) {
+      blocks.push({ kind: "list", text: trimmed.replace(/^\d+[.)]\s+/, "") });
+      continue;
+    }
+    if (trimmed.startsWith(">")) {
+      blocks.push({ kind: "quote", text: trimmed.replace(/^>\s?/, "") });
+      continue;
+    }
+    blocks.push({ kind: "paragraph", text: line });
+  }
+  if (inCode || codeBuffer.length > 0) {
+    blocks.push({ kind: "code", text: codeBuffer.join("\n") });
+  }
+  return blocks.slice(0, 240);
+}
+
 function videoSource(assetId: string, originalUrl?: string): string {
   if (transcodeSession.value?.asset_id === assetId && transcodeSession.value.playlist_url && !transcodeSession.value.playlist_url.endsWith(".m3u8")) {
     return transcodeSession.value.playlist_url;
@@ -2227,6 +2305,32 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function unauthenticatedBackend(auth: BackendStatus["auth"]): BackendStatus {
+  const emptyStats: Stats = {
+    assets: 0,
+    locations: 0,
+    photos: 0,
+    videos: 0,
+    tracks: 0,
+    unhashed: 0,
+    hashed: 0,
+    duplicate_groups: 0,
+    duplicate_locations: 0,
+    total_bytes: 0
+  };
+  return {
+    store_backend: "locked",
+    plugins: 0,
+    capabilities: [],
+    stats: emptyStats,
+    preview_cache: "",
+    auth_mode: auth.mode || "local",
+    auth,
+    http: undefined,
+    tools: {}
+  };
+}
+
 async function waitForJob(id: string, maxPolls = 120): Promise<Job> {
   let current = await api.job(id);
   for (let i = 0; i < maxPolls && !terminalJobStatus(current.status); i++) {
@@ -2240,7 +2344,14 @@ async function refresh() {
   loading.value = true;
   error.value = "";
   try {
-    await refreshAuth();
+    const authState = await refreshAuth();
+    if (!authState?.principal && (authState?.auth.mode ?? "local") === "local") {
+      backend.value = unauthenticatedBackend(authState?.auth ?? { mode: "local" });
+      publicAssets.value = await api.publicAssets("limit=80").catch(() => []);
+      loading.value = false;
+      return;
+    }
+    publicAssets.value = [];
     const [
       explorerRows,
       jobRows,
@@ -2409,15 +2520,17 @@ async function refreshAuth() {
   try {
     const result = await api.me();
     principal.value = result.principal;
+    return result;
   } catch {
     principal.value = null;
+    return null;
   }
 }
 
 async function login() {
   error.value = "";
   try {
-    const result = await api.login(loginEmail.value, loginPassword.value);
+    const result = await api.login(loginEmail.value.trim(), loginPassword.value.replace(/[\r\n]+$/g, ""));
     principal.value = result.principal;
     loginPassword.value = "";
     await refresh();
@@ -3843,6 +3956,41 @@ async function openAsset(id: string, options: { seekMs?: number | null } = {}) {
   }
 }
 
+async function openPublicAsset(id: string, options: { seekMs?: number | null } = {}) {
+  loading.value = true;
+  error.value = "";
+  try {
+    assetDetailSeekMs.value = options.seekMs ?? null;
+    assetDetail.value = await api.publicAsset(id);
+    assetRelated.value = null;
+    assetAIActionStatus.value = {};
+    streamOptions.value = null;
+    setActive("Asset Detail", false);
+    const url = new URL(window.location.href);
+    url.searchParams.set("page", "asset-detail");
+    url.searchParams.set("asset_id", id);
+    window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    await nextTick();
+    await applyAssetDetailSeek();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function setAssetPublic(value: boolean) {
+  if (!assetDetail.value || !principal.value) return;
+  const assetID = assetDetail.value.asset.id;
+  const result = await api.setAssetVisibility(assetID, { public: value });
+  assetDetail.value = await api.asset(assetID);
+  if (result.public) {
+    error.value = "Asset is now visible in the anonymous public gallery.";
+  } else {
+    error.value = "Asset is no longer public.";
+  }
+}
+
 async function openAssetOCR(assetID: string, blockID: string) {
   await openAsset(assetID);
   if (blockID) {
@@ -4536,7 +4684,11 @@ onMounted(async () => {
   await refresh();
   const assetID = new URLSearchParams(window.location.search).get("asset_id");
   if (active.value === "Asset Detail" && assetID) {
-    await openAsset(assetID);
+    if (principal.value) {
+      await openAsset(assetID);
+    } else {
+      await openPublicAsset(assetID);
+    }
   }
   await nextTick();
   renderOpenLayers();
@@ -4564,6 +4716,7 @@ onBeforeUnmount(() => {
         <input v-model="loginEmail" type="email" autocomplete="username" placeholder="Email" />
         <input v-model="loginPassword" type="password" autocomplete="current-password" placeholder="Password" />
         <button type="submit">Login</button>
+        <small class="muted">Use the configured admin email and the password file value. Trailing pasted newlines are ignored.</small>
       </form>
       <div v-else-if="principal" class="userbox">
         <span>{{ principal.email ?? principal.name }}</span>
@@ -4591,7 +4744,40 @@ onBeforeUnmount(() => {
         <div v-if="backend?.auth?.warning" class="alert">{{ backend.auth.warning }}</div>
         <div v-if="loading" class="muted">Loading...</div>
 
-        <section v-if="active === 'Explorer'" class="panel">
+        <section v-if="backend?.auth_mode === 'local' && !principal && active !== 'Asset Detail'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Public Gallery</h2>
+              <p class="muted">Only assets explicitly marked Public by an administrator are visible before login.</p>
+            </div>
+          </header>
+          <div v-if="publicAssets.length > 0" class="asset-grid">
+            <article v-for="asset in publicAssets" :key="asset.id" class="asset-card">
+              <div class="thumb">
+                <img
+                  v-if="asset.media_kind === 'photo'"
+                  :src="`/api/v1/media/${asset.id}/preview`"
+                  alt=""
+                  loading="lazy"
+                />
+                <div v-else class="media-kind-preview">
+                  <i :class="['bi', asset.media_kind === 'video' ? 'bi-film' : asset.media_kind === 'audio' ? 'bi-soundwave' : asset.media_kind === 'document' ? 'bi-file-earmark-text' : 'bi-file-earmark']" aria-hidden="true"></i>
+                  <span>{{ asset.media_kind }}</span>
+                </div>
+              </div>
+              <strong>{{ asset.display_name }}</strong>
+              <span>{{ asset.media_kind }}</span>
+              <button type="button" @click="openPublicAsset(asset.id)">Open public detail</button>
+            </article>
+          </div>
+          <div v-else class="empty-state compact-empty">
+            <i class="bi bi-lock" aria-hidden="true"></i>
+            <strong>No public assets are available.</strong>
+            <span>Log in as an administrator to browse the private archive or mark selected assets as Public.</span>
+          </div>
+        </section>
+
+        <section v-else-if="active === 'Explorer'" class="panel">
           <header class="panel-head">
             <h2>Explorer</h2>
             <div class="actions">
@@ -5177,10 +5363,62 @@ onBeforeUnmount(() => {
               <p class="muted">Audio analysis and transcript actions store metadata in Cartolensia only; originals stay read-only.</p>
             </div>
             <div v-else-if="assetDetail.asset.media_kind === 'document'" class="document-panel">
-              <div class="empty-state compact-empty">
+              <div class="document-panel-head">
+                <div>
+                  <strong>{{ assetDetail.document?.title || assetDetail.asset.display_name }}</strong>
+                  <span>{{ assetPrimaryExtension(assetDetail.asset).toUpperCase() || "DOCUMENT" }}</span>
+                </div>
+                <div class="inline-actions">
+                  <a v-if="assetDetail.original_url" class="btn btn-sm btn-outline-secondary" :href="assetDetail.original_url" target="_blank" rel="noreferrer">
+                    <i class="bi bi-box-arrow-up-right" aria-hidden="true"></i>
+                    Open original
+                  </a>
+                  <button
+                    v-if="assetDocumentText(assetDetail)"
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    @click="copyText(assetDocumentText(assetDetail))"
+                  >
+                    <i class="bi bi-clipboard" aria-hidden="true"></i>
+                    Copy text
+                  </button>
+                  <button
+                    v-if="assetDocumentText(assetDetail)"
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    @click="downloadTextFile(`${assetDetail.asset.display_name}.txt`, assetDocumentText(assetDetail))"
+                  >
+                    <i class="bi bi-download" aria-hidden="true"></i>
+                    Download text
+                  </button>
+                </div>
+              </div>
+
+              <iframe
+                v-if="isPDFDocument(assetDetail) && assetDetail.original_url"
+                class="document-frame"
+                :src="assetDetail.original_url"
+                :title="`PDF preview for ${assetDetail.asset.display_name}`"
+              ></iframe>
+
+              <div v-else-if="isMarkdownDocument(assetDetail) && assetDocumentText(assetDetail)" class="document-preview markdown-preview">
+                <template v-for="(block, index) in markdownPreviewBlocks(assetDocumentText(assetDetail))" :key="`${index}-${block.kind}`">
+                  <h3 v-if="block.kind === 'heading' && (block.level ?? 1) <= 2">{{ block.text }}</h3>
+                  <h4 v-else-if="block.kind === 'heading'">{{ block.text }}</h4>
+                  <li v-else-if="block.kind === 'list'">{{ block.text }}</li>
+                  <pre v-else-if="block.kind === 'code'"><code>{{ block.text }}</code></pre>
+                  <blockquote v-else-if="block.kind === 'quote'">{{ block.text }}</blockquote>
+                  <br v-else-if="block.kind === 'blank'" />
+                  <p v-else>{{ block.text }}</p>
+                </template>
+              </div>
+
+              <pre v-else-if="isTextDocument(assetDetail) && assetDocumentText(assetDetail)" class="document-preview text-document-preview">{{ assetDocumentText(assetDetail) }}</pre>
+
+              <div v-else class="empty-state compact-empty">
                 <i class="bi bi-file-earmark-text" aria-hidden="true"></i>
-                <strong>Document metadata</strong>
-                <span>Document OCR/Markdown extraction is available as an explicit metadata job when the component is installed.</span>
+                <strong>Document preview unavailable</strong>
+                <span>Run document extraction/OCR when the Marker, PyMuPDF, or Tesseract component is available. Cartolensia stores extracted text in PostgreSQL/cache only.</span>
               </div>
             </div>
             <div v-else-if="assetDetail.asset.media_kind === 'track'" class="track-detail-preview">
@@ -5210,6 +5448,19 @@ onBeforeUnmount(() => {
             <article>
               <strong>Original</strong>
               <a v-if="assetDetail.original_url" :href="assetDetail.original_url" target="_blank" rel="noreferrer">Open</a>
+            </article>
+            <article>
+              <strong>Public</strong>
+              <label v-if="principal" class="form-check form-switch wide-switch">
+                <input
+                  class="form-check-input"
+                  type="checkbox"
+                  :checked="Boolean(assetDetail.visibility?.public || assetDetail.asset.metadata?.public)"
+                  @change="setAssetPublic(($event.target as HTMLInputElement).checked)"
+                />
+                <span>Visible before login</span>
+              </label>
+              <span v-else>{{ assetDetail.visibility?.public || assetDetail.asset.metadata?.public ? "public" : "private" }}</span>
             </article>
           </div>
           <section v-if="assetDetail && assetRelated" class="settings-form settings-wide related-context-panel">
@@ -5548,12 +5799,16 @@ onBeforeUnmount(() => {
         <section v-else-if="active === 'Storages'" class="panel">
           <header class="panel-head"><h2>Storages</h2></header>
           <table>
-            <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Root</th></tr></thead>
+            <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Health</th><th>Root</th></tr></thead>
             <tbody>
               <tr v-for="storage in storages" :key="storage.name">
                 <td>{{ storage.name }}</td>
                 <td>{{ storage.kind }}</td>
                 <td>{{ storage.mode }}</td>
+                <td>
+                  <span :class="['status-badge', storage.health === 'available' ? 'ok' : 'warn']">{{ storage.health || 'unknown' }}</span>
+                  <small v-if="storage.health_message" class="muted d-block">{{ storage.health_message }}</small>
+                </td>
                 <td>{{ storage.root }}</td>
               </tr>
             </tbody>
@@ -7398,12 +7653,16 @@ onBeforeUnmount(() => {
               <h3>Configured Storages</h3>
               <div v-if="storageMessage" class="alert"><pre>{{ storageMessage }}</pre></div>
               <table>
-                <thead><tr><th>Name</th><th>Root</th><th>Mode</th><th>Action</th></tr></thead>
+                <thead><tr><th>Name</th><th>Root</th><th>Mode</th><th>Health</th><th>Action</th></tr></thead>
                 <tbody>
                   <tr v-for="storage in storages" :key="storage.name">
                     <td>{{ storage.name }}</td>
                     <td>{{ storage.root }}</td>
                     <td>{{ storage.mode }}</td>
+                    <td>
+                      <span :class="['status-badge', storage.health === 'available' ? 'ok' : 'warn']">{{ storage.health || 'unknown' }}</span>
+                      <small v-if="storage.health_message" class="muted d-block">{{ storage.health_message }}</small>
+                    </td>
                     <td><button type="button" @click="validateExistingStorage(storage.name)">Validate</button></td>
                   </tr>
                 </tbody>

@@ -3237,3 +3237,145 @@ Safety confirmation:
 - no missing marking
 - no commit
 - no push
+
+## 2026-06-27 Remote Auth, Storage Health, GPU, And Indexing Follow-Up
+
+Implemented locally and partially deployed to the boot-managed production host:
+
+- Hardened local-auth behavior so unauthenticated API/media-original access is blocked while health/version and login/session bootstrap endpoints remain public.
+- Changed `/api/v1/auth/me` to return a 200 response with `principal: null` for anonymous sessions, letting the WebUI render the login screen without treating the locked state as a backend outage.
+- Login now trims surrounding email whitespace and trailing CR/LF from the submitted password only, so pasting the generated admin password file into the WebUI works even when the copied line includes a final newline.
+- Added WebUI login helper text documenting the generated admin password flow.
+- Added storage health fields to `/api/v1/storages` and surfaced `available`/`missing`/`error` states in Storages and Settings. Missing optional NAS roots are diagnostic only and do not delete metadata.
+- Added GPU-oriented transcode presets for NVIDIA NVENC and VAAPI, including H.264 LAN presets and low-bitrate AV1 presets.
+- Added VAAPI argument handling and render-node selection that prefers configured devices first, then AMD/Intel DRI render nodes over NVIDIA render nodes for VAAPI.
+- Updated Component Manager checks to respect production model/component/Python package directories outside the immutable release tree.
+- Updated remote bootstrap service env so mutable components, models, and extra Python packages live under `/var/lib/cartolensia`.
+- Added asset-detail document previews:
+  - PDF assets render through the browser PDF viewer using the authenticated original URL.
+  - Markdown assets render through a small safe text renderer, not raw HTML.
+  - plain-text assets render as scrollable text.
+  - extracted document/OCR text can be copied or downloaded by the browser.
+- Added metadata-backed public sharing:
+  - administrators can mark/unmark an asset Public from Asset Detail;
+  - anonymous users see only the Public Gallery and login controls;
+  - anonymous media access is allowed only for explicitly public assets;
+  - unmarked assets still require authentication for API and original media access.
+
+Remote validation:
+
+- Production services were active: PostgreSQL, AI sidecar, and main Cartolensia service.
+- Anonymous `/api/v1/stats` and original-media routes returned `401`, while anonymous `/api/v1/auth/me` returned `principal: null`.
+- Admin login succeeded using the configured admin email and the password file value.
+- The read-only originals mount and secondary read-only NAS mount were present; no write probes were performed during this follow-up.
+- Configured optional storages reported health as available or missing. Missing optional roots remained visible as missing without metadata deletion.
+- NVIDIA H.264 dry-run succeeded against a read-only original video.
+- NVIDIA AV1 dry-run succeeded on the host GPU.
+- VAAPI H.264 dry-run succeeded after the renderer selector chose the AMD/DRI render node instead of the NVIDIA render node.
+- The AI sidecar reported CUDA-capable PyTorch packages, Tesseract OCR with English/Russian/Armenian/Chinese data, faster-whisper/CTranslate2 availability, and audio-analysis Python packages.
+- A synthetic ASR request loaded the small faster-whisper model from `/var/lib/cartolensia/models` and returned a successful empty transcript for a tone fixture.
+- Discovery for the primary large originals storage was still running at the latest check with zero scan errors. Current observed counters were approximately:
+  - 52,724 total assets indexed so far;
+  - 47,310 photos;
+  - 3,295 videos;
+  - 768 audio files;
+  - 1,070 GPS/KML/KMZ/GPX tracks;
+  - 281 documents;
+  - about 1.67 TB of indexed locations.
+- Queued the next safe metadata extraction stage behind the active discovery job:
+  `metadata_enrich` job `1139f550-fabf-4610-8380-5b174f69c0ca`, scoped to storage `originals`, explicit top-level prefixes, all supported media/document kinds, and `max_files=-1`.
+
+Tests run:
+
+- `gofmt -w internal/server/components.go internal/server/server.go internal/server/server_test.go internal/server/transcode_sessions.go internal/server/transcode_sessions_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- focused `TestLocalAuthEndpoints` coverage for public/unpublic asset media access
+- targeted remote authenticated API checks for jobs, stats, storages, and auth behavior
+- targeted remote ffmpeg dry-runs for NVIDIA H.264, NVIDIA AV1, and VAAPI H.264
+- synthetic remote ASR sidecar request
+
+Known limitations:
+
+- The running discovery job should not be interrupted unless necessary; deployment of the latest document-preview UI can wait until that job completes or can be followed by a safe requeue if the lease expires.
+- Image model weights for full classification/captioning/embedding may still need Component Manager import/check on the remote host before those jobs are treated as fully operational.
+- Public sharing is intentionally per-asset metadata only. There is no multi-user ACL, public album management, or expiring share-link model yet.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-27 Metadata Scalability And Remote Status Follow-Up
+
+Implemented locally:
+
+- Added prefix filtering to the shared PostgreSQL `QueryAssets` path so storage/prefix-scoped jobs can use the same bounded query service as Explorer/Search instead of listing all assets and filtering in application memory.
+- Refactored metadata enrichment:
+  - selected `asset_ids` are resolved directly with `GetAsset`;
+  - normal storage/prefix jobs page through `QueryAssets` in batches of 500;
+  - storage/prefix/media-kind scoped jobs enrich from the matching asset location, not an arbitrary first location;
+  - cancellation checks remain between pages and assets;
+  - skipped rows are counted in job counters.
+- Added regression coverage for prefix-scoped metadata enrichment so only matching-prefix documents are updated.
+
+Remote status observed after local verification:
+
+- Production services were active.
+- Anonymous `/api/v1/auth/me` returned `principal: null`; authenticated status checks succeeded with the remote password file.
+- Current remote stats at the latest poll:
+  - `65,280` assets;
+  - `58,893` photos;
+  - `4,181` videos;
+  - `793` audio files;
+  - `1,107` tracks;
+  - `306` documents;
+  - about `2.33 TB` indexed.
+- Discovery is still running and should not be interrupted:
+  - job `9b52a892-02b8-4e21-ab11-e6852244ab43`;
+  - progress `65,250` scanned;
+  - created `28,315`, updated `36,935`;
+  - errors `0`;
+  - folders scanned `126`.
+- The metadata job is also running:
+  - job `1139f550-fabf-4610-8380-5b174f69c0ca`;
+  - kind `metadata_enrich`;
+  - progress `12,529 / 37,695`;
+  - errors `0`.
+- Optional storage health remained metadata-preserving:
+  - main originals and two optional NAS roots available;
+  - two optional sub-roots reported missing because the NAS paths were not present;
+  - no metadata deletion or missing-file marking was performed.
+
+Deployment note:
+
+- The latest local metadata pagination fix was not deployed during the active remote discovery/metadata jobs. Restarting the service would risk interrupting productive long-running jobs. Deploy after discovery and metadata complete or deliberately requeue with the new paginated runner.
+
+Tests run:
+
+- `gofmt -w internal/catalog/catalog.go internal/catalog/extended_store.go internal/database/extended.go internal/metadata/metadata.go internal/metadata/metadata_test.go internal/server/server.go internal/server/server_test.go internal/server/transcode_sessions.go internal/server/transcode_sessions_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `git diff --check`
+- `go test ./...`
+- `npm --prefix webui run build`
+- authenticated remote read-only checks for stats, jobs, storages, components, and auth bootstrap.
+
+Known limitations:
+
+- The active remote discovery and metadata jobs are running the currently deployed implementation. The paginated metadata runner is verified locally and should be included in the next deploy/restart after those jobs complete.
+- Full image AI model components still report missing on the remote until reviewed model caches are imported or installed through Component Manager.
+- PyMuPDF/Marker document extraction remains optional and missing on the remote; browser PDF preview and metadata-only document handling work independently.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push

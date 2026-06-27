@@ -3,6 +3,9 @@ export type StorageConfig = {
   kind: string;
   root: string;
   mode: string;
+  health?: string;
+  health_message?: string;
+  last_checked_at?: string;
 };
 
 export type PluginManifest = {
@@ -159,7 +162,7 @@ export type Principal = {
 };
 
 export type AuthMe = {
-  principal: Principal;
+  principal: Principal | null;
   auth: AuthStatus;
 };
 
@@ -197,6 +200,7 @@ export type AssetDetail = {
   preview_url?: string;
   preview: PreviewInfo;
   content: Record<string, unknown>;
+  visibility?: { public?: boolean };
   timestamps: Record<string, string>;
   metadata: Record<string, unknown>;
   ai_tags?: Record<string, unknown>[];
@@ -953,6 +957,8 @@ export const api = {
   explorer: async (query = "") => asArray(await request<ExplorerRow[] | null>(`/api/v1/explorer${query ? `?${query}` : ""}`)),
   assets: async (query = "") =>
     asArray(await request<Asset[] | null>(`/api/v1/assets${query ? `?${query}` : ""}`)).map(normalizeAsset),
+  publicAssets: async (query = "") =>
+    asArray(await request<Asset[] | null>(`/api/v1/public/assets${query ? `?${query}` : ""}`)).map(normalizeAsset),
   explorerFolders: (path = "", query = "") => {
     const params = new URLSearchParams(query);
     params.set("view", "folders");
@@ -970,6 +976,21 @@ export const api = {
       timestamps: detail.timestamps ?? {},
       metadata: detail.metadata ?? {}
     })),
+  publicAsset: (id: string) =>
+    request<AssetDetail>(`/api/v1/public/assets/${encodeURIComponent(id)}`).then((detail) => ({
+      ...detail,
+      asset: normalizeAsset(detail.asset),
+      locations: asArray(detail.locations),
+      preview: detail.preview ?? { status: "not_implemented" },
+      content: detail.content ?? {},
+      timestamps: detail.timestamps ?? {},
+      metadata: detail.metadata ?? {}
+    })),
+  setAssetVisibility: (id: string, payload: { public: boolean }) =>
+    request<{ asset_id: string; public: boolean }>(`/api/v1/assets/${encodeURIComponent(id)}/visibility`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
   assetRelated: (id: string) =>
     request<AssetRelated>(`/api/v1/assets/${encodeURIComponent(id)}/related`).then((payload) => ({
       ...payload,

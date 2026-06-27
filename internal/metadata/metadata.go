@@ -81,10 +81,31 @@ func (r Runner) Enrich(ctx context.Context, job *jobs.Job) error {
 	if err := r.updateJob(ctx, *job); err != nil {
 		return err
 	}
-	assets, err := r.Store.ListAssets(ctx)
-	if err != nil {
-		_ = r.failJob(ctx, *job, err)
+	if len(payload.AssetIDs) > 0 {
+		if err := r.enrichSelectedAssets(ctx, job, payload); err != nil {
+			return err
+		}
+	} else if err := r.enrichQueriedAssets(ctx, job, payload); err != nil {
 		return err
+	}
+	jobs.AddLog(job, "info", "metadata enrichment completed")
+	return r.completeJob(ctx, *job)
+}
+
+func (r Runner) enrichSelectedAssets(ctx context.Context, job *jobs.Job, payload Payload) error {
+	assets := make([]catalog.Asset, 0, len(payload.AssetIDs))
+	for _, assetID := range payload.AssetIDs {
+		assetID = strings.TrimSpace(assetID)
+		if assetID == "" {
+			continue
+		}
+		asset, err := r.Store.GetAsset(ctx, assetID)
+		if err != nil {
+			job.Counters.Errors++
+			jobs.AddLog(job, "warn", fmt.Sprintf("%s: metadata target unavailable: %v", assetID, err))
+			continue
+		}
+		assets = append(assets, asset)
 	}
 	targets := selectTargets(assets, payload)
 	total := int64(len(targets))
@@ -93,22 +114,89 @@ func (r Runner) Enrich(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 	for _, asset := range targets {
-		if err := r.checkCanceled(ctx, job); err != nil {
-			return err
-		}
-		if err := r.enrichAsset(ctx, asset); err != nil {
-			job.Counters.Errors++
-			jobs.AddLog(job, "warn", fmt.Sprintf("%s: metadata skipped: %v", asset.DisplayName, err))
-		} else {
-			job.Counters.Updated++
-		}
-		job.ProgressCurrent++
-		if err := r.updateJob(ctx, *job); err != nil {
+		if err := r.processAsset(ctx, job, asset); err != nil {
 			return err
 		}
 	}
-	jobs.AddLog(job, "info", "metadata enrichment completed")
-	return r.completeJob(ctx, *job)
+	return nil
+}
+
+func (r Runner) enrichQueriedAssets(ctx context.Context, job *jobs.Job, payload Payload) error {
+	const pageSize = 500
+	query := catalog.AssetQuery{
+		Storage:   payload.Storage,
+		Prefixes:  payload.Prefixes,
+		MediaKind: payload.MediaKind,
+		Limit:     pageSize,
+		Sort:      "name",
+	}
+	processedTargets := 0
+	for {
+		if payload.MaxFiles > 0 && processedTargets >= payload.MaxFiles {
+			return nil
+		}
+		if err := r.checkCanceled(ctx, job); err != nil {
+			return err
+		}
+		query.Offset = int(job.Counters.Scanned)
+		page, err := r.Store.QueryAssets(ctx, query)
+		if err != nil {
+			_ = r.failJob(ctx, *job, err)
+			return err
+		}
+		total := int64(page.Page.Total)
+		if payload.MaxFiles > 0 && int64(payload.MaxFiles) < total {
+			total = int64(payload.MaxFiles)
+		}
+		if job.ProgressTotal == nil || *job.ProgressTotal != total {
+			job.ProgressTotal = &total
+			if err := r.updateJob(ctx, *job); err != nil {
+				return err
+			}
+		}
+		if len(page.Assets) == 0 {
+			return nil
+		}
+		for _, asset := range page.Assets {
+			job.Counters.Scanned++
+			if payload.MaxFiles > 0 && processedTargets >= payload.MaxFiles {
+				if err := r.updateJob(ctx, *job); err != nil {
+					return err
+				}
+				return nil
+			}
+			scoped, ok := scopedAsset(asset, payload)
+			if !ok || shouldSkipAsset(scoped, payload) {
+				job.Counters.FilesSkipped++
+				job.ProgressCurrent++
+				if err := r.updateJob(ctx, *job); err != nil {
+					return err
+				}
+				continue
+			}
+			processedTargets++
+			if err := r.processAsset(ctx, job, scoped); err != nil {
+				return err
+			}
+		}
+		if page.Page.Offset+len(page.Assets) >= page.Page.Total {
+			return nil
+		}
+	}
+}
+
+func (r Runner) processAsset(ctx context.Context, job *jobs.Job, asset catalog.Asset) error {
+	if err := r.checkCanceled(ctx, job); err != nil {
+		return err
+	}
+	if err := r.enrichAsset(ctx, asset); err != nil {
+		job.Counters.Errors++
+		jobs.AddLog(job, "warn", fmt.Sprintf("%s: metadata skipped: %v", asset.DisplayName, err))
+	} else {
+		job.Counters.Updated++
+	}
+	job.ProgressCurrent++
+	return r.updateJob(ctx, *job)
 }
 
 func selectTargets(assets []catalog.Asset, payload Payload) []catalog.Asset {
@@ -118,48 +206,75 @@ func selectTargets(assets []catalog.Asset, payload Payload) []catalog.Asset {
 	}
 	var out []catalog.Asset
 	for _, asset := range assets {
-		loc, ok := catalog.FirstLocation(asset)
-		if !ok {
-			continue
-		}
 		if len(ids) > 0 {
 			if _, ok := ids[asset.ID]; !ok {
 				continue
 			}
 		}
+		scoped, ok := scopedAsset(asset, payload)
+		if !ok || shouldSkipAsset(scoped, payload) {
+			continue
+		}
+		out = append(out, scoped)
+		if payload.MaxFiles > 0 && len(out) >= payload.MaxFiles {
+			break
+		}
+	}
+	return out
+}
+
+func scopedAsset(asset catalog.Asset, payload Payload) (catalog.Asset, bool) {
+	loc, ok := scopedLocation(asset, payload)
+	if !ok {
+		return catalog.Asset{}, false
+	}
+	asset.Locations = []catalog.Location{loc}
+	if asset.MediaKind == "" {
+		asset.MediaKind = loc.MediaKind
+	}
+	return asset, true
+}
+
+func scopedLocation(asset catalog.Asset, payload Payload) (catalog.Location, bool) {
+	for _, loc := range asset.Locations {
 		if payload.Storage != "" && loc.StorageName != payload.Storage {
 			continue
 		}
 		if len(payload.Prefixes) > 0 && !relativePathInPrefixes(loc.RelativePath, payload.Prefixes) {
 			continue
 		}
-		if payload.MediaKind != "" && asset.MediaKind != payload.MediaKind {
+		if payload.MediaKind != "" && loc.MediaKind != payload.MediaKind {
 			continue
 		}
-		if !payload.IncludeImages && asset.MediaKind == "photo" {
-			continue
-		}
-		if !payload.IncludeVideo && asset.MediaKind == "video" {
-			continue
-		}
-		if !payload.IncludeTracks && asset.MediaKind == "track" {
-			continue
-		}
-		if !payload.IncludeAudio && asset.MediaKind == "audio" {
-			continue
-		}
-		if !payload.IncludeDocs && asset.MediaKind == "document" {
-			continue
-		}
-		if payload.OnlyMissing && !metadataMissing(asset) {
-			continue
-		}
-		out = append(out, asset)
-		if payload.MaxFiles > 0 && len(out) >= payload.MaxFiles {
-			break
-		}
+		return loc, true
 	}
-	return out
+	return catalog.Location{}, false
+}
+
+func shouldSkipAsset(asset catalog.Asset, payload Payload) bool {
+	kind := asset.MediaKind
+	if loc, ok := catalog.FirstLocation(asset); ok && loc.MediaKind != "" {
+		kind = loc.MediaKind
+	}
+	if payload.MediaKind != "" && kind != payload.MediaKind {
+		return true
+	}
+	if !payload.IncludeImages && kind == "photo" {
+		return true
+	}
+	if !payload.IncludeVideo && kind == "video" {
+		return true
+	}
+	if !payload.IncludeTracks && kind == "track" {
+		return true
+	}
+	if !payload.IncludeAudio && kind == "audio" {
+		return true
+	}
+	if !payload.IncludeDocs && kind == "document" {
+		return true
+	}
+	return payload.OnlyMissing && !metadataMissing(asset)
 }
 
 func compactStrings(values []string) []string {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
 	"github.com/AxisAlexNT/Cartolensia/internal/discovery"
@@ -43,6 +44,72 @@ func TestMetadataEnrichmentParsesFixtureGPX(t *testing.T) {
 	}
 	if len(tracks) != 1 || tracks[0].PointCount != 3 || tracks[0].DistanceM <= 0 {
 		t.Fatalf("unexpected tracks: %#v", tracks)
+	}
+}
+
+func TestMetadataEnrichmentScopesQueryByStoragePrefix(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: root, Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := catalog.NewMemoryStore()
+	now := time.Now().UTC()
+	keep, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/keep/a.md",
+		RelativePath: "keep/a.md",
+		Name:         "a.md",
+		Extension:    "md",
+		MIME:         "text/markdown",
+		MediaKind:    "document",
+		SizeBytes:    12,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/skip/b.md",
+		RelativePath: "skip/b.md",
+		Name:         "b.md",
+		Extension:    "md",
+		MIME:         "text/markdown",
+		MediaKind:    "document",
+		SizeBytes:    12,
+		MTime:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := NewPayload()
+	payload.Storage = "fixture"
+	payload.Prefixes = []string{"keep"}
+	enrichJob, err := store.EnqueueJob(ctx, jobs.New("metadata_enrich", payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (Runner{Registry: registry, Store: store}).Enrich(ctx, &enrichJob); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := store.GetAsset(ctx, keep.Asset.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Metadata["document_metadata_extracted_at"] == nil {
+		t.Fatalf("expected matching prefix document to be enriched: %#v", kept.Metadata)
+	}
+	skipped, err := store.GetAsset(ctx, skip.Asset.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped.Metadata["document_metadata_extracted_at"] != nil {
+		t.Fatalf("expected non-matching prefix document to remain untouched: %#v", skipped.Metadata)
+	}
+	if enrichJob.Counters.Updated != 1 || enrichJob.Counters.Scanned != 1 {
+		t.Fatalf("expected one scoped update, got counters %#v", enrichJob.Counters)
 	}
 }
 

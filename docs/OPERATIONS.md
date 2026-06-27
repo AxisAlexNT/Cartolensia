@@ -88,6 +88,33 @@ Useful endpoints:
 
 Cookie-authenticated write requests need the CSRF header from `/auth/csrf`. Bearer API tokens use scopes and do not need CSRF.
 
+### First Production Login
+
+Boot-managed production installs created by `scripts/remote/bootstrap-cartolensia-user.sh`
+use local auth by default. The first admin account is configured through the
+service environment, and the generated admin password is stored in the
+configured password file on the host, typically:
+
+```bash
+sudo cat /etc/cartolensia/admin-password
+```
+
+Log in with the configured admin email and the exact file contents. The WebUI
+and backend ignore trailing CR/LF characters when a password is pasted from the
+file, so copying the line from a terminal should work without manually removing
+the final newline.
+
+When `auth.mode=local`, normal API and media-original routes require an
+authenticated session. Anonymous users can call only the public bootstrap
+endpoints needed to render the app and perform login, such as health/version,
+`/api/v1/auth/me`, `/api/v1/auth/csrf`, and `/api/v1/auth/login`.
+
+Administrators can mark individual assets as Public from Asset Detail. Public
+assets appear in the anonymous Public Gallery and their original/preview media
+URLs are readable without a session. Unmarking an asset immediately returns it
+to authenticated-only access. Public sharing is metadata-only and never moves,
+rewrites, or copies the original file.
+
 ## Jobs
 
 Job APIs:
@@ -197,6 +224,26 @@ The discovery worker streams directory results and updates folder/file counters
 in the Jobs page. Gallery results should appear while discovery continues;
 Explorer and Search APIs must remain paginated and must not load the whole
 archive into memory.
+
+Metadata enrichment is also scoped and paginated. For normal storage/prefix
+runs it pages through the shared asset query service instead of loading the
+entire catalog first, and selected-asset runs resolve only the requested IDs.
+For very large archives, keep metadata extraction scoped to explicit storages
+and top-level prefixes so progress and retries remain understandable.
+
+Optional NAS storages may be temporarily unavailable. Cartolensia should report
+storage health as `available`, `missing`, or `error` in Settings/Storages and
+continue serving already-indexed metadata from PostgreSQL. Do not use
+unavailability as a reason to delete asset records, cached metadata, or previews;
+run explicit rescan/reconciliation workflows only after the storage is mounted
+again and the operator has reviewed the scope.
+
+For NVIDIA plus AMD/Radeon hosts, keep AI and transcoding scratch/output under
+the Cartolensia cache directory. NVIDIA NVENC/NVDEC and VAAPI dry-runs should be
+validated from the Transcoding page before enabling long-running transcode
+sessions. The service chooses a VAAPI render node from `CARTOLENSIA_VAAPI_DEVICE`
+or `LIBVA_RENDER_DEVICE` first; when unset, it prefers AMD/Intel DRI render
+nodes over NVIDIA render nodes for VAAPI.
 
 ### Upgrading A Boot-Managed Host
 

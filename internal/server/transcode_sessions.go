@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,7 +371,7 @@ func transcodePresetWarnings(preset catalog.TranscodingPreset, caps transcoding.
 		encoder = defaultEncoderForCodec(preset.Codec)
 	}
 	if strings.Contains(encoder, "av1_nvenc") {
-		warnings = append(warnings, "AV1 NVENC is advertised by ffmpeg, but it must be dry-run validated; RTX 3090 Ti-class GPUs do not provide AV1 encode.")
+		warnings = append(warnings, "AV1 NVENC depends on GPU generation; use hardware dry-run validation before relying on this preset.")
 	}
 	if isDRIBasedHardware(preset.Hardware, encoder) && !caps.Hardware.DevDRI {
 		warnings = append(warnings, "VAAPI/QSV hardware requires /dev/dri access and is unverified in this runtime.")
@@ -439,9 +440,15 @@ func ffmpegDryRunArgs(preset catalog.TranscodingPreset, inputPath string, durati
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"-hide_banner", "-nostdin", "-y", "-t", strconv.Itoa(durationSeconds), "-i", inputPath, "-map", "0:v:0"}
+	args := ffmpegInputArgsForPreset(preset, inputPath)
+	args = append(args[:3], append([]string{"-t", strconv.Itoa(durationSeconds)}, args[3:]...)...)
+	args = append(args, "-map", "0:v:0")
 	args = append(args, videoArgs...)
-	args = append(args, "-an", "-pix_fmt", "yuv420p", "-f", "null", "-")
+	args = append(args, "-an")
+	if !strings.Contains(strings.ToLower(preset.FFmpegEncoder), "vaapi") {
+		args = append(args, "-pix_fmt", "yuv420p")
+	}
+	args = append(args, "-f", "null", "-")
 	return args, nil
 }
 
@@ -581,15 +588,35 @@ func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePr
 func builtInTranscodingPresets(caps transcoding.Capabilities) []catalog.TranscodingPreset {
 	now := time.Now().UTC()
 	h264Available := caps.FFmpeg.Available && encoderAvailable(caps, "libx264")
+	h264NVENCAvailable := caps.FFmpeg.Available && encoderAvailable(caps, "h264_nvenc") && hardwareAvailable(caps, "nvidia")
+	h264VAAPIAvailable := caps.FFmpeg.Available && encoderAvailable(caps, "h264_vaapi") && hardwareAvailable(caps, "vaapi")
+	av1NVENCAvailable := caps.FFmpeg.Available && encoderAvailable(caps, "av1_nvenc") && hardwareAvailable(caps, "nvidia")
+	av1VAAPIAvailable := caps.FFmpeg.Available && encoderAvailable(caps, "av1_vaapi") && hardwareAvailable(caps, "vaapi")
 	av1Encoder := chooseAV1Encoder(caps)
 	av1Available := caps.FFmpeg.Available && av1Encoder != ""
 	h264Disabled := ""
 	if !h264Available {
 		h264Disabled = "ffmpeg/libx264 is unavailable"
 	}
+	h264NVENCDisabled := ""
+	if !h264NVENCAvailable {
+		h264NVENCDisabled = "ffmpeg h264_nvenc or NVIDIA runtime is unavailable"
+	}
+	h264VAAPIDisabled := ""
+	if !h264VAAPIAvailable {
+		h264VAAPIDisabled = "ffmpeg h264_vaapi or /dev/dri VAAPI runtime is unavailable"
+	}
 	av1Disabled := ""
 	if !av1Available {
 		av1Disabled = "No CPU AV1 encoder (libsvtav1, libaom-av1, or librav1e) is available in ffmpeg"
+	}
+	av1NVENCDisabled := ""
+	if !av1NVENCAvailable {
+		av1NVENCDisabled = "ffmpeg av1_nvenc or NVIDIA runtime is unavailable"
+	}
+	av1VAAPIDisabled := ""
+	if !av1VAAPIAvailable {
+		av1VAAPIDisabled = "ffmpeg av1_vaapi or /dev/dri VAAPI runtime is unavailable"
 	}
 	return []catalog.TranscodingPreset{
 		{
@@ -637,6 +664,36 @@ func builtInTranscodingPresets(caps transcoding.Capabilities) []catalog.Transcod
 			UpdatedAt:      now,
 		},
 		{
+			ID:             "h264_nvenc_720p_lan",
+			Name:           "H.264 NVIDIA NVENC 720p LAN",
+			BuiltIn:        true,
+			Available:      h264NVENCAvailable,
+			DisabledReason: h264NVENCDisabled,
+			Hardware:       "nvidia",
+			Codec:          "h264",
+			FFmpegEncoder:  "h264_nvenc",
+			Mode:           "quality",
+			ParameterValue: "24",
+			Container:      "hls",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
+			ID:             "h264_vaapi_720p_lan",
+			Name:           "H.264 VAAPI 720p LAN",
+			BuiltIn:        true,
+			Available:      h264VAAPIAvailable,
+			DisabledReason: h264VAAPIDisabled,
+			Hardware:       "vaapi",
+			Codec:          "h264",
+			FFmpegEncoder:  "h264_vaapi",
+			Mode:           "quantizer",
+			ParameterValue: "24",
+			Container:      "hls",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
 			ID:             "av1_low_bitrate",
 			Name:           "AV1 low bitrate",
 			BuiltIn:        true,
@@ -647,6 +704,36 @@ func builtInTranscodingPresets(caps transcoding.Capabilities) []catalog.Transcod
 			FFmpegEncoder:  av1Encoder,
 			Mode:           "quality",
 			ParameterValue: "38",
+			Container:      "webm",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
+			ID:             "av1_nvenc_low_bitrate",
+			Name:           "AV1 NVIDIA NVENC low bitrate",
+			BuiltIn:        true,
+			Available:      av1NVENCAvailable,
+			DisabledReason: av1NVENCDisabled,
+			Hardware:       "nvidia",
+			Codec:          "av1",
+			FFmpegEncoder:  "av1_nvenc",
+			Mode:           "bitrate",
+			ParameterValue: "1000k",
+			Container:      "webm",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
+			ID:             "av1_vaapi_low_bitrate",
+			Name:           "AV1 VAAPI low bitrate",
+			BuiltIn:        true,
+			Available:      av1VAAPIAvailable,
+			DisabledReason: av1VAAPIDisabled,
+			Hardware:       "vaapi",
+			Codec:          "av1",
+			FFmpegEncoder:  "av1_vaapi",
+			Mode:           "bitrate",
+			ParameterValue: "1000k",
 			Container:      "webm",
 			CreatedAt:      now,
 			UpdatedAt:      now,
@@ -728,7 +815,7 @@ func hlsArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir st
 		return nil, err
 	}
 	audioArgs := []string{"-c:a", "aac", "-b:a", "128k"}
-	return hlsArgsWithVideoAudio(inputPath, sessionDir, videoArgs, audioArgs), nil
+	return hlsArgsWithVideoAudioForPreset(preset, inputPath, sessionDir, videoArgs, audioArgs), nil
 }
 
 func transcodeArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir string) ([]string, error) {
@@ -757,9 +844,14 @@ func webmArgsForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir s
 	default:
 		videoArgs = append(videoArgs, "-b:v", safeBitrateParameter(preset.ParameterValue, "900k"))
 	}
-	videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2", "-pix_fmt", "yuv420p")
+	if strings.Contains(encoder, "vaapi") {
+		videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2,format=nv12,hwupload")
+	} else {
+		videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2", "-pix_fmt", "yuv420p")
+	}
 	output := filepath.Join(sessionDir, "output.webm")
-	args := []string{"-hide_banner", "-nostdin", "-y", "-i", inputPath, "-map", "0:v:0", "-map", "0:a?"}
+	args := ffmpegInputArgsForPreset(preset, inputPath)
+	args = append(args, "-map", "0:v:0", "-map", "0:a?")
 	args = append(args, videoArgs...)
 	if _, err := exec.LookPath("ffmpeg"); err == nil {
 		// libopus is broadly available in common ffmpeg builds; if not, ffmpeg exits with a clear stderr tail.
@@ -775,6 +867,7 @@ func videoArgsForPreset(preset catalog.TranscodingPreset) ([]string, error) {
 		encoder = defaultEncoderForCodec(preset.Codec)
 	}
 	videoArgs := []string{"-c:v", encoder}
+	isVAAPI := strings.Contains(encoder, "vaapi")
 	if strings.Contains(strings.ToLower(encoder), "av1") {
 		switch {
 		case strings.Contains(encoder, "svtav1"):
@@ -786,6 +879,8 @@ func videoArgsForPreset(preset catalog.TranscodingPreset) ([]string, error) {
 		}
 	} else if strings.Contains(encoder, "nvenc") {
 		videoArgs = append(videoArgs, "-preset", "p5")
+	} else if isVAAPI {
+		// VAAPI encoders do not use libx264-style preset names.
 	} else {
 		videoArgs = append(videoArgs, "-preset", "veryfast")
 	}
@@ -793,6 +888,8 @@ func videoArgsForPreset(preset catalog.TranscodingPreset) ([]string, error) {
 	case "quality":
 		if strings.Contains(encoder, "nvenc") {
 			videoArgs = append(videoArgs, "-rc", "vbr", "-cq", safeNumericParameter(preset.ParameterValue, "24"), "-b:v", "0")
+		} else if isVAAPI {
+			videoArgs = append(videoArgs, "-qp", safeNumericParameter(preset.ParameterValue, "24"))
 		} else {
 			videoArgs = append(videoArgs, "-crf", safeNumericParameter(preset.ParameterValue, "24"))
 		}
@@ -812,7 +909,11 @@ func videoArgsForPreset(preset catalog.TranscodingPreset) ([]string, error) {
 		return nil, fmt.Errorf("unsupported preset mode %q", preset.Mode)
 	}
 	if preset.Codec == "h264" || strings.Contains(encoder, "264") {
-		videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2")
+		if isVAAPI {
+			videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2,format=nv12,hwupload")
+		} else {
+			videoArgs = append(videoArgs, "-vf", "scale=w=1280:h=-2")
+		}
 	}
 	return videoArgs, nil
 }
@@ -834,13 +935,20 @@ func hlsArgs(profile, inputPath, sessionDir string) ([]string, error) {
 }
 
 func hlsArgsWithVideoAudio(inputPath, sessionDir string, videoArgs, audioArgs []string) []string {
+	return hlsArgsWithVideoAudioForPreset(catalog.TranscodingPreset{}, inputPath, sessionDir, videoArgs, audioArgs)
+}
+
+func hlsArgsWithVideoAudioForPreset(preset catalog.TranscodingPreset, inputPath, sessionDir string, videoArgs, audioArgs []string) []string {
 	segmentPattern := filepath.Join(sessionDir, "segment_%05d.ts")
 	playlist := filepath.Join(sessionDir, "master.m3u8")
-	args := []string{"-hide_banner", "-nostdin", "-y", "-i", inputPath, "-map", "0:v:0", "-map", "0:a?"}
+	args := ffmpegInputArgsForPreset(preset, inputPath)
+	args = append(args, "-map", "0:v:0", "-map", "0:a?")
 	args = append(args, videoArgs...)
 	args = append(args, audioArgs...)
+	if !strings.Contains(strings.ToLower(preset.FFmpegEncoder), "vaapi") {
+		args = append(args, "-pix_fmt", "yuv420p")
+	}
 	args = append(args,
-		"-pix_fmt", "yuv420p",
 		"-sc_threshold", "0",
 		"-g", "48",
 		"-f", "hls",
@@ -851,6 +959,57 @@ func hlsArgsWithVideoAudio(inputPath, sessionDir string, videoArgs, audioArgs []
 		playlist,
 	)
 	return args
+}
+
+func ffmpegInputArgsForPreset(preset catalog.TranscodingPreset, inputPath string) []string {
+	args := []string{"-hide_banner", "-nostdin", "-y"}
+	if strings.Contains(strings.ToLower(preset.FFmpegEncoder), "vaapi") || strings.EqualFold(preset.Hardware, "vaapi") || strings.EqualFold(preset.Hardware, "amd") {
+		args = append(args, "-vaapi_device", vaapiDevicePath())
+	}
+	return append(args, "-i", inputPath)
+}
+
+func vaapiDevicePath() string {
+	if value := strings.TrimSpace(os.Getenv("CARTOLENSIA_VAAPI_DEVICE")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("LIBVA_RENDER_DEVICE")); value != "" {
+		return value
+	}
+	return detectVAAPIRenderDevice()
+}
+
+func detectVAAPIRenderDevice() string {
+	entries, err := os.ReadDir("/dev/dri")
+	if err != nil {
+		return "/dev/dri/renderD128"
+	}
+	var preferred []string
+	var fallback []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "renderD") {
+			continue
+		}
+		path := filepath.Join("/dev/dri", name)
+		vendorBytes, _ := os.ReadFile(filepath.Join("/sys/class/drm", name, "device", "vendor"))
+		vendor := strings.ToLower(strings.TrimSpace(string(vendorBytes)))
+		switch vendor {
+		case "0x1002", "0x8086":
+			preferred = append(preferred, path)
+		default:
+			fallback = append(fallback, path)
+		}
+	}
+	sort.Strings(preferred)
+	sort.Strings(fallback)
+	if len(preferred) > 0 {
+		return preferred[0]
+	}
+	if len(fallback) > 0 {
+		return fallback[0]
+	}
+	return "/dev/dri/renderD128"
 }
 
 func defaultEncoderForCodec(codec string) string {

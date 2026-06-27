@@ -197,12 +197,14 @@ type AssetQuery struct {
 	MediaKind  string
 	HashStatus string
 	Storage    string
+	Prefixes   []string
 	Extension  string
 	TakenFrom  *time.Time
 	TakenTo    *time.Time
 	AlbumID    string
 	TrackID    string
 	GeoSource  string
+	PublicOnly bool
 	Limit      int
 	Offset     int
 	Sort       string

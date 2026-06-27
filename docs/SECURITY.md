@@ -19,6 +19,17 @@ Cartolensia is still pre-release software. The current security model is intende
 - Passwords are hashed before storage.
 - Login creates persisted sessions.
 - Logout and password change invalidate appropriate session state.
+- Email addresses are normalized with surrounding whitespace trimmed. Submitted
+  passwords keep all internal characters but tolerate trailing CR/LF so copying
+  the generated password file into the WebUI login field does not fail because
+  of the terminal newline.
+- In local-auth mode, protected API and original-media routes require an
+  authenticated session. Anonymous access is limited to health/version,
+  diagnostics needed for bootstrap, and auth login/session endpoints.
+- Assets explicitly marked `public` in Cartolensia metadata are the exception:
+  their public asset-detail payload and media original/preview endpoints may be
+  read anonymously. Public marking is an administrator action and is reversible;
+  unmarked assets stay private to authenticated users.
 
 OAuth/OIDC remains disabled-by-default stub behavior.
 
@@ -66,6 +77,8 @@ Original media is immutable in the implemented adapter.
 
 Preview files are generated only under Cartolensia cache/work directories. Preview cache cleanup verifies deletion targets stay inside the cache root.
 
+Metadata enrichment reads originals through the configured storage adapter and writes only Cartolensia metadata/database rows. Storage/prefix-scoped enrichment pages through bounded asset queries and must not flatten a large archive into memory. Optional storage unavailability is a health state, not a delete/missing-marking signal.
+
 Scoped dry-run discovery is guarded separately:
 
 - storage must exist and be `strict_read_only`;
@@ -94,6 +107,11 @@ Transcoding preset records are metadata only. Built-in presets cannot be deleted
 The OpenStreetMap tile proxy is on-demand only. It caches tiles actively viewed by the browser under the Cartolensia cache directory, provides attribution metadata, and does not implement public-OSM region prefetching.
 
 Track thumbnails/previews for GPX/KML/KMZ/GPZ assets are generated under the Cartolensia preview/cache root. They are never written beside original track files.
+
+Optional storage roots may report `missing` or `error` when a NAS, SMB/CIFS,
+NFS, or mounted object-storage view is offline. This health state is diagnostic
+only. It must not trigger metadata deletion, missing-file marking, cache purge,
+or album/search removal by itself.
 
 Universal search uses PostgreSQL/local metadata by default. Place-name matching is cache-only through Cartolensia local place entries such as Yerevan, Vanadzor, Lori Province, and Armenia. The app does not call public reverse-geocoding/geocoding APIs automatically; future online provider support must be user-triggered, rate-limited, and cached before reuse.
 
