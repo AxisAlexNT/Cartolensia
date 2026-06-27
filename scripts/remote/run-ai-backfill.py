@@ -10,6 +10,7 @@ through Cartolensia media URLs; all outputs are stored in PostgreSQL metadata.
 from __future__ import annotations
 
 import http.cookiejar
+import http.client
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,7 @@ MAX_ITERATIONS = env_int("CARTOLENSIA_AI_BACKFILL_MAX_ITERATIONS", 0)
 STATE_DIR = Path(os.environ.get("CARTOLENSIA_AI_BACKFILL_STATE_DIR", "/var/lib/cartolensia/run/ai-backfill-state"))
 API_RETRIES = max(1, env_int("CARTOLENSIA_AI_BACKFILL_API_RETRIES", 6))
 API_RETRY_SLEEP_SECONDS = max(1, env_int("CARTOLENSIA_AI_BACKFILL_API_RETRY_SLEEP_SECONDS", 10))
+MAX_PROBE_LIMIT = max(100, env_int("CARTOLENSIA_AI_BACKFILL_MAX_PROBE_LIMIT", 50000))
 
 
 def log(message: str) -> None:
@@ -106,6 +108,8 @@ class API:
                     raise RuntimeError(f"{method} {path} failed with HTTP {exc.code}: {body_text}") from exc
             except urllib.error.URLError as exc:
                 last_error = exc
+            except (http.client.RemoteDisconnected, TimeoutError, ConnectionResetError, ConnectionAbortedError) as exc:
+                last_error = exc
             if attempt < API_RETRIES:
                 log(f"{method} {path}: API unavailable ({last_error}); retry {attempt}/{API_RETRIES}")
                 time.sleep(API_RETRY_SLEEP_SECONDS)
@@ -151,8 +155,24 @@ def ids_for_task(task: dict) -> list[str]:
     batch = int(task["batch"])
     seen = load_seen(str(task["name"]))
     probe_limit = max(batch * 50, 100)
-    candidates = ids_for(str(task["sql"]), probe_limit)
-    return [asset_id for asset_id in candidates if asset_id not in seen][:batch]
+    last_seen_count = -1
+    while probe_limit <= MAX_PROBE_LIMIT:
+        candidates = ids_for(str(task["sql"]), probe_limit)
+        unseen = [asset_id for asset_id in candidates if asset_id not in seen]
+        if unseen or len(candidates) < probe_limit:
+            return unseen[:batch]
+        if len(candidates) == last_seen_count:
+            return []
+        last_seen_count = len(candidates)
+        probe_limit = min(probe_limit * 4, MAX_PROBE_LIMIT + 1)
+    candidates = ids_for(str(task["sql"]), MAX_PROBE_LIMIT)
+    unseen = [asset_id for asset_id in candidates if asset_id not in seen]
+    if not unseen and candidates:
+        log(
+            f"{task['name']}: first {len(candidates)} missing candidates are already marked seen; "
+            "increase CARTOLENSIA_AI_BACKFILL_MAX_PROBE_LIMIT or clear the task seen file to revisit them"
+        )
+    return unseen[:batch]
 
 
 def quoted_ids(ids: Iterable[str]) -> str:

@@ -628,7 +628,7 @@ func (db *DB) UpdateAssetMetadata(ctx context.Context, assetID string, takenAt *
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
-	data, err := json.Marshal(metadata)
+	data, err := json.Marshal(metadataOrEmpty(metadata))
 	if err != nil {
 		return err
 	}

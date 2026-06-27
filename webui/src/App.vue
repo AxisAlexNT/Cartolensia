@@ -832,8 +832,10 @@ function selectTranscriptSearchResult(item: TypeaheadResult) {
 }
 
 async function refreshAILists() {
+  const predictionTask = activePredictionTaskFilter();
+  const predictionQuery = activePredictionQueryFilter();
   const [predictions, faces] = await Promise.all([
-    api.aiPredictions(aiPredictionLimit.value, 0, ""),
+    api.aiPredictions(aiPredictionLimit.value, 0, predictionQuery, predictionTask),
     api.aiFaces(aiFaceLimit.value, 0, "")
   ]);
   aiPredictionPayload.value = predictions;
@@ -909,6 +911,18 @@ const captionPredictionRows = computed(() => {
       .some((value) => value.includes(query));
   });
 });
+
+function activePredictionTaskFilter(): string {
+  if (active.value === "OCR") return "ocr_image,ocr,ocr_text";
+  if (active.value === "Captions") return "describe_image,caption,caption_short,caption_long";
+  return "";
+}
+
+function activePredictionQueryFilter(): string {
+  if (active.value === "OCR") return ocrPageQuery.value.trim();
+  if (active.value === "Captions") return captionsPageQuery.value.trim();
+  return "";
+}
 
 function recordAssetID(row: unknown): string {
   return String((row as Record<string, unknown> | null | undefined)?.asset_id ?? "").trim();
@@ -2697,7 +2711,7 @@ async function refresh() {
 	      api.vectorStatus(),
 	      api.aiSummary(),
 	      api.aiTags(),
-	      api.aiPredictions(aiPredictionLimit.value, 0, ""),
+	      api.aiPredictions(aiPredictionLimit.value, 0, activePredictionQueryFilter(), activePredictionTaskFilter()),
 	      api.aiFaces(aiFaceLimit.value, 0, ""),
 	      api.aiSafety(),
 	      api.faceClusters(),
@@ -4969,6 +4983,26 @@ watch([active, mapData], async () => {
 watch([mapMediaKind, mapAlbumId, mapTrackId, mapCluster], () => {
   if (active.value === "Map") {
     void refreshMap();
+  }
+});
+
+let aiPredictionFilterRefreshTimer: number | undefined;
+
+function scheduleAIListFilterRefresh() {
+  if (aiPredictionFilterRefreshTimer !== undefined) {
+    window.clearTimeout(aiPredictionFilterRefreshTimer);
+  }
+  aiPredictionFilterRefreshTimer = window.setTimeout(() => {
+    aiPredictionFilterRefreshTimer = undefined;
+    if (active.value === "OCR" || active.value === "Captions") {
+      void refreshAILists();
+    }
+  }, 250);
+}
+
+watch([() => active.value, ocrPageQuery, captionsPageQuery], () => {
+  if (active.value === "OCR" || active.value === "Captions") {
+    scheduleAIListFilterRefresh();
   }
 });
 

@@ -3281,7 +3281,9 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 			"bounded_scope": true,
 			"note":          "synchronous bounded AI action recorded for Jobs visibility",
 		}
-		auditJob, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New(jobKind, auditPayload))
+		jobCtx, cancelJob := context.WithTimeout(context.Background(), aiJobAuditTimeout(kind, req))
+		defer cancelJob()
+		auditJob, err := s.deps.Store.EnqueueJob(jobCtx, jobs.New(jobKind, auditPayload))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -3289,9 +3291,21 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 		_ = jobs.Start(&auditJob)
 		auditJob.WorkerID = "api-ai"
 		jobs.AddLog(&auditJob, "info", fmt.Sprintf("AI action %s started", kind))
-		_ = s.deps.Store.UpdateJob(r.Context(), auditJob)
+		_ = s.deps.Store.UpdateJob(jobCtx, auditJob)
 
-		result, err := s.runAIJob(r.Context(), r, kind, req)
+		updateAuditProgress := func(result aiJobResult) {
+			auditJob.ProgressTotal = int64Ptr(result.Targets)
+			auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
+			auditJob.Counters.Scanned = int64(result.Targets)
+			auditJob.Counters.Updated = int64(result.Stored)
+			auditJob.Counters.Errors = int64(len(result.Errors))
+			if result.Unsafe > 0 {
+				auditJob.Counters.Created = int64(result.Unsafe)
+			}
+			_ = s.deps.Store.UpdateJob(jobCtx, auditJob)
+		}
+
+		result, err := s.runAIJob(jobCtx, r, kind, req, updateAuditProgress)
 		if err != nil {
 			auditJob.ProgressTotal = int64Ptr(result.Targets)
 			auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
@@ -3300,7 +3314,7 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 			auditJob.Counters.Errors = int64(len(result.Errors) + 1)
 			jobs.AddLog(&auditJob, "error", err.Error())
 			_ = jobs.Fail(&auditJob, err)
-			_ = s.deps.Store.UpdateJob(r.Context(), auditJob)
+			_ = s.deps.Store.UpdateJob(jobCtx, auditJob)
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -3328,8 +3342,22 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 		} else {
 			_ = jobs.Complete(&auditJob)
 		}
-		_ = s.deps.Store.UpdateJob(r.Context(), auditJob)
+		_ = s.deps.Store.UpdateJob(jobCtx, auditJob)
 		writeJSON(w, http.StatusAccepted, result)
+	}
+}
+
+func aiJobAuditTimeout(kind string, req aiJobRequest) time.Duration {
+	if req.Limit < 0 {
+		return 12 * time.Hour
+	}
+	switch kind {
+	case "transcribe_audio":
+		return 8 * time.Hour
+	case "analyze_audio":
+		return 4 * time.Hour
+	default:
+		return 2 * time.Hour
 	}
 }
 
@@ -3375,7 +3403,7 @@ type aiInferencePayload struct {
 	Metadata    map[string]any        `json:"metadata"`
 }
 
-func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req aiJobRequest) (aiJobResult, error) {
+func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req aiJobRequest, onProgress func(aiJobResult)) (aiJobResult, error) {
 	endpoint, workerID, ok := aiConfiguredWorkerEndpoint(ctx)
 	result := aiJobResult{
 		Kind:         kind,
@@ -3388,6 +3416,9 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 	}
 	if !ok {
 		result.Errors = append(result.Errors, "no AI sidecar is reachable at "+endpoint)
+		if onProgress != nil {
+			onProgress(result)
+		}
 		return result, nil
 	}
 	assets, err := s.resolveAIAssets(ctx, req)
@@ -3395,6 +3426,9 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		return result, err
 	}
 	result.Targets = len(assets)
+	if onProgress != nil {
+		onProgress(result)
+	}
 	apiPath := aiSidecarPath(kind)
 	if apiPath == "" {
 		return result, fmt.Errorf("unsupported AI job kind %q", kind)
@@ -3403,6 +3437,9 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		if !aiSupportsAsset(kind, asset) {
 			result.Skipped++
 			result.SkippedKinds[asset.MediaKind]++
+			if onProgress != nil {
+				onProgress(result)
+			}
 			continue
 		}
 		payload := map[string]any{
@@ -3424,6 +3461,9 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		response, err := callAISidecarWithTimeout(ctx, endpoint+apiPath, payload, timeout)
 		if err != nil {
 			result.Errors = append(result.Errors, asset.ID+": "+err.Error())
+			if onProgress != nil {
+				onProgress(result)
+			}
 			continue
 		}
 		stored, unsafe := s.persistAIResponse(ctx, workerID, kind, asset.ID, response, req)
@@ -3440,6 +3480,9 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 			"metadata":     summarizeAIMetadata(response.Metadata),
 			"stored_count": stored,
 		})
+		if onProgress != nil {
+			onProgress(result)
+		}
 	}
 	result.Status = "completed"
 	if len(result.Errors) > 0 && result.Processed == 0 {
@@ -5050,15 +5093,52 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	assetID := strings.TrimSpace(r.URL.Query().Get("asset_id"))
+	limit := intQuery(r.URL.Query(), "limit", 100, 1, 5000)
+	offset := intQuery(r.URL.Query(), "offset", 0, 0, 1000000)
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	taskQuery := strings.TrimSpace(r.URL.Query().Get("task"))
 	tags, err := s.deps.Store.ListAssetTags(r.Context(), assetID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	predictions, err := s.deps.Store.ListAIPredictions(r.Context(), assetID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	var predictions []catalog.AIPrediction
+	totalPredictions := 0
+	if assetID == "" {
+		if pager, ok := s.deps.Store.(interface {
+			QueryAIPredictions(context.Context, catalog.AIPredictionQuery) (catalog.AIPredictionPage, error)
+		}); ok {
+			page, err := pager.QueryAIPredictions(r.Context(), catalog.AIPredictionQuery{
+				Tasks:  aiPredictionTaskTokens(taskQuery),
+				Q:      query,
+				Limit:  limit,
+				Offset: offset,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			predictions = page.Predictions
+			totalPredictions = page.Total
+		}
+	}
+	if predictions == nil {
+		var err error
+		predictions, err = s.deps.Store.ListAIPredictions(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if taskQuery != "" {
+			predictions = filterAIPredictionsByTask(predictions, taskQuery)
+		}
+		if query != "" {
+			predictions = filterAIPredictions(predictions, query)
+		}
+		totalPredictions = len(predictions)
+		if assetID == "" {
+			predictions = slicePage(predictions, limit, offset)
+		}
 	}
 	faces, err := s.deps.Store.ListFaceDetections(r.Context(), assetID)
 	if err != nil {
@@ -5070,21 +5150,15 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	if query != "" {
 		tags = filterAssetTags(tags, query)
-		predictions = filterAIPredictions(predictions, query)
 		faces = filterFaceDetections(faces, query)
 	}
 	totalTags := len(tags)
-	totalPredictions := len(predictions)
 	totalFaces := len(faces)
 	totalEmbeddings := len(embeddings)
-	limit := intQuery(r.URL.Query(), "limit", 100, 1, 5000)
-	offset := intQuery(r.URL.Query(), "offset", 0, 0, 1000000)
 	if assetID == "" {
 		tags = slicePage(tags, limit, offset)
-		predictions = slicePage(predictions, limit, offset)
 		faces = slicePage(faces, limit, offset)
 		embeddings = slicePage(embeddings, limit, offset)
 	}
@@ -5101,6 +5175,42 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 		"total_faces":       totalFaces,
 		"total_embeddings":  totalEmbeddings,
 	})
+}
+
+func filterAIPredictionsByTask(predictions []catalog.AIPrediction, taskQuery string) []catalog.AIPrediction {
+	allowed := map[string]struct{}{}
+	for _, token := range aiPredictionTaskTokens(taskQuery) {
+		allowed[token] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return predictions
+	}
+	filtered := predictions[:0]
+	for _, prediction := range predictions {
+		if _, ok := allowed[strings.ToLower(prediction.Task)]; ok {
+			filtered = append(filtered, prediction)
+		}
+	}
+	return filtered
+}
+
+func aiPredictionTaskTokens(taskQuery string) []string {
+	tokens := []string{}
+	seen := map[string]struct{}{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(taskQuery), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+	return tokens
 }
 
 func slicePage[T any](rows []T, limit, offset int) []T {

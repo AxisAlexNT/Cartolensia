@@ -477,6 +477,19 @@ type AIPrediction struct {
 	CreatedAt    time.Time      `json:"created_at"`
 }
 
+type AIPredictionQuery struct {
+	AssetID string
+	Tasks   []string
+	Q       string
+	Limit   int
+	Offset  int
+}
+
+type AIPredictionPage struct {
+	Predictions []AIPrediction
+	Total       int
+}
+
 type FaceDetection struct {
 	ID         string         `json:"id"`
 	AssetID    string         `json:"asset_id"`

@@ -1251,9 +1251,10 @@ export const api = {
       ...page,
       transcripts: asArray(page.transcripts)
     })),
-  aiPredictions: (limit = 100, offset = 0, q = "") => {
+  aiPredictions: (limit = 100, offset = 0, q = "", task = "") => {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (q.trim()) query.set("q", q.trim());
+    if (task.trim()) query.set("task", task.trim());
     return request<Record<string, unknown>>(`/api/v1/ai/predictions?${query.toString()}`);
   },
   aiFaces: (limit = 100, offset = 0, q = "") => {

@@ -318,7 +318,7 @@ func orEmptyMap(in map[string]any) map[string]any {
 	if in == nil {
 		return map[string]any{}
 	}
-	return in
+	return sanitizeJSONMap(in)
 }
 
 func decodeMap(data []byte) map[string]any {

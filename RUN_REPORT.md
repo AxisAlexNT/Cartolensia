@@ -3764,3 +3764,79 @@ Safety confirmation:
 - no backend restart during active jobs
 - no commit
 - no push
+
+## 2026-06-27 Remote AI Jobs, OCR/Captions Visibility, And JSON Metadata Hardening
+
+Issues investigated:
+
+- OCR rows existed in PostgreSQL, but the OCR page could show no rows because it loaded a mixed first page of AI predictions and filtered client-side.
+- Captions had the same hidden first-page problem.
+- Global AI prediction listing had an internal PostgreSQL cap before frontend pagination, so task totals were underreported.
+- Some metadata enrichment rows failed with `json: unsupported value: NaN`.
+- API-triggered AI audit jobs could remain at `running 0/?` when the browser/client disconnected during a long request.
+- The remote AI backfill supervisor died once during an app restart because `http.client.RemoteDisconnected` was not retried.
+
+Implemented:
+
+- Added task-aware AI prediction pagination:
+  - backend `QueryAIPredictions` returns a PostgreSQL-filtered page and total;
+  - `/api/v1/ai/predictions?task=ocr_image` and `task=describe_image` now report real task totals;
+  - OCR and Captions pages request task-specific rows and refresh when their filters change.
+- Added JSON metadata sanitation for metadata updates, tags, geotags, and multimodal rows:
+  - non-finite floats (`NaN`, `Inf`) are converted to JSON `null`;
+  - nested maps/slices are sanitized recursively.
+- Hardened synchronous AI audit jobs:
+  - detached bounded job context survives client disconnect;
+  - progress counters are updated during processing, so Jobs shows real `processed / total` values.
+- Hardened `scripts/remote/run-ai-backfill.py`:
+  - probes past the first already-seen candidate window;
+  - retries transient `RemoteDisconnected`, timeout, and connection reset errors.
+- Deployed rebuilt backend, WebUI, and backfill supervisor script to rjazhenka.
+- Cleaned one stale pre-restart `audio_analyze` job metadata row; replacement backfill work is running.
+
+Remote validation:
+
+- rjazhenka services active:
+  - `cartolensia`
+  - `cartolensia-ai`
+- AI sidecar health: real CUDA-backed mode, with classifier, YuNet, NSFW, OpenCLIP, BLIP, Tesseract OCR, faster-whisper, and audio analysis available.
+- Authenticated API checks:
+  - `/api/v1/ai/predictions?task=ocr_image&limit=3` returned total `1893`, shown `3`, first task `ocr_image`;
+  - `/api/v1/ai/predictions?task=describe_image&limit=3` returned total `1528`, shown `3`, first task `describe_image`.
+- Latest remote metadata counts after redeploy:
+  - OCR predictions: `2001`;
+  - captions: `1546`;
+  - classifications: `7780`;
+  - safety predictions: `3110`;
+  - embeddings: `1546`;
+  - transcripts: `214`;
+  - audio features: `2450`.
+- Active remote jobs after stale cleanup:
+  - `discovery` running around `66299` indexed;
+  - `hash` running around `41319 / 253858`;
+  - `metadata_enrich` running around `87200 / 292344`;
+  - current `audio_analyze` batch running `0 / 2`.
+- Backfill supervisor relaunched and logged new classify/safety/caption/embed/OCR/faces/audio batches.
+
+Tests:
+
+- `gofmt -w internal/catalog/catalog.go internal/database/database.go internal/database/extended.go internal/database/multimodal.go internal/database/json_sanitize_test.go internal/server/server.go`
+- `python3 -m py_compile scripts/remote/run-ai-backfill.py`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/database ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Known limitations / next work:
+
+- The backfill driver is still sequential by modality. GPU work is now progressing and visible, but utilization is bursty while CPU-heavy OCR/audio work runs. The next production improvement should be a durable multi-lane AI scheduler with per-device concurrency and VRAM-aware model residency.
+- Track map level-of-detail, all-track map date filtering, and the natural-language/LLM query planner remain future work.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push

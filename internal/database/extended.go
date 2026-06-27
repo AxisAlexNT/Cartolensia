@@ -593,7 +593,7 @@ func (db *DB) UpsertAssetGeo(ctx context.Context, geo catalog.AssetGeo, force bo
 	if geo.Metadata == nil {
 		geo.Metadata = map[string]any{}
 	}
-	metadata, err := json.Marshal(geo.Metadata)
+	metadata, err := json.Marshal(metadataOrEmpty(geo.Metadata))
 	if err != nil {
 		return catalog.AssetGeo{}, err
 	}
@@ -1485,7 +1485,67 @@ func metadataOrEmpty(metadata map[string]any) map[string]any {
 	if metadata == nil {
 		return map[string]any{}
 	}
-	return metadata
+	return sanitizeJSONMap(metadata)
+}
+
+func sanitizeJSONMap(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		out[key] = sanitizeJSONValue(value)
+	}
+	return out
+}
+
+func sanitizeJSONValue(value any) any {
+	switch v := value.(type) {
+	case nil, string, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		json.Number:
+		return v
+	case float32:
+		f := float64(v)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil
+		}
+		return v
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil
+		}
+		return v
+	case map[string]any:
+		return sanitizeJSONMap(v)
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeJSONValue(item)
+		}
+		return out
+	case []float64:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeJSONValue(item)
+		}
+		return out
+	case []float32:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeJSONValue(item)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = item
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func (db *DB) UpsertAssetTag(ctx context.Context, tag catalog.AssetTag) (catalog.AssetTag, error) {
@@ -1495,7 +1555,7 @@ func (db *DB) UpsertAssetTag(ctx context.Context, tag catalog.AssetTag) (catalog
 	if tag.Metadata == nil {
 		tag.Metadata = map[string]any{}
 	}
-	metadata, err := json.Marshal(tag.Metadata)
+	metadata, err := json.Marshal(metadataOrEmpty(tag.Metadata))
 	if err != nil {
 		return catalog.AssetTag{}, err
 	}
@@ -1581,6 +1641,97 @@ func (db *DB) ListAIPredictions(ctx context.Context, assetID string) ([]catalog.
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
+	out := []catalog.AIPrediction{}
+	for rows.Next() {
+		var pred catalog.AIPrediction
+		var metadata []byte
+		if err := rows.Scan(&pred.ID, &pred.AssetID, &pred.PluginID, &pred.WorkerID, &pred.Task, &pred.Label, &pred.Confidence, &pred.ModelName, &pred.ModelVersion, &metadata, &pred.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(metadata, &pred.Metadata); err != nil || pred.Metadata == nil {
+			pred.Metadata = map[string]any{}
+		}
+		out = append(out, pred)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) QueryAIPredictions(ctx context.Context, query catalog.AIPredictionQuery) (catalog.AIPredictionPage, error) {
+	limit := query.Limit
+	if limit <= 0 || limit > 5000 {
+		limit = 100
+	}
+	offset := query.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	args := []any{}
+	where := []string{"true"}
+	if query.AssetID != "" {
+		args = append(args, query.AssetID)
+		where = append(where, fmt.Sprintf("asset_id::text=$%d", len(args)))
+	}
+	if len(query.Tasks) > 0 {
+		tasks := make([]string, 0, len(query.Tasks))
+		for _, task := range query.Tasks {
+			task = strings.ToLower(strings.TrimSpace(task))
+			if task != "" {
+				tasks = append(tasks, task)
+			}
+		}
+		if len(tasks) > 0 {
+			args = append(args, tasks)
+			where = append(where, fmt.Sprintf("lower(task)=any($%d::text[])", len(args)))
+		}
+	}
+	if q := strings.ToLower(strings.TrimSpace(query.Q)); q != "" {
+		args = append(args, "%"+q+"%")
+		idx := len(args)
+		where = append(where, fmt.Sprintf(`(
+			lower(label) like $%d
+			or lower(task) like $%d
+			or lower(model_name) like $%d
+			or lower(coalesce(model_version,'')) like $%d
+			or asset_id::text like $%d
+			or lower(metadata_json::text) like $%d
+		)`, idx, idx, idx, idx, idx, idx))
+	}
+	filter := strings.Join(where, " and ")
+	baseSQL := fmt.Sprintf(`
+		with latest as (
+			select distinct on (asset_id, task, label, model_name, model_version)
+				id, asset_id, coalesce(plugin_id,'') as plugin_id, worker_id, task, label, confidence, model_name, model_version, metadata_json, created_at
+			from ai_predictions
+			order by asset_id, task, label, model_name, model_version, created_at desc
+		),
+		filtered as (
+			select * from latest
+			where %s
+		)`, filter)
+	countSQL := baseSQL + ` select count(*) from filtered`
+	var total int
+	if err := db.pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+		return catalog.AIPredictionPage{}, err
+	}
+	pageArgs := append(append([]any(nil), args...), limit, offset)
+	pageSQL := baseSQL + fmt.Sprintf(`
+		select id, asset_id, plugin_id, worker_id, task, label, confidence, model_name, model_version, metadata_json, created_at
+		from filtered
+		order by created_at desc
+		limit $%d offset $%d`, len(args)+1, len(args)+2)
+	rows, err := db.pool.Query(ctx, pageSQL, pageArgs...)
+	if err != nil {
+		return catalog.AIPredictionPage{}, err
+	}
+	predictions, err := scanAIPredictions(rows)
+	if err != nil {
+		return catalog.AIPredictionPage{}, err
+	}
+	return catalog.AIPredictionPage{Predictions: predictions, Total: total}, nil
+}
+
+func scanAIPredictions(rows pgx.Rows) ([]catalog.AIPrediction, error) {
 	defer rows.Close()
 	out := []catalog.AIPrediction{}
 	for rows.Next() {
