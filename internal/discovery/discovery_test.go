@@ -153,6 +153,57 @@ func TestDiscoveryAllowsExplicitStorageRootScan(t *testing.T) {
 	}
 }
 
+func TestDiscoveryExcludesNestedStorageWhenScanningAll(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"root.jpg", "child/nested.jpg"} {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(rel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry, err := storage.NewRegistry([]storage.Config{
+		{Name: "parent", Kind: "fs", Root: root, Mode: "strict_read_only"},
+		{Name: "child", Kind: "fs", Root: filepath.Join(root, "child"), Mode: "strict_read_only"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := catalog.NewMemoryStore()
+	runner := Runner{Registry: registry, Store: store}
+	scanJob, _ := store.EnqueueJob(context.Background(), jobs.New("discovery", ScanPayload{
+		Storage:  "all",
+		MaxFiles: -1,
+		MaxBytes: -1,
+	}))
+	if err := runner.Scan(context.Background(), &scanJob); err != nil {
+		t.Fatal(err)
+	}
+	assets, err := store.ListAssets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 2 {
+		t.Fatalf("expected parent root file and child file once, got %d: %#v", len(assets), assets)
+	}
+	seen := map[string]bool{}
+	for _, asset := range assets {
+		loc, ok := catalog.FirstLocation(asset)
+		if !ok {
+			t.Fatalf("asset has no location: %#v", asset)
+		}
+		seen[loc.StorageURL] = true
+	}
+	if seen["fs://parent/child/nested.jpg"] {
+		t.Fatalf("parent scan should exclude child storage subtree, got locations %#v", seen)
+	}
+	if !seen["fs://parent/root.jpg"] || !seen["fs://child/nested.jpg"] {
+		t.Fatalf("expected parent root and child storage locations, got %#v", seen)
+	}
+}
+
 func TestRealArchiveHashGuard(t *testing.T) {
 	registry, err := storage.NewRegistry([]storage.Config{{
 		Name: "rclone_peek",

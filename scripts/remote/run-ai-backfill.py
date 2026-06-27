@@ -50,6 +50,8 @@ SLEEP_SECONDS = max(0, env_int("CARTOLENSIA_AI_BACKFILL_SLEEP_SECONDS", 5))
 IDLE_SLEEP_SECONDS = max(10, env_int("CARTOLENSIA_AI_BACKFILL_IDLE_SLEEP_SECONDS", 300))
 MAX_ITERATIONS = env_int("CARTOLENSIA_AI_BACKFILL_MAX_ITERATIONS", 0)
 STATE_DIR = Path(os.environ.get("CARTOLENSIA_AI_BACKFILL_STATE_DIR", "/var/lib/cartolensia/run/ai-backfill-state"))
+API_RETRIES = max(1, env_int("CARTOLENSIA_AI_BACKFILL_API_RETRIES", 6))
+API_RETRY_SLEEP_SECONDS = max(1, env_int("CARTOLENSIA_AI_BACKFILL_API_RETRY_SLEEP_SECONDS", 10))
 
 
 def log(message: str) -> None:
@@ -90,13 +92,24 @@ class API:
         if method not in ("GET", "HEAD") and self.csrf_token:
             headers[self.csrf_header] = self.csrf_token
         req = urllib.request.Request(BASE_URL + path, data=body, headers=headers, method=method)
-        try:
-            with self.opener.open(req, timeout=timeout) as resp:
-                raw = resp.read()
-                return json.loads(raw or b"{}")
-        except urllib.error.HTTPError as exc:
-            body_text = exc.read(2048).decode("utf-8", "replace")
-            raise RuntimeError(f"{method} {path} failed with HTTP {exc.code}: {body_text}") from exc
+        last_error: Exception | None = None
+        for attempt in range(1, API_RETRIES + 1):
+            try:
+                with self.opener.open(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                    return json.loads(raw or b"{}")
+            except urllib.error.HTTPError as exc:
+                body_text = exc.read(2048).decode("utf-8", "replace")
+                if 500 <= exc.code < 600 and attempt < API_RETRIES:
+                    last_error = RuntimeError(f"{method} {path} failed with HTTP {exc.code}: {body_text}")
+                else:
+                    raise RuntimeError(f"{method} {path} failed with HTTP {exc.code}: {body_text}") from exc
+            except urllib.error.URLError as exc:
+                last_error = exc
+            if attempt < API_RETRIES:
+                log(f"{method} {path}: API unavailable ({last_error}); retry {attempt}/{API_RETRIES}")
+                time.sleep(API_RETRY_SLEEP_SECONDS)
+        raise RuntimeError(f"{method} {path} failed after {API_RETRIES} attempts: {last_error}")
 
     def login(self) -> None:
         with open(PASSWORD_FILE, "r", encoding="utf-8") as handle:
@@ -219,6 +232,22 @@ TASKS = [
               and not exists (
                 select 1 from ai_predictions p
                 where p.asset_id=a.id and p.task='ocr_image'
+              )
+            order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
+            limit $LIMIT
+        """,
+    },
+    {
+        "name": "faces",
+        "endpoint": "/api/v1/ai/jobs/faces",
+        "batch": PHOTO_BATCH,
+        "sql": """
+            select a.id::text
+            from assets a
+            where a.media_kind='photo'
+              and not exists (
+                select 1 from face_detections f
+                where f.asset_id=a.id
               )
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT

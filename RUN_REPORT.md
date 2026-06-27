@@ -3589,3 +3589,81 @@ Safety confirmation:
 - no missing marking
 - no commit
 - no push
+
+## 2026-06-27 Parent Samba Storage, Overlap-Safe Discovery, And Essential Export
+
+Implemented locally and deployed to rjazhenka:
+
+- Added subtree pruning to the bounded filesystem walker. `exclude_patterns` ending in `/**` now skip whole directory trees instead of walking into them and filtering files afterward.
+- Discovery now automatically detects configured nested filesystem storages. When scanning a parent storage or `storage=all`, the parent scan excludes child storage roots so the same NAS subtree is not indexed through both `old_compressed_data` and its child storage entries.
+- Added regression tests:
+  - excluded subtree pruning in `internal/storage`;
+  - `storage=all` parent/child overlap indexing only the parent root file plus the child storage file once.
+- Hardened the remote AI backfill driver:
+  - short API outages are retried instead of terminating the loop;
+  - face detection is now part of the missing-work backfill loop.
+- Added `scripts/remote/create-essential-export.sh` for an operator-run essential backup archive:
+  - PostgreSQL custom-format dump;
+  - redacted production config;
+  - storage manifest;
+  - restore notes;
+  - excludes originals, cache thumbnails, component/model caches, and local secret files.
+
+Remote actions completed:
+
+- Deployed the backend binary with overlap-safe discovery to rjazhenka.
+- Added read-only parent storage `old_compressed_data` rooted at `/mnt/cartolensia-originals/old_drives/compressed_data`.
+- Existing child storages remain configured:
+  - `old_x12_los20`;
+  - `old_nokia5228`;
+  - `old_p770`;
+  - `old_ze554kl`;
+  - `originals`.
+- Queued all-storage read-only work:
+  - discovery job `7d4299fd-ccd8-499e-9e9d-f9f980521ede`;
+  - metadata job `a249204d-ae99-4f3e-8bbd-b66f51e19e9f`;
+  - hash job `9887bb70-e87e-4ab3-97ca-87d9ca2eb046`.
+- At latest check, older production discovery and metadata jobs were already running and making progress, so the new all-storage jobs remain queued behind them:
+  - discovery `6a17fd7b-ef0c-4f6b-86f0-2ab5b46a0966`, about `14,708` scanned at the latest poll;
+  - metadata `3804c8e9-e48d-4b9d-b514-f872e3930c28`, about `12,090 / 249,219` at the latest poll.
+- AI sidecar is active and AI backfill is running as PID `1801196`, logging to `/var/lib/cartolensia/logs/ai-backfill-20260627T140437Z.log`.
+- Latest observed remote counts:
+  - `249,219` assets;
+  - `218,903` photos;
+  - `20,592` videos;
+  - `2,359` audio files;
+  - `1,806` tracks;
+  - `5,560` documents;
+  - `5,309` hashed and `243,911` unhashed.
+- pgvector remains active: backend `pgvector_ivfflat`, with `500` embedded assets at the latest poll and increasing through backfill.
+- Essential export created:
+  - `/var/lib/cartolensia/exports/cartolensia-essential-20260627T140721Z.7z`;
+  - size about `466 MB`;
+  - permission `0600`;
+  - contains DB/config manifest only, no originals or thumbnails.
+
+Tests and checks run:
+
+- `gofmt -w internal/storage/storage.go internal/storage/storage_test.go internal/discovery/discovery.go internal/discovery/discovery_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/storage ./internal/discovery`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `python3 -m py_compile scripts/remote/run-ai-backfill.py`
+- `bash -n scripts/remote/create-essential-export.sh`
+- authenticated remote checks for services, stats, storages, jobs, AI status, vector status, backfill logs, and export archive.
+
+Known limitations:
+
+- The all-storage discovery/metadata/hash jobs are queued behind already-running production work; they should drain after the current jobs finish.
+- Full hash of all unhashed NAS-backed assets is read-only but very I/O intensive and may take a long time over SMB.
+- The backup archive is sensitive because it contains the PostgreSQL database dump. It is stored locally on the production host with restrictive permissions and should be transferred only over SSH.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push

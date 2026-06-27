@@ -392,3 +392,9 @@ For a self-sufficient offline package, include:
 - `components-manifest.json`, license notices, and source archive.
 
 Run the package with media mounted read-only and configure storage mode as `strict_read_only` unless a separate journaled write path has been implemented and tested.
+
+## Essential Backup Export
+
+`scripts/remote/create-essential-export.sh` creates a single `.7z` archive intended for operator backup/restore, not application redistribution. It includes a PostgreSQL custom-format dump, redacted production config, storage manifest, and restore notes. It intentionally excludes originals, preview/cache thumbnails, component caches, model caches, local secret files, and packaged binaries.
+
+Treat this archive as sensitive because the database dump may contain private metadata, password hashes, sessions, public/private flags, OCR text, transcripts, captions, and storage paths. Transfer it only over authenticated channels such as SSH. For full disaster recovery, separately back up local secrets and any externally mounted original media according to the deployment's access-control policy.

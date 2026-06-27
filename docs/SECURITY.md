@@ -259,3 +259,18 @@ The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not u
 - Explorer pagination and folder aggregation are metadata-only PostgreSQL reads. They must not trigger discovery, hashing, missing-file marking, AI inference, or storage writes.
 - Optional NAS/original storage unavailability is a health state only. Cartolensia must not delete metadata, previews, embeddings, OCR, transcripts, captions, or DB rows because a read-only original mount is temporarily missing.
 - Full archive hashing is read-only but high-impact; treat it as an explicit operator maintenance action because it can read many terabytes from NAS storage and compete with interactive use.
+
+## 2026-06-27 Backup And Overlapping Storage Safety
+
+Overlapping storage roots are allowed only as read-only metadata sources. Discovery automatically prunes nested child roots from parent scans to avoid duplicate records, but this is not a destructive deduplication operation. It does not delete old metadata, does not modify files, and does not infer that an unavailable storage means files are gone.
+
+Operational constraints:
+
+- all Samba/NFS/original mounts must be mounted read-only for production originals;
+- `strict_read_only` remains the default storage mode;
+- missing-file marking is disabled for NAS/original refreshes;
+- exports and backups are written only to configured Cartolensia data/export directories, never to originals;
+- essential `.7z` exports contain a PostgreSQL dump and should be treated as sensitive application data;
+- redacted config exports must not include database passwords, admin password file contents, API tokens, SMB credentials, or local secret files.
+
+The `create-essential-export.sh` helper intentionally excludes originals, thumbnails, model caches, component caches, and secret files. Operators who need a full disaster-recovery bundle must separately back up secrets and external original storage according to their own access-control policy.

@@ -284,14 +284,17 @@ Recent progress:
 - Remote NVIDIA/CUDA AI sidecar operation has been validated with classification, safety, BLIP captions, OpenCLIP embeddings, Tesseract OCR, faster-whisper ASR, and audio analysis.
 - Low-concurrency missing-work AI backfill exists for large archives and avoids repeated no-result OCR/ASR work through local state files.
 - Discovery can intentionally scan a storage root or all configured storages, while missing marking remains blocked for read-only/original storage.
+- Discovery now auto-prunes nested child storage roots from parent/all-storage scans, so broad Samba parents and narrower child storages can coexist without double indexing.
 - The WebUI shell has a mobile-friendly navigation and overlay pass.
 - Explorer folder views now use PostgreSQL aggregation and paged direct-file queries, with WebUI Load More pagination and compact month filtering.
 - Vite chunks are split for Vue/OpenLayers/HLS; HLS is lazy-loaded only when video transcoding playback requires it.
+- Essential metadata export exists as a single `.7z` archive containing PostgreSQL dump, redacted config, storage manifest, and restore notes without originals/previews.
 
 Next high-value work:
 
 - Add a durable per-asset AI run ledger so tasks like face detection can record "checked, no faces" without relying on external backfill state files.
 - Promote the AI backfill driver into a first-class PostgreSQL job type with pause/resume controls in the Jobs page.
+- Add scheduled essential export/backup rotation and restore smoke testing.
 - Add pgvector health/readiness checks to Diagnostics and Component Manager.
 - Continue mobile UX testing on Android/iOS browsers, especially map/player/gallery workflows.
 - Add operator controls for AI backfill rate limits, per-storage scopes, and no-speech/no-text policies.

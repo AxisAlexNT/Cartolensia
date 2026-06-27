@@ -402,6 +402,10 @@ func (a *FSAdapter) WalkRecursiveBounded(ctx context.Context, opts WalkOptions, 
 		if rel == "" {
 			return true, nil
 		}
+		if excludedDirectoryByPattern(rel, opts.ExcludePatterns) {
+			addSkipped("pattern")
+			return true, nil
+		}
 		if shouldStop() {
 			return true, nil
 		}
@@ -471,6 +475,10 @@ func (a *FSAdapter) WalkRecursiveBounded(ctx context.Context, opts WalkOptions, 
 		if shouldStop() {
 			return nil
 		}
+		if excludedDirectoryByPattern(rel, opts.ExcludePatterns) {
+			addSkipped("pattern")
+			return nil
+		}
 		full := a.root
 		var err error
 		if strings.TrimSpace(rel) != "" {
@@ -516,6 +524,10 @@ func (a *FSAdapter) WalkRecursiveBounded(ctx context.Context, opts WalkOptions, 
 				continue
 			}
 			if entry.IsDir() {
+				if excludedDirectoryByPattern(childRel, opts.ExcludePatterns) {
+					addSkipped("pattern")
+					continue
+				}
 				queued, err := enqueueFolder(childRel)
 				if err != nil {
 					return err
@@ -638,8 +650,9 @@ func extensionAllowed(ext string, include map[string]struct{}) bool {
 }
 
 func excludedByPattern(relativePath string, patterns []string) bool {
+	relativePath = normalizeGlobPath(relativePath)
 	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
+		pattern = normalizeGlobPath(pattern)
 		if pattern == "" {
 			continue
 		}
@@ -651,6 +664,39 @@ func excludedByPattern(relativePath string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+func excludedDirectoryByPattern(relativePath string, patterns []string) bool {
+	relativePath = normalizeGlobPath(relativePath)
+	if relativePath == "" {
+		return false
+	}
+	for _, pattern := range patterns {
+		pattern = normalizeGlobPath(pattern)
+		if pattern == "" {
+			continue
+		}
+		if strings.HasSuffix(pattern, "/**") {
+			prefix := strings.TrimSuffix(pattern, "/**")
+			if relativePath == prefix || strings.HasPrefix(relativePath, prefix+"/") {
+				return true
+			}
+		}
+		if ok, _ := path.Match(pattern, relativePath); ok {
+			return true
+		}
+		if ok, _ := path.Match(pattern, path.Base(relativePath)); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeGlobPath(value string) string {
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "/")
+	return value
 }
 
 func (a *FSAdapter) Stat(relativePath string) (FileInfo, error) {

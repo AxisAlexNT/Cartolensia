@@ -377,3 +377,19 @@ Explorer folder mode now has a PostgreSQL implementation for production stores. 
 Supporting indexes are added in migration `017_explorer_scale_indexes.sql`, including path-pattern indexes for prefix scans and sort-specific indexes for common folder orders. The in-memory catalog grouping remains as a fallback for non-PostgreSQL stores and tests.
 
 The WebUI consumes this as a paged folder API. It renders the first page, shows the total, and asks for additional pages only when requested. This prevents a single folder with thousands of media files from freezing the browser or forcing a catalog-wide backend scan.
+
+## 2026-06-27 Overlap-Safe Multi-Storage Discovery
+
+Production NAS deployments may configure both a broad parent share and narrower child shares. For example, a parent storage may point at `old_drives/compressed_data` while separate child storages point at `old_drives/compressed_data/x12_los20` or `old_drives/compressed_data/Nokia5228`.
+
+Discovery now handles that shape explicitly:
+
+- the storage registry remains a list of independent strict-read-only filesystem adapters;
+- before scanning each storage, discovery compares filesystem roots and computes nested child roots relative to the parent;
+- parent scans add automatic subtree exclusions such as `x12_los20/**`;
+- the bounded filesystem walker prunes excluded directories before descending into them;
+- child storages are still scanned through their own storage names, preserving stable storage URLs and avoiding duplicate parent-path records.
+
+This applies to `storage=all` jobs and to direct parent storage scans. It is intentionally metadata-only: unavailable child storage does not delete metadata, does not mark files missing, and does not write to originals. If an operator removes a child storage from config, future parent scans can cover that subtree normally.
+
+The implementation keeps dry-run/preview caps separate from normal discovery. For normal production indexing, `max_files=-1` and `max_bytes=-1` are explicit unlimited sentinels. Missing-file marking remains disabled.

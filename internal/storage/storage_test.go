@@ -173,6 +173,49 @@ func TestFSAdapterWalkRecursiveBoundedHandlesSaturatedFolderQueue(t *testing.T) 
 	}
 }
 
+func TestFSAdapterWalkRecursiveBoundedPrunesExcludedSubtrees(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{
+		"keep/a.jpg",
+		"skip/b.jpg",
+		"skip/nested/c.jpg",
+		"also-skip/d.jpg",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, filepath.FromSlash(rel))), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel)), []byte("dummy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter, err := NewFSAdapter("fixture", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var visited []string
+	report, err := adapter.WalkRecursiveBounded(context.Background(), WalkOptions{
+		MaxFiles:          -1,
+		MaxBytes:          -1,
+		MaxFolderWorkers:  2,
+		MaxFileWorkers:    2,
+		FolderQueueDepth:  4,
+		IncludeExtensions: []string{"jpg"},
+		ExcludePatterns:   []string{"skip/**", "also-skip"},
+	}, func(info FileInfo) error {
+		visited = append(visited, info.RelativePath)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visited) != 1 || visited[0] != "keep/a.jpg" {
+		t.Fatalf("expected only keep/a.jpg, got %#v", visited)
+	}
+	if report.SkippedReasons["pattern"] == 0 {
+		t.Fatalf("expected pattern skips in report: %#v", report)
+	}
+}
+
 func TestParseURLRejectsEncodedTraversal(t *testing.T) {
 	if _, err := ParseURL("fs://fixture/photos/%2e%2e/secret.jpg"); !errors.Is(err, ErrTraversal) {
 		t.Fatalf("expected traversal error, got %v", err)

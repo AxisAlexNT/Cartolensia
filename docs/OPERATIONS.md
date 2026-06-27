@@ -853,3 +853,47 @@ nohup env CARTOLENSIA_DATABASE_URL="$ds" \
 ```
 
 Do not launch full-archive hashing casually on remote NAS storage. Hashing is read-only, but it can still read many terabytes and compete with previewing, discovery, and AI. Prefer discovery and metadata enrichment first, then scoped hashing for duplicates/integrity work.
+
+### Parent Samba Sources And Child Storage Overlap
+
+It is valid to configure a broad parent Samba mount and narrower child mounts at the same time, as long as every mount is read-only. Cartolensia detects nested filesystem roots during discovery and automatically excludes configured child roots from the parent scan.
+
+Recommended large-archive pattern:
+
+1. Mount every Samba source read-only.
+2. Configure each source with `mode: strict_read_only`.
+3. Use `storage=all`, `max_files=-1`, and `max_bytes=-1` for normal refresh discovery.
+4. Keep missing-file marking disabled.
+5. Let unavailable optional storages report health/errors without deleting metadata.
+
+When adding a parent source after child sources are already indexed, do not remove the child sources just to avoid duplication. Leave them configured; discovery will prune parent subtrees like `x12_los20/**` while still scanning those child roots under their existing storage names.
+
+### Essential Metadata Export
+
+For a small restorable backup that does not contain originals or generated previews, run:
+
+```bash
+/var/lib/cartolensia/run/create-essential-export.sh
+```
+
+The export contains:
+
+- a PostgreSQL custom-format dump;
+- a redacted production config;
+- a storage manifest;
+- restore notes.
+
+It does not contain:
+
+- original media;
+- preview/cache thumbnails;
+- component/model caches;
+- local secret files.
+
+The generated `.7z` is sensitive because it contains the database dump. Keep the file mode restrictive and transfer it only over SSH, for example:
+
+```bash
+scp <cartolensia-host>:/var/lib/cartolensia/exports/cartolensia-essential-YYYYMMDDTHHMMSSZ.7z .
+```
+
+Restore notes are included inside the archive. In short, restore the DB with `pg_restore`, recreate local secrets/config from the redacted template, and remount originals read-only.

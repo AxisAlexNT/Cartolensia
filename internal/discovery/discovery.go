@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -224,22 +225,35 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 		if err != nil {
 			return jobs.Permanent(err)
 		}
+		storagePayload := payload
+		if excludes := nestedStorageExcludePatterns(storageConfig, r.Registry.ListStorages()); len(excludes) > 0 {
+			storagePayload.ExcludePatterns = append(compactPayloadStrings(storagePayload.ExcludePatterns), excludes...)
+			if !isRealArchiveRoot(storageConfig.Root) {
+				if storagePayload.MaxFiles == 0 {
+					storagePayload.MaxFiles = -1
+				}
+				if storagePayload.MaxBytes == 0 {
+					storagePayload.MaxBytes = -1
+				}
+			}
+			jobs.AddLog(job, "info", fmt.Sprintf("storage %s excludes nested storage roots already configured as separate storages: %v", storageConfig.Name, excludes))
+		}
 		var files []storage.FileInfo
-		if payload.bounded() || payload.Storage == "" {
+		if storagePayload.bounded() || storagePayload.Storage == "" {
 			if isRealArchiveRoot(storageConfig.Root) {
-				if err := validateRealArchiveScanPayload(payload); err != nil {
+				if err := validateRealArchiveScanPayload(storagePayload); err != nil {
 					cause := jobs.Permanent(err)
 					_ = r.failJob(ctx, *job, cause)
 					return cause
 				}
 			}
-			prefixes, err := normalizeScanPrefixes(adapter, payload.Prefixes)
+			prefixes, err := normalizeScanPrefixes(adapter, storagePayload.Prefixes)
 			if err != nil {
 				cause := jobs.Permanent(err)
 				_ = r.failJob(ctx, *job, cause)
 				return cause
 			}
-			if err := r.scanBounded(ctx, job, adapter, storageConfig.Name, prefixes, payload); err != nil {
+			if err := r.scanBounded(ctx, job, adapter, storageConfig.Name, prefixes, storagePayload); err != nil {
 				return err
 			}
 			continue
@@ -429,6 +443,37 @@ func applyWalkReportCounters(job *jobs.Job, report storage.WalkReport) {
 	job.Counters.FilesSeen = int64(report.FilesSeen)
 	job.Counters.FilesReturned = int64(report.FilesReturned)
 	job.Counters.FilesSkipped = int64(report.FilesSkipped)
+}
+
+func nestedStorageExcludePatterns(parent storage.Config, storages []storage.Config) []string {
+	if parent.Kind != "fs" {
+		return nil
+	}
+	parentRoot := filepath.Clean(parent.Root)
+	var excludes []string
+	seen := map[string]struct{}{}
+	for _, child := range storages {
+		if child.Name == parent.Name || child.Kind != "fs" {
+			continue
+		}
+		childRoot := filepath.Clean(child.Root)
+		rel, err := filepath.Rel(parentRoot, childRoot)
+		if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if rel == "." || rel == "" {
+			continue
+		}
+		pattern := strings.Trim(rel, "/") + "/**"
+		if _, ok := seen[pattern]; ok {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		excludes = append(excludes, pattern)
+	}
+	sort.Strings(excludes)
+	return excludes
 }
 
 func containsRealArchiveStorage(storages []storage.Config) bool {
