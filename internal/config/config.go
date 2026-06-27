@@ -27,11 +27,13 @@ type Config struct {
 }
 
 type HTTPConfig struct {
-	Addr              string   `json:"addr" yaml:"addr"`
-	TLSCertFile       string   `json:"tls_cert_file,omitempty" yaml:"tls_cert_file"`
-	TLSKeyFile        string   `json:"tls_key_file,omitempty" yaml:"tls_key_file"`
-	TLSAutoSelfSigned bool     `json:"tls_auto_self_signed,omitempty" yaml:"tls_auto_self_signed"`
-	TLSHosts          []string `json:"tls_hosts,omitempty" yaml:"tls_hosts"`
+	Addr                string   `json:"addr" yaml:"addr"`
+	TLSAddr             string   `json:"tls_addr,omitempty" yaml:"tls_addr"`
+	RedirectHTTPToHTTPS bool     `json:"redirect_http_to_https,omitempty" yaml:"redirect_http_to_https"`
+	TLSCertFile         string   `json:"tls_cert_file,omitempty" yaml:"tls_cert_file"`
+	TLSKeyFile          string   `json:"tls_key_file,omitempty" yaml:"tls_key_file"`
+	TLSAutoSelfSigned   bool     `json:"tls_auto_self_signed,omitempty" yaml:"tls_auto_self_signed"`
+	TLSHosts            []string `json:"tls_hosts,omitempty" yaml:"tls_hosts"`
 }
 
 type DatabaseConfig struct {
@@ -149,6 +151,9 @@ func Validate(cfg *Config) error {
 	if (strings.TrimSpace(cfg.HTTP.TLSCertFile) == "") != (strings.TrimSpace(cfg.HTTP.TLSKeyFile) == "") {
 		return errors.New("http.tls_cert_file and http.tls_key_file must be configured together")
 	}
+	if strings.TrimSpace(cfg.HTTP.TLSAddr) != "" && strings.TrimSpace(cfg.HTTP.TLSCertFile) == "" && !cfg.HTTP.TLSAutoSelfSigned {
+		return errors.New("http.tls_addr requires http.tls_auto_self_signed or configured certificate files")
+	}
 	if strings.TrimSpace(cfg.Cache.Dir) == "" {
 		return errors.New("cache.dir is required")
 	}
@@ -239,6 +244,24 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("CARTOLENSIA_HTTP_ADDR"); value != "" {
 		cfg.HTTP.Addr = value
 	}
+	if value := os.Getenv("CARTOLENSIA_HTTP_TLS_ADDR"); value != "" {
+		cfg.HTTP.TLSAddr = value
+	}
+	if value := os.Getenv("CARTOLENSIA_HTTP_REDIRECT_HTTP_TO_HTTPS"); value != "" {
+		cfg.HTTP.RedirectHTTPToHTTPS = value == "1" || strings.EqualFold(value, "true")
+	}
+	if value := os.Getenv("CARTOLENSIA_HTTP_TLS_CERT_FILE"); value != "" {
+		cfg.HTTP.TLSCertFile = value
+	}
+	if value := os.Getenv("CARTOLENSIA_HTTP_TLS_KEY_FILE"); value != "" {
+		cfg.HTTP.TLSKeyFile = value
+	}
+	if value := os.Getenv("CARTOLENSIA_HTTP_TLS_AUTO_SELF_SIGNED"); value != "" {
+		cfg.HTTP.TLSAutoSelfSigned = value == "1" || strings.EqualFold(value, "true")
+	}
+	if value := os.Getenv("CARTOLENSIA_HTTP_TLS_HOSTS"); value != "" {
+		cfg.HTTP.TLSHosts = splitCSV(value)
+	}
 	if value := os.Getenv("CARTOLENSIA_DATABASE_URL"); value != "" {
 		cfg.Database.URL = value
 	}
@@ -287,4 +310,16 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("CARTOLENSIA_AUTH_CSRF_HEADER"); value != "" {
 		cfg.Auth.CSRFHeader = value
 	}
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

@@ -79,6 +79,10 @@ func New(ctx context.Context, configPath string) (*App, error) {
 			db.Close()
 			return nil, err
 		}
+		if err := db.EnsureOptionalVectorSchema(ctx); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("ensure optional vector schema: %w", err)
+		}
 		if err := db.SnapshotConfig(ctx, cfg); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("snapshot config: %w", err)

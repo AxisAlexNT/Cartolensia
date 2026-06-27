@@ -346,3 +346,22 @@ GPS track media lookup uses those candidates plus geotag proximity, so photos wi
 Asset context is exposed through `GET /api/v1/assets/{id}/related`. The current implementation is a bounded PostgreSQL/local query service that returns grouped related assets by folder, device metadata, same local day, a short time window, and GPS-track overlap. It is intentionally not a separate graph database yet; the response gives enough related records for asset-detail navigation while avoiding unbounded scans.
 
 Universal Search still uses the `postgres_local` backend. Plain searches now page through all candidate assets before applying local metadata/OCR/place matching, while explicit tokens such as `ext:`, `kind:`, `filename:`, and `path:` can narrow the initial asset query. Space-separated tokens are AND, comma-separated alternatives are OR within a token, and wildcard matching is supported for filename/path/text fields.
+
+## 2026-06-27 Production Vector And AI Execution Update
+
+The vector layer remains abstracted, but PostgreSQL/pgvector is now the preferred large-archive local backend when the `vector` extension is available. Embeddings are stored in two forms:
+
+- `embedding_json` remains the portable JSON representation;
+- `embedding_vector vector(512)` is populated for OpenCLIP ViT-B/32 embeddings and indexed with `ivfflat`.
+
+When pgvector is unavailable, Cartolensia falls back to the previous bounded JSON cosine search. `/api/v1/vector/status` reports which backend is active.
+
+Production AI execution is split from the main service:
+
+- the Go backend owns authentication, media authorization, jobs, and PostgreSQL persistence;
+- the Python sidecar owns model loading and local inference;
+- the sidecar reads media through a loopback-only tokenized media URL, not through user cookies;
+- model caches live under the configured model directory, typically `/var/lib/cartolensia/models`;
+- long archive-wide AI work is driven by small missing-work batches rather than one monolithic job.
+
+For large NAS-backed deployments, discovery and metadata enrichment remain the first pipeline stages. AI/OCR/ASR/caption/embedding work is opt-in, resumable by metadata state, and should be tuned with conservative batch sizes.

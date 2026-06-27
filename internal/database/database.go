@@ -190,6 +190,35 @@ func (db *DB) Capabilities(ctx context.Context) ([]Capability, error) {
 	return out, nil
 }
 
+func (db *DB) EnsureOptionalVectorSchema(ctx context.Context) error {
+	_, err := db.pool.Exec(ctx, `
+do $$
+begin
+    create extension if not exists vector;
+exception when others then
+    raise notice 'pgvector extension is not available: %', sqlerrm;
+end $$;
+
+do $$
+begin
+    if exists(select 1 from pg_extension where extname = 'vector') then
+        execute 'alter table asset_embeddings add column if not exists embedding_vector vector(512)';
+        execute 'create index if not exists idx_asset_embeddings_vector_cosine on asset_embeddings using ivfflat (embedding_vector vector_cosine_ops) with (lists = 100)';
+    end if;
+exception when others then
+    raise notice 'optional pgvector embedding setup skipped: %', sqlerrm;
+end $$;`)
+	return err
+}
+
+func (db *DB) PGVectorReady(ctx context.Context) bool {
+	var ready bool
+	err := db.pool.QueryRow(ctx, `
+		select exists(select 1 from pg_extension where extname='vector')
+		   and exists(select 1 from information_schema.columns where table_name='asset_embeddings' and column_name='embedding_vector')`).Scan(&ready)
+	return err == nil && ready
+}
+
 func (db *DB) SnapshotConfig(ctx context.Context, cfg config.Config) error {
 	data, err := json.Marshal(cfg)
 	if err != nil {

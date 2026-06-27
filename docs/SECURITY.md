@@ -245,3 +245,14 @@ The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not u
 - Audio previews in Explorer/Search/Gallery stream originals through the existing read-only media endpoint; they do not create sidecars or waveform files under original storage.
 - Search wildcard and field-token support is executed through the existing PostgreSQL/local backend and bounded paging. It does not enable shell-style filesystem globbing against storage roots.
 - Middle-click/new-tab support uses browser anchors for navigation only. It does not change authorization or storage access rules.
+
+## 2026-06-27 Production HTTPS And AI Media Security Notes
+
+- Production deployments should serve the UI/API over HTTPS. Self-signed certificates are acceptable for private LAN deployments when operators explicitly accept the browser warning.
+- Local-auth session cookies are marked `Secure` in production templates. Operators must use the HTTPS URL for login and media playback.
+- Anonymous users may access only explicitly public routes and explicitly public media. Protected API routes and original media endpoints require authentication.
+- AI sidecars must not receive reusable user cookies. Cartolensia provides a narrow loopback-only AI media endpoint guarded by `CARTOLENSIA_AI_MEDIA_TOKEN`; it only serves `GET`/`HEAD` original media to loopback callers with the exact token.
+- Never expose the AI media token, admin password file, SMB credentials, PostgreSQL password, or session cookies in logs or reports.
+- The AI sidecar reads media through Cartolensia and writes only metadata to PostgreSQL. It must not write temp files, models, OCR cache, ASR cache, or components under originals/Samba storage.
+- pgvector stores embeddings in PostgreSQL metadata. It does not copy or modify original files.
+- Large archive backfill should be low-concurrency and missing-work based. Avoid broad AI jobs that would repeatedly reread the same originals or create unbounded write amplification.

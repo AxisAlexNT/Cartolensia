@@ -61,6 +61,9 @@ func DecodePayload(raw any) Payload {
 		_ = json.Unmarshal(data, &payload)
 	}
 	payload.Storage = strings.TrimSpace(payload.Storage)
+	if strings.EqualFold(payload.Storage, "all") {
+		payload.Storage = ""
+	}
 	payload.Prefix = strings.TrimSpace(payload.Prefix)
 	payload.Prefixes = compactStrings(payload.Prefixes)
 	if payload.Prefix != "" {

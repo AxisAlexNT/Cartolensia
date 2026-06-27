@@ -67,7 +67,8 @@ func DecodeDryRunPayload(raw any) DryRunPayload {
 func (p DryRunPayload) SafetySummary() map[string]any {
 	return map[string]any{
 		"strict_read_only_required": true,
-		"prefixes_required":         true,
+		"prefixes_required":         false,
+		"empty_prefix_scope":        "storage root",
 		"default_max_files":         50,
 		"unlimited_requires":        "normal indexing may use -1; dry-run previews stay capped unless allow_over_limit is explicit",
 		"default_max_bytes":         int64(2 << 30),
@@ -85,9 +86,6 @@ func (r Runner) DryRun(ctx context.Context, job *jobs.Job) error {
 	payload := DecodeDryRunPayload(job.Payload)
 	if payload.Storage == "" {
 		return jobs.Permanent(fmt.Errorf("dry-run storage is required"))
-	}
-	if len(payload.Prefixes) == 0 {
-		return jobs.Permanent(fmt.Errorf("dry-run prefixes are required"))
 	}
 	if err := jobs.Start(job); err != nil {
 		return err

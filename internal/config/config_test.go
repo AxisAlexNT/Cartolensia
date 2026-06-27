@@ -27,12 +27,22 @@ func TestLoadYAMLAndEnvOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CARTOLENSIA_HTTP_ADDR", ":9100")
+	t.Setenv("CARTOLENSIA_HTTP_TLS_ADDR", ":9443")
+	t.Setenv("CARTOLENSIA_HTTP_REDIRECT_HTTP_TO_HTTPS", "true")
+	t.Setenv("CARTOLENSIA_HTTP_TLS_AUTO_SELF_SIGNED", "true")
+	t.Setenv("CARTOLENSIA_HTTP_TLS_HOSTS", "cartolensia.local,127.0.0.1")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.HTTP.Addr != ":9100" {
 		t.Fatalf("env override did not apply: %q", cfg.HTTP.Addr)
+	}
+	if cfg.HTTP.TLSAddr != ":9443" || !cfg.HTTP.RedirectHTTPToHTTPS {
+		t.Fatalf("tls env overrides did not apply: %#v", cfg.HTTP)
+	}
+	if !cfg.HTTP.TLSAutoSelfSigned || len(cfg.HTTP.TLSHosts) != 2 {
+		t.Fatalf("tls self-signed env overrides did not apply: %#v", cfg.HTTP)
 	}
 	if cfg.Database.URL != "postgres://example" {
 		t.Fatalf("unexpected db url %q", cfg.Database.URL)
@@ -73,5 +83,17 @@ func TestValidateAllowsAutoSelfSignedTLS(t *testing.T) {
 	cfg.HTTP.TLSHosts = []string{"cartolensia.local", "127.0.0.1"}
 	if err := Validate(&cfg); err != nil {
 		t.Fatalf("expected self-signed TLS configuration to pass: %v", err)
+	}
+}
+
+func TestValidateRequiresTLSConfigForSeparateTLSAddr(t *testing.T) {
+	cfg := Defaults()
+	cfg.HTTP.TLSAddr = ":9443"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected tls_addr without TLS configuration to fail")
+	}
+	cfg.HTTP.TLSAutoSelfSigned = true
+	if err := Validate(&cfg); err != nil {
+		t.Fatalf("expected tls_addr with self-signed TLS to pass: %v", err)
 	}
 }

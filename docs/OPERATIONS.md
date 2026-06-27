@@ -787,3 +787,46 @@ curl -fsS "http://127.0.0.1:18080/api/v1/gps/tracks/<track-id>/nearby-assets?dis
 Video Track Player sessions now use the same timestamp candidates. The UI exposes a searchable video selector and a track-name pill selector. If a chosen video has no `taken_at`, Cartolensia can still use filename or file mtime candidates and reports the chosen `time_source` in session/position responses.
 
 Manual offset controls remain important when a device encodes local filenames, EXIF, and filesystem mtimes inconsistently. If a candidate timestamp is just outside the track range, the position endpoint may clamp to a nearby track start/end rather than fail.
+
+## Remote Production HTTPS And AI Backfill
+
+For the current rjazhenka-style production deployment:
+
+- Browser URL: `https://<host-or-ip>:18443/`.
+- Plain HTTP on `:18080` is a redirect-only convenience for browser users.
+- Production cookies are `Secure`, so login and media playback must use HTTPS.
+- The first admin login uses the configured admin email, for example `admin@example.local`, and the password stored in `/etc/cartolensia/admin-password` on the host. Copy only the file value; trailing newlines are ignored.
+- Originals must remain mounted read-only. Cache, model, component, export, logs, and PostgreSQL data stay under `/var/lib/cartolensia` or another configured data root outside originals.
+
+Check services:
+
+```bash
+systemctl status cartolensia-postgres cartolensia-ai cartolensia
+curl -k https://127.0.0.1:18443/api/v1/health
+curl http://127.0.0.1:19090/health
+```
+
+The AI backfill driver is intended for large archives. It selects missing metadata rows from PostgreSQL and runs small authenticated API batches:
+
+```bash
+source /etc/cartolensia/cartolensia.env
+source /opt/cartolensia/current/bin/cartolensia-env
+python3 /var/lib/cartolensia/run/run-ai-backfill.py
+```
+
+Useful environment controls:
+
+- `CARTOLENSIA_AI_BACKFILL_PHOTO_BATCH`, default `8`;
+- `CARTOLENSIA_AI_BACKFILL_OCR_BATCH`, default `4`;
+- `CARTOLENSIA_AI_BACKFILL_AUDIO_BATCH`, default `2`;
+- `CARTOLENSIA_AI_BACKFILL_TRANSCRIBE_BATCH`, default `1`;
+- `CARTOLENSIA_AI_BACKFILL_MAX_AUDIO_SECONDS`, default `900`;
+- `CARTOLENSIA_AI_BACKFILL_MAX_VIDEO_SECONDS`, default `900`.
+
+Logs should go under `/var/lib/cartolensia/logs`. The state directory `/var/lib/cartolensia/run/ai-backfill-state` records successful no-result checks so blank OCR/no-speech assets are not retried forever.
+
+For pgvector, the PostgreSQL runtime must have the `vector` extension installed in the active server library path. Cartolensia creates the optional vector column/index automatically when the extension is available. Verify with:
+
+```bash
+curl -k -b <authenticated-cookie> https://127.0.0.1:18443/api/v1/vector/status
+```

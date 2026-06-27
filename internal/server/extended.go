@@ -1080,13 +1080,10 @@ func validateDryRunPayload(registry *storage.Registry, payload discovery.DryRunP
 	if !found {
 		return fmt.Errorf("unknown storage %q", payload.Storage)
 	}
-	if len(payload.Prefixes) == 0 {
-		return fmt.Errorf("dry-run prefixes are required")
-	}
 	for _, prefix := range payload.Prefixes {
 		prefix = strings.TrimSpace(prefix)
 		if prefix == "" || prefix == "." || prefix == "/" {
-			return fmt.Errorf("empty dry-run prefix is not allowed")
+			return fmt.Errorf("empty dry-run prefix item is not allowed; omit prefixes to preview the storage root")
 		}
 	}
 	if payload.MarkMissing {

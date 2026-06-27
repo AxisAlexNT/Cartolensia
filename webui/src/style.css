@@ -2591,10 +2591,24 @@ td {
 }
 
 @media (max-width: 760px) {
+  body {
+    min-width: 0;
+  }
+
   .topbar {
     align-items: stretch;
     flex-direction: column;
-    padding: 12px;
+    gap: 10px;
+    min-height: 0;
+    padding: 10px 12px;
+  }
+
+  .topbar h1 {
+    font-size: 18px;
+  }
+
+  .topbar span {
+    overflow-wrap: anywhere;
   }
 
   .login-form,
@@ -2614,12 +2628,62 @@ td {
 
   .layout {
     grid-template-columns: 1fr;
+    min-height: auto;
   }
 
   .sidebar {
     border-bottom: 1px solid #d8dee4;
     border-right: 0;
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 8px 10px;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+
+  .sidebar button {
+    flex: 0 0 auto;
+    min-width: max-content;
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+
+  .content {
+    padding: 12px;
+  }
+
+  .panel-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .gallery-overlay {
+    grid-template-columns: 1fr;
+    padding: 10px;
+  }
+
+  .gallery-nav {
+    display: none;
+  }
+
+  .gallery-stage img,
+  .gallery-stage video,
+  .gallery-fallback,
+  .gallery-audio-player {
+    max-height: calc(100vh - 220px);
+  }
+
+  .gallery-audio-player {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .gallery-audio-player audio {
+    width: 100%;
   }
 }

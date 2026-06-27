@@ -124,6 +124,34 @@ func TestBuiltInTranscodingPresetsExposeGPUWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestBuiltInTranscodingPresetExactResolvesAdvertisedProfiles(t *testing.T) {
+	caps := transcoding.Capabilities{
+		FFmpeg: transcoding.ToolInfo{Available: true},
+		Hardware: transcoding.HardwareHints{
+			NvidiaSMI: true,
+			VAAPI:     true,
+			DevDRI:    true,
+		},
+		Encoders: []transcoding.Encoder{
+			{Name: "libx264"},
+			{Name: "h264_nvenc"},
+			{Name: "h264_vaapi"},
+		},
+	}
+	for _, id := range []string{"h264_720p_lan", "h264_nvenc_720p_lan", "h264_vaapi_720p_lan"} {
+		preset, ok := builtInPresetExact(id, caps)
+		if !ok {
+			t.Fatalf("expected exact built-in preset %s", id)
+		}
+		if _, err := transcodeArgsForPreset(preset, "/tmp/input.mp4", t.TempDir()); err != nil {
+			t.Fatalf("expected advertised preset %s to produce args: %v", id, err)
+		}
+	}
+	if _, ok := builtInPresetExact("does_not_exist", caps); ok {
+		t.Fatal("unknown profile should not resolve as a built-in preset")
+	}
+}
+
 func TestVAAPITranscodeArgsIncludeDeviceAndUploadFilter(t *testing.T) {
 	t.Setenv("CARTOLENSIA_VAAPI_DEVICE", "/dev/dri/renderD128")
 	preset := catalog.TranscodingPreset{

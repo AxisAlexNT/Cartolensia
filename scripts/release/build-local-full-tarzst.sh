@@ -123,6 +123,12 @@ stage_project_files() {
   cat >"${STAGE}/config/production-bundle.yaml" <<'YAML'
 http:
   addr: ":18080"
+  tls_addr: ":18443"
+  redirect_http_to_https: true
+  tls_auto_self_signed: true
+  tls_hosts:
+    - "127.0.0.1"
+    - "localhost"
 database:
   url: "postgres://cartolensia:cartolensia@127.0.0.1:15432/cartolensia?sslmode=disable"
   migrations_dir: "./internal/catalog/migrations"
@@ -147,6 +153,9 @@ auth:
   admin_password_env: CARTOLENSIA_ADMIN_PASSWORD
   session_ttl: 24h
   api_token_ttl: 2160h
+  cookie_name: cartolensia_session
+  cookie_secure: true
+  csrf_header: X-CSRF-Token
 YAML
   cat >"${STAGE}/config/remote-executors.example.env" <<'ENV'
 # Copy to .env.local or export before starting Cartolensia.
@@ -392,6 +401,11 @@ export CARTOLENSIA_DATA_DIR="${CARTOLENSIA_DATA_DIR:-${ROOT}/data}"
 export CARTOLENSIA_CONFIG="${CARTOLENSIA_CONFIG:-${ROOT}/config/production-bundle.yaml}"
 export CARTOLENSIA_DATABASE_URL="${CARTOLENSIA_DATABASE_URL:-postgres://cartolensia:cartolensia@127.0.0.1:15432/cartolensia?sslmode=disable}"
 export CARTOLENSIA_HTTP_ADDR="${CARTOLENSIA_HTTP_ADDR:-:18080}"
+export CARTOLENSIA_HTTP_TLS_ADDR="${CARTOLENSIA_HTTP_TLS_ADDR:-:18443}"
+export CARTOLENSIA_HTTP_REDIRECT_HTTP_TO_HTTPS="${CARTOLENSIA_HTTP_REDIRECT_HTTP_TO_HTTPS:-true}"
+export CARTOLENSIA_HTTP_TLS_AUTO_SELF_SIGNED="${CARTOLENSIA_HTTP_TLS_AUTO_SELF_SIGNED:-true}"
+export CARTOLENSIA_HTTP_TLS_HOSTS="${CARTOLENSIA_HTTP_TLS_HOSTS:-127.0.0.1,localhost}"
+export CARTOLENSIA_AUTH_COOKIE_SECURE="${CARTOLENSIA_AUTH_COOKIE_SECURE:-true}"
 export CARTOLENSIA_AI_WORKER_ENDPOINT="${CARTOLENSIA_AI_WORKER_ENDPOINT:-http://127.0.0.1:19090}"
 export CARTOLENSIA_LIBVA_DRIVER_NAME="${CARTOLENSIA_LIBVA_DRIVER_NAME:-radeonsi}"
 export CARTOLENSIA_VDPAU_DRIVER="${CARTOLENSIA_VDPAU_DRIVER:-radeonsi}"
@@ -484,10 +498,11 @@ nohup "${ROOT}/bin/cartolensia" -config "${CARTOLENSIA_CONFIG}" >"${CARTOLENSIA_
 echo "$!" >"${CARTOLENSIA_DATA_DIR}/run/cartolensia.pid"
 echo "Cartolensia PID $(cat "${CARTOLENSIA_DATA_DIR}/run/cartolensia.pid")"
 HTTP_PORT="${CARTOLENSIA_HTTP_ADDR##*:}"
-HEALTH_URL="http://127.0.0.1:${HTTP_PORT}/api/v1/health"
+HTTPS_PORT="${CARTOLENSIA_HTTP_TLS_ADDR##*:}"
+HEALTH_URL="https://127.0.0.1:${HTTPS_PORT}/api/v1/health"
 echo "Waiting for ${HEALTH_URL} ..."
 for _ in $(seq 1 30); do
-  if curl -fsS "${HEALTH_URL}" >/dev/null 2>&1; then
+  if curl -kfsS "${HEALTH_URL}" >/dev/null 2>&1; then
     echo "Cartolensia is ready."
     exit 0
   fi
@@ -514,8 +529,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${ROOT}/bin/cartolensia-env"
 HTTP_PORT="${CARTOLENSIA_HTTP_ADDR##*:}"
+HTTPS_PORT="${CARTOLENSIA_HTTP_TLS_ADDR##*:}"
 echo "Cartolensia root: ${ROOT}"
 echo "Data dir: ${CARTOLENSIA_DATA_DIR}"
+echo "HTTP redirect: http://127.0.0.1:${HTTP_PORT}"
+echo "HTTPS app: https://127.0.0.1:${HTTPS_PORT}"
 if [ -f "${CARTOLENSIA_DATA_DIR}/run/cartolensia.pid" ]; then
   PID="$(cat "${CARTOLENSIA_DATA_DIR}/run/cartolensia.pid")"
   if kill -0 "${PID}" 2>/dev/null; then
@@ -530,10 +548,11 @@ if command -v pg_ctl >/dev/null 2>&1 && [ -d "${CARTOLENSIA_DATA_DIR}/postgres" 
   pg_ctl -D "${CARTOLENSIA_DATA_DIR}/postgres" status || true
 fi
 if command -v curl >/dev/null 2>&1; then
+  HTTPS_PORT="${CARTOLENSIA_HTTP_TLS_ADDR##*:}"
   echo "Health:"
-  curl -fsS "http://127.0.0.1:${HTTP_PORT}/api/v1/health" || true
+  curl -kfsS "https://127.0.0.1:${HTTPS_PORT}/api/v1/health" || true
   printf '\nReadiness:\n'
-  curl -fsS "http://127.0.0.1:${HTTP_PORT}/api/v1/diagnostics/readiness" || true
+  curl -kfsS "https://127.0.0.1:${HTTPS_PORT}/api/v1/diagnostics/readiness" || true
   printf '\n'
 fi
 SH
@@ -570,7 +589,9 @@ HOST="${2:-0.0.0.0}"
 PORT="${3:-19090}"
 VENV="${ROOT}/ai-envs/${FLAVOR}/venv"
 PY=""
-if [ -x "${VENV}/bin/python" ]; then
+if [ -n "${CARTOLENSIA_AI_PYTHON:-}" ] && [ -x "${CARTOLENSIA_AI_PYTHON}" ]; then
+  PY="${CARTOLENSIA_AI_PYTHON}"
+elif [ -x "${VENV}/bin/python" ]; then
   PY="${VENV}/bin/python"
 elif [ -x "${ROOT}/python/bin/python3" ]; then
   PY="${ROOT}/python/bin/python3"
@@ -657,7 +678,7 @@ SH
    ./bin/first-run
    ```
 
-4. Open `http://127.0.0.1:18080` or the host/port configured in `config/production-bundle.yaml`.
+4. Open `https://127.0.0.1:18443` and accept the self-signed certificate warning, or use `http://127.0.0.1:18080` to be redirected to HTTPS.
 5. Run diagnostics:
 
    ```bash

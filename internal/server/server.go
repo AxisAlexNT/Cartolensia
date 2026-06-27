@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"image/jpeg"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -170,6 +172,8 @@ func (s *Server) publicRequest(r *http.Request) bool {
 		return true
 	case strings.HasPrefix(r.URL.Path, "/api/v1/public/"):
 		return true
+	case strings.HasPrefix(r.URL.Path, "/api/v1/ai-media/") && s.aiMediaRequestAuthorized(r):
+		return true
 	case s.publicMediaRequest(r):
 		return true
 	default:
@@ -222,6 +226,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/password", s.handleAuthPassword)
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.handleAuthTokens)
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.handleAuthTokenByID)
+	s.mux.HandleFunc("/api/v1/ai-media/", s.handleAIMedia)
 	s.mux.HandleFunc("/api/v1/storages", s.handleStorages)
 	s.mux.HandleFunc("/api/v1/storages/", s.handleStorageByName)
 	s.mux.HandleFunc("/api/v1/components/status", s.handleComponentsStatus)
@@ -3178,7 +3183,7 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":            aiWorkersConfigured(workers),
 		"inference_running":  false,
-		"vector_store":       "local_json",
+		"vector_store":       s.vectorBackendName(),
 		"embedding_jobs":     []string{"ai_embed"},
 		"accelerator_hints":  hints,
 		"native_worker":      native,
@@ -3542,6 +3547,13 @@ func assetAISuffix(asset catalog.Asset) string {
 }
 
 func (s *Server) aiMediaURL(r *http.Request, assetID string) string {
+	if token := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_MEDIA_TOKEN")); token != "" {
+		base := strings.TrimRight(strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_MEDIA_BASE_URL")), "/")
+		if base == "" {
+			base = "http://127.0.0.1" + listenPortForURL(s.deps.Config.HTTP.Addr, ":18080")
+		}
+		return base + "/api/v1/ai-media/" + url.PathEscape(assetID) + "/original?token=" + url.QueryEscape(token)
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -3551,6 +3563,19 @@ func (s *Server) aiMediaURL(r *http.Request, assetID string) string {
 		host = strings.TrimPrefix(s.deps.Config.HTTP.Addr, "http://")
 	}
 	return scheme + "://" + host + "/api/v1/media/" + assetID + "/original"
+}
+
+func listenPortForURL(addr, fallback string) string {
+	if addr == "" {
+		return fallback
+	}
+	if _, port, err := net.SplitHostPort(addr); err == nil && port != "" {
+		return ":" + port
+	}
+	if strings.HasPrefix(addr, ":") {
+		return addr
+	}
+	return fallback
 }
 
 func callAISidecar(ctx context.Context, endpoint string, payload map[string]any) (aiInferencePayload, error) {
@@ -5295,6 +5320,15 @@ func (s *Server) handleVectorStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) vectorStatusPayload(ctx context.Context) map[string]any {
 	stats, _ := s.deps.Store.Stats(ctx)
 	embeddings, _ := s.deps.Store.ListAssetEmbeddings(ctx, "")
+	pgvectorInstalled := capabilityInstalled(s.deps.Capabilities, "vector")
+	backend := "local_json_bruteforce"
+	pgvectorNote := "pgvector extension is not installed; local JSON/bruteforce fallback is active."
+	contract := "OpenCLIP embeddings are stored as JSON/float arrays and searched with bounded brute-force cosine similarity."
+	if pgvectorInstalled {
+		backend = "pgvector_ivfflat"
+		pgvectorNote = "pgvector is installed; 512-dimensional image/text embeddings are also stored in an indexed vector column."
+		contract = "OpenCLIP embeddings are stored in PostgreSQL JSON for portability and pgvector for indexed cosine search when dimensions match."
+	}
 	embeddedAssets := map[string]struct{}{}
 	dimensions := 0
 	for _, embedding := range embeddings {
@@ -5305,10 +5339,10 @@ func (s *Server) vectorStatusPayload(ctx context.Context) map[string]any {
 	}
 	return map[string]any{
 		"available":       true,
-		"backend":         "local_json_bruteforce",
-		"pgvector":        capabilityInstalled(s.deps.Capabilities, "vector"),
-		"pgvector_note":   "pgvector is optional; the local fallback is active for this small collection.",
-		"contract":        "OpenCLIP embeddings are stored as JSON/float arrays and searched with bounded brute-force cosine similarity.",
+		"backend":         backend,
+		"pgvector":        pgvectorInstalled,
+		"pgvector_note":   pgvectorNote,
+		"contract":        contract,
 		"embedded_assets": len(embeddedAssets),
 		"embedding_count": len(embeddings),
 		"dimensions":      dimensions,
@@ -5318,6 +5352,13 @@ func (s *Server) vectorStatusPayload(ctx context.Context) map[string]any {
 			"embedded_assets":          len(embeddedAssets),
 		},
 	}
+}
+
+func (s *Server) vectorBackendName() string {
+	if capabilityInstalled(s.deps.Capabilities, "vector") {
+		return "pgvector_ivfflat"
+	}
+	return "local_json_bruteforce"
 }
 
 func (s *Server) aiDataCounts(ctx context.Context) map[string]any {
@@ -5624,6 +5665,43 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleAIMedia(w http.ResponseWriter, r *http.Request) {
+	if !s.aiMediaRequestAuthorized(r) {
+		writeError(w, http.StatusUnauthorized, auth.ErrUnauthenticated)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/ai-media/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "original" {
+		http.NotFound(w, r)
+		return
+	}
+	s.handleOriginal(w, r, parts[0])
+}
+
+func (s *Server) aiMediaRequestAuthorized(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	token := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_MEDIA_TOKEN"))
+	if token == "" {
+		return false
+	}
+	got := strings.TrimSpace(r.URL.Query().Get("token"))
+	if got == "" {
+		got = strings.TrimSpace(r.Header.Get("X-Cartolensia-AI-Media-Token"))
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) handleStreamOptions(w http.ResponseWriter, r *http.Request, assetID string) {
@@ -6542,6 +6620,9 @@ func (s *Server) indexingScopeSummary(ctx context.Context, storageName string, p
 	if err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(storageName, "all") {
+		storageName = ""
+	}
 	prefixes = compactStrings(prefixes)
 	summary := map[string]any{
 		"storage":          storageName,
@@ -6589,6 +6670,9 @@ func (s *Server) indexingScopeSummary(ctx context.Context, storageName string, p
 }
 
 func assetInScope(loc catalog.Location, storageName string, prefixes []string) bool {
+	if strings.EqualFold(storageName, "all") {
+		storageName = ""
+	}
 	if storageName != "" && loc.StorageName != storageName {
 		return false
 	}
@@ -6606,6 +6690,9 @@ func assetInScope(loc catalog.Location, storageName string, prefixes []string) b
 }
 
 func latestIndexingJobs(jobsList []jobs.Job, storageName string, prefixes []string) map[string]jobs.Job {
+	if strings.EqualFold(storageName, "all") {
+		storageName = ""
+	}
 	out := map[string]jobs.Job{}
 	kinds := map[string]struct{}{
 		"discovery":        {},

@@ -110,9 +110,6 @@ func ValidateScanSafety(registry *storage.Registry, payload ScanPayload) error {
 	}
 	storages := registry.ListStorages()
 	if strings.EqualFold(payload.Storage, "all") {
-		if containsRealArchiveStorage(storages) {
-			return fmt.Errorf("storage=all is refused for real archive storage; choose one storage and a bounded adapter-relative prefix")
-		}
 		return nil
 	}
 	if payload.Storage != "" {
@@ -130,9 +127,6 @@ func ValidateScanSafety(registry *storage.Registry, payload ScanPayload) error {
 	}
 	if !containsRealArchiveStorage(storages) {
 		return nil
-	}
-	if payload.Storage == "" {
-		return fmt.Errorf("real archive discovery requires an explicit storage name")
 	}
 	if err := validateRealArchiveScanPayload(payload); err != nil {
 		return err
@@ -195,11 +189,6 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 	}
 	storages := r.Registry.ListStorages()
 	if strings.EqualFold(payload.Storage, "all") {
-		if containsRealArchiveStorage(storages) {
-			cause := jobs.Permanent(fmt.Errorf("storage=all is refused for real archive storage; choose one storage and a bounded adapter-relative prefix"))
-			_ = r.failJob(ctx, *job, cause)
-			return cause
-		}
 		payload.Storage = ""
 	}
 	if payload.Storage != "" {
@@ -217,13 +206,13 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 		}
 		storages = selected
 	}
-	if !payload.bounded() && containsRealArchiveStorage(storages) {
-		cause := jobs.Permanent(fmt.Errorf("unbounded discovery is refused for real archive storage; provide storage, adapter-relative prefixes, max_files, and max_bytes"))
+	if containsRealArchiveStorage(storages) && payload.MaxFiles == 0 {
+		cause := jobs.Permanent(fmt.Errorf("real archive discovery requires explicit max_files; use -1 for no file-count limit"))
 		_ = r.failJob(ctx, *job, cause)
 		return cause
 	}
-	if containsRealArchiveStorage(storages) && payload.Storage == "" {
-		cause := jobs.Permanent(fmt.Errorf("real archive discovery requires an explicit storage name"))
+	if containsRealArchiveStorage(storages) && payload.MaxBytes == 0 {
+		cause := jobs.Permanent(fmt.Errorf("real archive discovery requires explicit max_bytes; use -1 for no byte-count limit"))
 		_ = r.failJob(ctx, *job, cause)
 		return cause
 	}
@@ -236,7 +225,7 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 			return jobs.Permanent(err)
 		}
 		var files []storage.FileInfo
-		if payload.bounded() {
+		if payload.bounded() || payload.Storage == "" {
 			if isRealArchiveRoot(storageConfig.Root) {
 				if err := validateRealArchiveScanPayload(payload); err != nil {
 					cause := jobs.Permanent(err)
@@ -247,11 +236,6 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 			prefixes, err := normalizeScanPrefixes(adapter, payload.Prefixes)
 			if err != nil {
 				cause := jobs.Permanent(err)
-				_ = r.failJob(ctx, *job, cause)
-				return cause
-			}
-			if len(prefixes) == 0 {
-				cause := jobs.Permanent(fmt.Errorf("bounded discovery prefixes are required"))
 				_ = r.failJob(ctx, *job, cause)
 				return cause
 			}
@@ -463,12 +447,6 @@ func isRealArchiveRoot(root string) bool {
 }
 
 func validateRealArchiveScanPayload(payload ScanPayload) error {
-	if strings.TrimSpace(payload.Storage) == "" || strings.EqualFold(payload.Storage, "all") {
-		return fmt.Errorf("real archive discovery requires one explicit storage name")
-	}
-	if len(payload.Prefixes) == 0 {
-		return fmt.Errorf("real archive discovery requires at least one adapter-relative prefix")
-	}
 	if payload.MaxFiles == 0 {
 		return fmt.Errorf("real archive discovery requires explicit max_files; use -1 for no file-count limit")
 	}

@@ -1839,7 +1839,6 @@ function validateAdapterRelativePrefixes(prefixes: string[]): string {
       return `Absolute prefix is not allowed here: ${raw}`;
     }
   }
-  if (prefixes.length === 0) return "Enter at least one storage-relative subpath, for example Cartolensia-photos.";
   for (const prefix of prefixes) {
     if (prefix === "." || prefix === ".." || prefix.includes("../") || prefix.includes("..\\")) {
       return `Unsafe prefix rejected: ${prefix}`;
@@ -2235,7 +2234,18 @@ async function attachHLSPlayback() {
     throw new Error("This browser cannot play HLS natively and hls.js is unavailable.");
   }
   if (activeHls) activeHls.destroy();
-  activeHls = new Hls({ lowLatencyMode: false, backBufferLength: 90 });
+  activeHls = new Hls({
+    lowLatencyMode: false,
+    backBufferLength: 90,
+    xhrSetup: (xhr) => {
+      xhr.withCredentials = true;
+    },
+    fetchSetup: (context, initParams) =>
+      new Request(context.url, {
+        ...initParams,
+        credentials: "same-origin"
+      })
+  });
   activeHls.loadSource(session.playlist_url);
   activeHls.attachMedia(video);
   activeHls.on(Hls.Events.ERROR, (_event, data) => {
@@ -2567,7 +2577,7 @@ function dryRunPreviewMaxFiles(): number {
 async function refreshIndexingStatus() {
   const storage = pipelineStorage();
   const prefixes = adapterRelativePrefixes();
-  if (!storage || prefixes.length === 0) return;
+  if (!storage || storage === "all") return;
   indexingStatus.value = await api.indexingLatest(storage, prefixes).catch(() => indexingStatus.value);
 }
 
@@ -2621,7 +2631,7 @@ async function startIndexingPipeline() {
     } else {
       pipelineLog.value = ["Index files: skipped"].concat(pipelineLog.value);
     }
-    explorerPath.value = prefixes[0] ?? explorerPath.value;
+    if (prefixes.length > 0) explorerPath.value = prefixes[0];
     await refreshIndexingStatus();
     const scope = indexingStatus.value?.scope;
     if (hashAfterIndex.value) {
@@ -2706,7 +2716,7 @@ async function startHashForCurrentPrefix() {
 async function startMetadata() {
   const storage = pipelineStorage();
   const prefixes = adapterRelativePrefixes();
-  if (storage && prefixes.length > 0) {
+  if (storage) {
     lastMetadataJob.value = await api.startMetadataScoped({ storage, prefixes, max_files: jobMaxFiles.value, only_missing: false });
   } else {
     lastMetadataJob.value = await api.startMetadata(jobMaxFiles.value);
@@ -2717,12 +2727,12 @@ async function startMetadata() {
 async function parseTrackFilesForCurrentPrefix() {
   const storage = pipelineStorage();
   const prefixes = adapterRelativePrefixes();
-  if (!storage || prefixes.length === 0) {
-    error.value = "Enter a storage-relative track prefix before parsing GPS/KML/KMZ/GPZ files.";
+  if (!storage) {
+    error.value = "Choose a storage before parsing GPS/KML/KMZ/GPZ files.";
     return;
   }
   error.value = "";
-  pipelineLog.value = [`Parsing track files under ${prefixes.join(", ")}`].concat(pipelineLog.value).slice(0, 12);
+  pipelineLog.value = [`Parsing track files under ${prefixes.join(", ") || "whole selected storage"}`].concat(pipelineLog.value).slice(0, 12);
   lastMetadataJob.value = await api.startMetadataScoped({
     storage,
     prefixes,
@@ -2736,7 +2746,7 @@ async function parseTrackFilesForCurrentPrefix() {
 async function startPreviews() {
   const storage = pipelineStorage();
   const prefixes = adapterRelativePrefixes();
-  if (storage && prefixes.length > 0) {
+  if (storage) {
     lastPreviewJob.value = await api.startPreviewsScoped({ storage, prefixes, max_files: jobMaxFiles.value, only_missing: true });
   } else {
     lastPreviewJob.value = await api.startPreviews(jobMaxFiles.value);
@@ -4048,7 +4058,13 @@ const mapFeatures = computed(() => {
 });
 
 const mapWarnings = computed(() => asArray(mapStatus.value?.warnings as string[] | null | undefined));
-const selectedPipelineStorage = computed(() => storages.value.find((storage) => storage.name === pipelineStorage()) ?? storages.value[0]);
+const selectedPipelineStorage = computed(() => {
+  const selected = pipelineStorage();
+  if (selected === "all") {
+    return { name: "All configured storages", kind: "mixed", root: "all registered roots", mode: "per-storage read-only policy" } as StorageConfig;
+  }
+  return storages.value.find((storage) => storage.name === selected) ?? storages.value[0];
+});
 const mapFeatureSummary = computed(() => {
   const clustering = String(mapData.value?.clustering ?? mapStatus.value?.clustering ?? "none");
   const tiles = String(mapStatus.value?.base_tiles_note ?? "Vector map layers are active.");
@@ -4984,13 +5000,14 @@ onBeforeUnmount(() => {
                 Storage
                 <select v-model="dryRunStorage">
                   <option value="">Configured default</option>
+                  <option value="all">All configured storages</option>
                   <option v-for="storage in storages" :key="storage.name" :value="storage.name">
                     {{ storage.name }} · {{ storage.root }} · {{ storage.mode }}
                   </option>
                 </select>
               </label>
               <label>
-                Scan subpath
+                Scope / subpath (optional)
                 <input v-model="dryRunPrefix" type="text" />
               </label>
               <label>
@@ -5001,7 +5018,7 @@ onBeforeUnmount(() => {
                 Max bytes
                 <input v-model.number="dryRunMaxBytes" type="number" min="-1" />
               </label>
-              <p class="muted">Prefix is storage-relative, for example <code>Cartolensia-photos</code>. Missing marking is disabled.</p>
+              <p class="muted">Leave blank to scan the selected storage root. Prefixes are storage-relative, for example <code>Cartolensia-photos</code>. Missing marking is disabled.</p>
             </article>
             <article class="settings-form">
               <h3>Extensions</h3>
@@ -5051,7 +5068,7 @@ onBeforeUnmount(() => {
             </article>
             <article class="settings-form">
               <h3>Safety</h3>
-              <p class="muted">Real archive discovery remains read-only, scoped, and bounded. Dry-run output stays capped unless explicitly over-limited by the API.</p>
+              <p class="muted">Discovery is read-only and missing marking is disabled. Blank scope scans the storage root; dry-run output stays capped unless explicitly over-limited by the API.</p>
             </article>
             <article class="settings-form">
               <h3>Actions</h3>

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,36 +37,66 @@ func main() {
 	}
 	defer cartolensia.Close()
 
-	server := &http.Server{
-		Addr:              cartolensia.Config.HTTP.Addr,
-		Handler:           cartolensia.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
+	errCh := make(chan error, 1)
+	handler := cartolensia.Handler()
+	var servers []*http.Server
+	startServer := func(server *http.Server, serve func() error) {
+		servers = append(servers, server)
+		go func() {
+			if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		if cartolensia.Config.HTTP.TLSCertFile != "" && cartolensia.Config.HTTP.TLSKeyFile != "" {
-			log.Printf("cartolensia listening with configured TLS on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
-			errCh <- server.ListenAndServeTLS(cartolensia.Config.HTTP.TLSCertFile, cartolensia.Config.HTTP.TLSKeyFile)
-			return
+	tlsEnabled := (cartolensia.Config.HTTP.TLSCertFile != "" && cartolensia.Config.HTTP.TLSKeyFile != "") || cartolensia.Config.HTTP.TLSAutoSelfSigned
+	if tlsEnabled {
+		tlsAddr := cartolensia.Config.HTTP.TLSAddr
+		if tlsAddr == "" {
+			tlsAddr = cartolensia.Config.HTTP.Addr
 		}
-		if cartolensia.Config.HTTP.TLSAutoSelfSigned {
-			cert, err := tlsutil.SelfSignedCertificate(tlsHosts(cartolensia.Config.HTTP.Addr, cartolensia.Config.HTTP.TLSHosts))
+		tlsServer := &http.Server{
+			Addr:              tlsAddr,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		if cartolensia.Config.HTTP.TLSCertFile != "" && cartolensia.Config.HTTP.TLSKeyFile != "" {
+			log.Printf("cartolensia listening with configured TLS on %s using %s store", tlsAddr, cartolensia.StoreBackend)
+			startServer(tlsServer, func() error {
+				return tlsServer.ListenAndServeTLS(cartolensia.Config.HTTP.TLSCertFile, cartolensia.Config.HTTP.TLSKeyFile)
+			})
+		} else {
+			cert, err := tlsutil.SelfSignedCertificate(tlsHosts([]string{cartolensia.Config.HTTP.Addr, tlsAddr}, cartolensia.Config.HTTP.TLSHosts))
 			if err != nil {
-				errCh <- err
-				return
+				log.Fatalf("generate self-signed certificate: %v", err)
 			}
-			server.TLSConfig = &tls.Config{
+			tlsServer.TLSConfig = &tls.Config{
 				MinVersion:   tls.VersionTLS12,
 				Certificates: []tls.Certificate{cert},
 			}
-			log.Printf("cartolensia listening with generated self-signed TLS on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
-			errCh <- server.ListenAndServeTLS("", "")
-			return
+			log.Printf("cartolensia listening with generated self-signed TLS on %s using %s store", tlsAddr, cartolensia.StoreBackend)
+			startServer(tlsServer, func() error {
+				return tlsServer.ListenAndServeTLS("", "")
+			})
+		}
+		if cartolensia.Config.HTTP.RedirectHTTPToHTTPS && cartolensia.Config.HTTP.Addr != "" && cartolensia.Config.HTTP.Addr != tlsAddr {
+			redirectServer := &http.Server{
+				Addr:              cartolensia.Config.HTTP.Addr,
+				Handler:           httpsRedirectHandler(tlsAddr, handler),
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			log.Printf("cartolensia redirecting HTTP on %s to HTTPS on %s", cartolensia.Config.HTTP.Addr, tlsAddr)
+			startServer(redirectServer, redirectServer.ListenAndServe)
+		}
+	} else {
+		server := &http.Server{
+			Addr:              cartolensia.Config.HTTP.Addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
 		}
 		log.Printf("cartolensia listening on %s using %s store", cartolensia.Config.HTTP.Addr, cartolensia.StoreBackend)
-		errCh <- server.ListenAndServe()
-	}()
+		startServer(server, server.ListenAndServe)
+	}
 
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
@@ -75,21 +106,46 @@ func main() {
 		log.Printf("received %s, shutting down", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			log.Fatalf("shutdown failed: %v", err)
+		for _, server := range servers {
+			if err := server.Shutdown(ctx); err != nil {
+				log.Fatalf("shutdown failed: %v", err)
+			}
 		}
 	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server failed: %v", err)
-		}
+		log.Fatalf("server failed: %v", err)
 	}
 }
 
-func tlsHosts(addr string, configured []string) []string {
+func tlsHosts(addrs []string, configured []string) []string {
 	hosts := append([]string(nil), configured...)
-	host, _, err := net.SplitHostPort(addr)
-	if err == nil && host != "" {
-		hosts = append(hosts, host)
+	for _, candidate := range addrs {
+		host, _, err := net.SplitHostPort(candidate)
+		if err == nil && host != "" {
+			hosts = append(hosts, host)
+		}
 	}
 	return hosts
+}
+
+func httpsRedirectHandler(tlsAddr string, bypass http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/ai-media/") && bypass != nil {
+			bypass.ServeHTTP(w, r)
+			return
+		}
+		host := r.Host
+		if requestHost, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = requestHost
+		}
+		if tlsHost, tlsPort, err := net.SplitHostPort(tlsAddr); err == nil {
+			if tlsHost != "" && tlsHost != "0.0.0.0" && tlsHost != "::" {
+				host = tlsHost
+			}
+			if tlsPort != "" && tlsPort != "443" {
+				host = net.JoinHostPort(host, tlsPort)
+			}
+		}
+		target := "https://" + host + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	})
 }

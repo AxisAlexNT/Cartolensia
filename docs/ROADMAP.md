@@ -275,3 +275,21 @@ Next:
 - Turn related/context into a stronger trip/session graph with persisted scoring and richer device/place/track joins.
 - Replace the Video Track Player placeholder map with a full OpenLayers synchronized map.
 - Add browser automation for middle-click-safe anchors, audio previews, selector typeaheads, and search count consistency.
+## 2026-06-27 Current Production Priorities
+
+Recent progress:
+
+- HTTPS production listener, secure local-auth cookies, and self-signed LAN deployment support are implemented.
+- pgvector is supported as the default large-archive vector backend when PostgreSQL has the `vector` extension available.
+- Remote NVIDIA/CUDA AI sidecar operation has been validated with classification, safety, BLIP captions, OpenCLIP embeddings, Tesseract OCR, faster-whisper ASR, and audio analysis.
+- Low-concurrency missing-work AI backfill exists for large archives and avoids repeated no-result OCR/ASR work through local state files.
+- Discovery can intentionally scan a storage root or all configured storages, while missing marking remains blocked for read-only/original storage.
+- The WebUI shell has a mobile-friendly navigation and overlay pass.
+
+Next high-value work:
+
+- Add a durable per-asset AI run ledger so tasks like face detection can record "checked, no faces" without relying on external backfill state files.
+- Promote the AI backfill driver into a first-class PostgreSQL job type with pause/resume controls in the Jobs page.
+- Add pgvector health/readiness checks to Diagnostics and Component Manager.
+- Continue mobile UX testing on Android/iOS browsers, especially map/player/gallery workflows.
+- Add operator controls for AI backfill rate limits, per-storage scopes, and no-speech/no-text policies.

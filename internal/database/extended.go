@@ -1727,6 +1727,7 @@ func (db *DB) UpsertAssetEmbedding(ctx context.Context, embedding catalog.AssetE
 		return catalog.AssetEmbedding{}, err
 	}
 	embedding.Vector = vectorFromJSON(payload)
+	_ = db.storeEmbeddingVector(ctx, embedding.ID, embedding.Vector)
 	_ = json.Unmarshal(metadata, &embedding.Metadata)
 	return embedding, nil
 }
@@ -1761,6 +1762,11 @@ func (db *DB) ListAssetEmbeddings(ctx context.Context, assetID string) ([]catalo
 func (db *DB) VectorSearch(ctx context.Context, modelID string, vector []float64, limit int) ([]catalog.VectorSearchResult, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	if len(vector) == 512 && db.PGVectorReady(ctx) {
+		if results, err := db.vectorSearchPGVector(ctx, modelID, vector, limit); err == nil {
+			return results, nil
+		}
 	}
 	rows, err := db.pool.Query(ctx, `
 		select asset_id, model_id, embedding_json
@@ -1801,6 +1807,57 @@ func (db *DB) VectorSearch(ctx context.Context, modelID string, vector []float64
 		out = append(out, catalog.VectorSearchResult{Asset: asset, Score: candidate.score, Match: candidate.modelID})
 	}
 	return out, nil
+}
+
+func (db *DB) vectorSearchPGVector(ctx context.Context, modelID string, vector []float64, limit int) ([]catalog.VectorSearchResult, error) {
+	literal := pgVectorLiteral(vector)
+	rows, err := db.pool.Query(ctx, `
+		select asset_id::text, model_id, 1 - (embedding_vector <=> $2::vector) as score
+		from asset_embeddings
+		where ($1='' or model_id=$1)
+		  and embedding_vector is not null
+		order by embedding_vector <=> $2::vector
+		limit $3`, modelID, literal, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type candidate struct {
+		assetID string
+		modelID string
+		score   float64
+	}
+	candidates := []candidate{}
+	for rows.Next() {
+		var candidate candidate
+		if err := rows.Scan(&candidate.assetID, &candidate.modelID, &candidate.score); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := []catalog.VectorSearchResult{}
+	for _, candidate := range candidates {
+		asset, err := db.GetAsset(ctx, candidate.assetID)
+		if err != nil {
+			continue
+		}
+		out = append(out, catalog.VectorSearchResult{Asset: asset, Score: candidate.score, Match: candidate.modelID})
+	}
+	return out, nil
+}
+
+func (db *DB) storeEmbeddingVector(ctx context.Context, embeddingID string, vector []float64) error {
+	if len(vector) != 512 {
+		return nil
+	}
+	if !db.PGVectorReady(ctx) {
+		return nil
+	}
+	_, err := db.pool.Exec(ctx, `update asset_embeddings set embedding_vector=$2::vector where id=$1`, embeddingID, pgVectorLiteral(vector))
+	return err
 }
 
 func (db *DB) UpsertComponent(ctx context.Context, component catalog.Component) (catalog.Component, error) {
@@ -1999,6 +2056,22 @@ func dbCosineSimilarity(a, b []float64) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+func pgVectorLiteral(vector []float64) string {
+	var builder strings.Builder
+	builder.WriteByte('[')
+	for i, value := range vector {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			value = 0
+		}
+		builder.WriteString(fmt.Sprintf("%.9g", value))
+	}
+	builder.WriteByte(']')
+	return builder.String()
 }
 
 func slugifyDB(input string) string {

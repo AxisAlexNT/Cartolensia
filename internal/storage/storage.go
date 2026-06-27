@@ -471,10 +471,14 @@ func (a *FSAdapter) WalkRecursiveBounded(ctx context.Context, opts WalkOptions, 
 		if shouldStop() {
 			return nil
 		}
-		full, err := a.safePath(rel)
-		if err != nil {
-			addSkipped("folder_error")
-			return nil
+		full := a.root
+		var err error
+		if strings.TrimSpace(rel) != "" {
+			full, err = a.safePath(rel)
+			if err != nil {
+				addSkipped("folder_error")
+				return nil
+			}
 		}
 		stat, err := os.Stat(full)
 		if err != nil {
@@ -558,7 +562,18 @@ func (a *FSAdapter) WalkRecursiveBounded(ctx context.Context, opts WalkOptions, 
 			}
 		}()
 	}
-	for _, prefix := range opts.Prefixes {
+	prefixes := opts.Prefixes
+	if len(prefixes) == 0 {
+		prefixes = []string{""}
+	}
+	for _, prefix := range prefixes {
+		if strings.TrimSpace(prefix) == "" {
+			folderWG.Add(1)
+			if err := processFolder(""); err != nil {
+				return report, err
+			}
+			continue
+		}
 		rel, err := NormalizeRelativePath(prefix)
 		if err != nil {
 			return report, err

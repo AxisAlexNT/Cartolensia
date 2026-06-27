@@ -563,14 +563,22 @@ func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePr
 	if args, err := hlsArgs(profile, inputPath, sessionDir); err == nil {
 		return args, builtInPresetByID(profile, transcoding.Detect(ctx)), nil
 	}
-	if profile == "av1_low_bitrate" || profile == "av1-preview" {
-		caps := transcoding.Detect(ctx)
-		preset := builtInPresetByID("av1_low_bitrate", caps)
+	caps := transcoding.Detect(ctx)
+	if preset, ok := builtInPresetExact(profile, caps); ok {
 		if err := validateTranscodingPreset(preset, caps); err != nil {
 			return nil, catalog.TranscodingPreset{}, err
 		}
 		args, err := transcodeArgsForPreset(preset, inputPath, sessionDir)
 		return args, preset, err
+	}
+	if profile == "av1-preview" {
+		if preset, ok := builtInPresetExact("av1_low_bitrate", caps); ok {
+			if err := validateTranscodingPreset(preset, caps); err != nil {
+				return nil, catalog.TranscodingPreset{}, err
+			}
+			args, err := transcodeArgsForPreset(preset, inputPath, sessionDir)
+			return args, preset, err
+		}
 	}
 	custom, err := s.deps.Store.ListTranscodingPresets(ctx)
 	if err != nil {
@@ -583,6 +591,15 @@ func (s *Server) hlsArgsForProfile(ctx context.Context, profile string, inlinePr
 		}
 	}
 	return nil, catalog.TranscodingPreset{}, fmt.Errorf("unsupported transcode profile %q", profile)
+}
+
+func builtInPresetExact(profile string, caps transcoding.Capabilities) (catalog.TranscodingPreset, bool) {
+	for _, preset := range builtInTranscodingPresets(caps) {
+		if preset.ID == profile {
+			return preset, true
+		}
+	}
+	return catalog.TranscodingPreset{}, false
 }
 
 func builtInTranscodingPresets(caps transcoding.Capabilities) []catalog.TranscodingPreset {

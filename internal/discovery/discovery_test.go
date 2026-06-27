@@ -120,6 +120,39 @@ func TestHashBoundedPrefix(t *testing.T) {
 	}
 }
 
+func TestDiscoveryAllowsExplicitStorageRootScan(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "photos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"root.jpg", "photos/nested.jpg"} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: root, Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := catalog.NewMemoryStore()
+	runner := Runner{Registry: registry, Store: store}
+	scanJob, _ := store.EnqueueJob(context.Background(), jobs.New("discovery", ScanPayload{
+		Storage:  "fixture",
+		MaxFiles: -1,
+		MaxBytes: -1,
+	}))
+	if err := runner.Scan(context.Background(), &scanJob); err != nil {
+		t.Fatal(err)
+	}
+	assets, err := store.ListAssets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 2 {
+		t.Fatalf("expected storage-root scan to index both files, got %d: %#v", len(assets), assets)
+	}
+}
+
 func TestRealArchiveHashGuard(t *testing.T) {
 	registry, err := storage.NewRegistry([]storage.Config{{
 		Name: "rclone_peek",
@@ -177,8 +210,6 @@ func TestRealArchiveDiscoveryGuard(t *testing.T) {
 		t.Fatalf("adapter-relative bounded payload should be accepted: %v", err)
 	}
 	for name, payload := range map[string]ScanPayload{
-		"all":      {Storage: "all", Prefixes: []string{"Cartolensia-photos"}, MaxFiles: 50, MaxBytes: 2 << 30},
-		"empty":    {Storage: "rclone_peek", MaxFiles: 50, MaxBytes: 2 << 30},
 		"no_files": {Storage: "rclone_peek", Prefixes: []string{"Cartolensia-photos"}, MaxBytes: 2 << 30},
 		"no_bytes": {Storage: "rclone_peek", Prefixes: []string{"Cartolensia-photos"}, MaxFiles: 50},
 	} {
@@ -205,8 +236,8 @@ func TestRealArchiveStorageAllJobFailsBeforeWalk(t *testing.T) {
 	}
 	runner := Runner{Registry: registry, Store: store}
 	err = runner.Scan(context.Background(), &job)
-	if err == nil || !strings.Contains(err.Error(), "storage=all") {
-		t.Fatalf("expected storage=all guard failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "requires explicit max_files") {
+		t.Fatalf("expected real archive max_files guard failure, got %v", err)
 	}
 	assets, err := store.ListAssets(context.Background())
 	if err != nil {

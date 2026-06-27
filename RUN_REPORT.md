@@ -3311,6 +3311,94 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-27 Remote HTTPS, pgvector, AI Sidecar, And Backfill Stabilization
+
+Implemented locally:
+
+- Added production HTTPS support with a secondary TLS listener, self-signed certificate generation, and optional HTTP-to-HTTPS redirect.
+- Added a narrow loopback-only AI media endpoint guarded by `CARTOLENSIA_AI_MEDIA_TOKEN` so the local AI sidecar can read protected originals through Cartolensia without exposing authenticated media routes to LAN users.
+- Added optional pgvector schema setup and vector-store detection. When the PostgreSQL `vector` extension and a 512-dimensional embedding are available, embeddings are now stored in both JSON metadata and an indexed `vector(512)` column.
+- Removed the synthetic requirement that every normal discovery run must specify a subpath. Empty prefixes now mean storage root, and `storage=all` can be used deliberately for normal indexing while real-archive safety guards still block missing marking and require explicit unlimited sentinels.
+- Added mobile shell hardening: the sidebar becomes a horizontal sticky navigation strip, topbar/login forms reflow, content padding shrinks, and gallery/audio overlays fit small screens.
+- Added `scripts/remote/run-ai-backfill.py`, a low-concurrency production AI backfill driver that selects missing metadata work from PostgreSQL and feeds small authenticated API batches. It records successful no-result checks locally under `/var/lib/cartolensia/run/ai-backfill-state` to avoid repeatedly OCRing/transcribing blank assets.
+
+Remote rjazhenka status after deployment:
+
+- Public LAN UI is available at `https://192.168.237.126:18443/` with a self-signed certificate.
+- Authentication is local/session based. Login email is `admin@example.local`; password is the exact value in `/etc/cartolensia/admin-password` on the remote host. Do not include the trailing shell prompt when copying it; pasted trailing newlines are ignored by the server.
+- Services are active: `cartolensia-postgres`, `cartolensia-ai`, and `cartolensia`.
+- HTTPS is active on `:18443`; HTTP `:18080` redirects to HTTPS for browser traffic.
+- Current indexed stats at the latest poll:
+  - `245,895` assets;
+  - `215,702` photos;
+  - `20,592` videos;
+  - `2,238` audio files;
+  - `5,558` documents;
+  - `1,806` tracks;
+  - about `12.19 TB` indexed metadata.
+- Discovery is still running:
+  - status `running`;
+  - progress `51,250` current scan units at the latest job poll;
+  - no observed current error.
+- Metadata enrichment is still running:
+  - status `running`;
+  - progress `23,145 / 245,617`;
+  - no observed current error.
+- AI sidecar is reachable at `http://127.0.0.1:19090`, CUDA-backed, and reports:
+  - `classify_image`;
+  - `detect_faces`;
+  - `safety_nsfw`;
+  - `describe_image`;
+  - `embed_image`;
+  - `embed_text`;
+  - `ocr_image`;
+  - `transcribe_audio`;
+  - `analyze_audio`.
+- Reviewed local model caches were synced into `/var/lib/cartolensia/models`:
+  - OpenCV YuNet;
+  - Falconsai NSFW;
+  - OpenCLIP ViT-B/32;
+  - BLIP base;
+  - faster-whisper small was already present.
+- pgvector is enabled and active:
+  - vector backend `pgvector_ivfflat`;
+  - dimensions `512`;
+  - latest observed embedding count `33` and increasing through backfill.
+- AI backfill is running in small batches:
+  - latest log `/var/lib/cartolensia/logs/ai-backfill-20260627T123644Z.log`;
+  - observed successful classification, safety, captioning, embeddings, OCR, audio feature extraction, audio transcripts, and video transcripts;
+  - no observed backfill API errors in the latest log segment.
+
+Tests and checks run:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `go test ./...`
+- `npm --prefix webui run build`
+- `docker compose -f docker-compose.production.yml config`
+- `bash scripts/release/check-licenses.sh`
+- `bash scripts/release/build-linux.sh` reached WebUI/Go build but failed during AI Python runtime packaging because local DNS could not resolve `pypi.org`.
+- `CARTOLENSIA_DIST_INCLUDE_PYTHON_RUNTIME=0 bash scripts/release/build-linux.sh` succeeded and produced `dist/cartolensia-65e5382-dirty-linux-x86_64-offline.7z`.
+- authenticated remote checks for health, auth login, stats, jobs, AI status, and vector status.
+
+Known limitations:
+
+- AI backfill is intentionally single-process and low-concurrency. It is designed to keep the UI usable on a large NAS-backed archive, not to finish 200k+ photos immediately.
+- Full local AI-runtime archive assembly still requires either Internet DNS/package access or a prepared Python wheelhouse. The minimal/tools/PostgreSQL offline archive path succeeds without fetching Python packages.
+- Face detection can load YuNet and run on demand, but the continuous backfill driver does not yet include a durable "no faces found" marker. This avoids an infinite rerun loop over face-free images.
+- Older hash jobs include a previous lease-expired record. Current discovery, metadata enrichment, and AI backfill are running.
+- The browser must use HTTPS on port `18443` for local-auth cookies because production cookies are marked Secure.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-27 Metadata Scalability And Remote Status Follow-Up
 
 Implemented locally:
