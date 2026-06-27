@@ -281,6 +281,7 @@ Recent progress:
 
 - HTTPS production listener, secure local-auth cookies, and self-signed LAN deployment support are implemented.
 - pgvector is supported as the default large-archive vector backend when PostgreSQL has the `vector` extension available.
+- Knowledge Base and Knowledge Graph foundation is implemented with extracted facts, relations, conversations, read-only query views, and local deterministic chat/tool planning.
 - Remote NVIDIA/CUDA AI sidecar operation has been validated with classification, safety, BLIP captions, OpenCLIP embeddings, Tesseract OCR, faster-whisper ASR, and audio analysis.
 - Low-concurrency missing-work AI backfill exists for large archives and avoids repeated no-result OCR/ASR work through local state files.
 - Discovery can intentionally scan a storage root or all configured storages, while missing marking remains blocked for read-only/original storage.
@@ -294,6 +295,8 @@ Next high-value work:
 
 - Add a durable per-asset AI run ledger so tasks like face detection can record "checked, no faces" without relying on external backfill state files.
 - Promote the AI backfill driver into a first-class PostgreSQL job type with pause/resume controls in the Jobs page.
+- Promote Knowledge Base extraction into a first-class PostgreSQL job so it can run continuously after metadata/OCR/ASR/caption batches.
+- Add an optional local LLM planner over the existing safe tools, with VRAM-aware idle unload and no remote APIs by default.
 - Add scheduled essential export/backup rotation and restore smoke testing.
 - Add pgvector health/readiness checks to Diagnostics and Component Manager.
 - Continue mobile UX testing on Android/iOS browsers, especially map/player/gallery workflows.

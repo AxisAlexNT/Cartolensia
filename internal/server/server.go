@@ -256,7 +256,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/assets/", s.handleAssetByID)
 	s.mux.HandleFunc("/api/v1/public/assets", s.handlePublicAssets)
 	s.mux.HandleFunc("/api/v1/public/assets/", s.handlePublicAssetByID)
+	s.mux.HandleFunc("/api/v1/search/parse", s.handleSearchParse)
+	s.mux.HandleFunc("/api/v1/search/plan", s.handleSearchPlan)
+	s.mux.HandleFunc("/api/v1/search/sql", s.handleSearchSQL)
 	s.mux.HandleFunc("/api/v1/search", s.handleSearch)
+	s.mux.HandleFunc("/api/v1/knowledge/facts", s.handleKnowledgeFacts)
+	s.mux.HandleFunc("/api/v1/knowledge/relations", s.handleKnowledgeRelations)
+	s.mux.HandleFunc("/api/v1/knowledge/extract", s.handleKnowledgeExtract)
+	s.mux.HandleFunc("/api/v1/knowledge/chat", s.handleKnowledgeChat)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
 	s.mux.HandleFunc("/api/v1/places/reverse", s.handlePlaceReverse)
@@ -1696,7 +1703,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	tokens := searchTokens(raw)
+	plan := s.buildSearchPlan(raw)
+	tokens := plan.Tokens
 	if fastPage, ok, err := s.queryFastSearchAssets(r.Context(), tokens, limit, offset); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1719,6 +1727,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"query":        raw,
 			"tokens":       tokens,
+			"plan":         plan,
+			"plan_preview": searchPlanPreview(plan),
 			"backend":      backend.ID(),
 			"backend_mode": backend.Mode(),
 			"results":      results,
@@ -1777,6 +1787,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":        raw,
 		"tokens":       tokens,
+		"plan":         plan,
+		"plan_preview": searchPlanPreview(plan),
 		"backend":      backend.ID(),
 		"backend_mode": backend.Mode(),
 		"results":      all,

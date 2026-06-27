@@ -3311,6 +3311,182 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-28 Knowledge Base, Knowledge Graph, And Local Query Tools
+
+Implemented:
+
+- Added PostgreSQL migration `019_knowledge_base_graph.sql`:
+  - `knowledge_facts`;
+  - `knowledge_relations`;
+  - `knowledge_conversations`;
+  - `knowledge_messages`;
+  - full-text and relation indexes;
+  - read-only views `cartolensia_search_knowledge_facts` and `cartolensia_search_knowledge_relations`.
+- Extended the read-only SQL allowlist so advanced local queries can inspect KB/KG views without raw table access.
+- Added PostgreSQL store methods for:
+  - paged fact browsing;
+  - paged relation browsing;
+  - idempotent bounded fact/relation extraction from existing metadata;
+  - local conversation/message persistence.
+- Added API endpoints:
+  - `GET /api/v1/knowledge/facts`;
+  - `GET /api/v1/knowledge/relations`;
+  - `POST /api/v1/knowledge/extract`;
+  - `POST /api/v1/knowledge/chat`.
+- Added WebUI navigation pages:
+  - `Knowledge Base` for human-readable extracted facts and local chat;
+  - `Knowledge Graph` for relation browsing and compact edge preview.
+- Knowledge extraction currently mines explicit local facts from:
+  - asset kind/location/timestamps/device metadata;
+  - geotags;
+  - tags and AI predictions;
+  - OCR/caption predictions;
+  - transcripts;
+  - document text;
+  - audio features;
+  - GPS track summaries;
+  - folder/device/tag/track/transcript/document/audio-feature relations.
+- Knowledge chat currently uses a deterministic local tool runner:
+  - plans English/Russian questions with the local parser;
+  - searches facts and relations;
+  - records tool calls and conversation messages;
+  - does not call remote LLM APIs.
+
+Remote deployment and validation on rjazhenka:
+
+- Deployed updated backend binary to `/opt/cartolensia/current/bin/cartolensia`.
+- Deployed updated WebUI to `/opt/cartolensia/current/webui/dist`.
+- Deployed migration `019_knowledge_base_graph.sql`.
+- Restarted only `cartolensia.service`; did not reset PostgreSQL.
+- Authenticated API validation:
+  - `/api/v1/knowledge/facts` and `/api/v1/knowledge/relations` returned successfully;
+  - bounded extraction `limit=100` upserted `1000` facts and `500` relations;
+  - larger extraction `limit=5000` upserted `36381` facts and `17875` relations;
+  - `/api/v1/knowledge/chat` returned `5` facts, `3` relations, and `9` local tool calls for a test request.
+- Remote status after deployment:
+  - assets: `615339`;
+  - photos: `443932`;
+  - videos: `28580`;
+  - tracks: `5521`;
+  - hashed: `91097`;
+  - unhashed: `529091`;
+  - jobs: `3` running, `0` queued;
+  - vector store: `pgvector_ivfflat`;
+  - knowledge facts: `36381`;
+  - knowledge relations: `17875`.
+- AI sidecar health:
+  - active;
+  - CUDA device;
+  - classifier, YuNet, NSFW, OpenCLIP, BLIP, Tesseract OCR, faster-whisper, and audio analysis available;
+  - Tesseract languages present: `eng`, `rus`, `hye`, `chi_sim`, `chi_tra`.
+
+Tests:
+
+- `gofmt -w internal/catalog/catalog.go internal/database/knowledge.go internal/database/search_query.go internal/database/search_query_test.go internal/server/knowledge.go internal/server/search_plan.go internal/server/search_plan_test.go internal/server/server.go`
+- `go test ./internal/database ./internal/catalog`
+- `go test ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Known limitations:
+
+- The KB/KG extractor is explicit and bounded; it is not yet a persistent job worker. Operators can rerun extraction as OCR, ASR, captions, and metadata accumulate.
+- The chat panel is a local deterministic tool runner. A future local LLM can sit in front of the same safe tools, but generated SQL must remain restricted to read-only views.
+- The relation graph preview is intentionally lightweight; it avoids a heavy graph rendering dependency until the data model stabilizes.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-28 Read-Only Search Query Layer And Natural-Language Planner
+
+Implemented:
+
+- Added safe search planning endpoints:
+  - `GET /api/v1/search/parse?q=...` parses Cartolensia search tokens and SQL-like clauses;
+  - `POST /api/v1/search/plan` creates a deterministic local English/Russian query plan when no local LLM is configured;
+  - `/api/v1/search` now returns the parsed plan and preview alongside results.
+- Added curated PostgreSQL read-only search views in migration `018_readonly_search_views.sql`:
+  - `cartolensia_search_assets`;
+  - `cartolensia_search_ai_predictions`;
+  - `cartolensia_search_tags`;
+  - `cartolensia_search_transcripts`;
+  - `cartolensia_search_transcript_segments`;
+  - `cartolensia_search_documents`;
+  - `cartolensia_search_video_captions`;
+  - `cartolensia_search_audio_features`;
+  - `cartolensia_search_tracks`;
+  - `cartolensia_search_places`.
+- Added `POST /api/v1/search/sql`, a guarded read-only query endpoint:
+  - accepts only a single `SELECT`;
+  - rejects semicolons, comments, mutation/session-control keywords, and raw table access;
+  - only allows `cartolensia_search_*` views;
+  - runs inside a PostgreSQL read-only transaction with statement timeout and server-side row limit.
+- Updated the Search page:
+  - explicit parse button;
+  - English/Russian “Ask Cartolensia” planner;
+  - parsed-query preview;
+  - collapsed read-only SQL workbench for advanced diagnostics.
+
+Remote production deployment:
+
+- Deployed rebuilt backend, WebUI assets, and migration `018_readonly_search_views.sql` to rjazhenka.
+- App restarted successfully on HTTPS `:18443`; PostgreSQL and AI sidecar remained running.
+- Migration validation: 10 `cartolensia_search_*` views present.
+- Authenticated validation:
+  - `kind = video and ext = mp4` parsed to `kind:video ext:mp4`;
+  - Russian request `покажи видео с поездом` planned to `kind:video поездом`;
+  - read-only SQL query against `cartolensia_search_assets` returned MP4 rows and rejected no safety checks.
+
+Remote indexing state after deployment:
+
+- Assets: about `615k`.
+- Active/queued production jobs after restart:
+  - `discovery` running;
+  - `metadata_enrich` running;
+  - `hash` queued after lease recovery.
+- AI sidecar remained active. Existing AI metadata counts at validation time:
+  - predictions about `28k`;
+  - transcripts `302`;
+  - audio feature rows `2532`;
+  - embeddings `2824`.
+- Restarted the remote AI backfill supervisor with the production environment loaded. The first launch attempt without env failed with `CARTOLENSIA_DATABASE_URL is required`; the corrected launch is running as `python3 /var/lib/cartolensia/run/run-ai-backfill.py`.
+- Backfill validation showed active missing-work batches:
+  - classify completed `8` assets;
+  - safety completed `8` assets;
+  - caption completed `8` assets;
+  - embed completed `8` assets;
+  - OCR completed `4` assets;
+  - faces completed `8` assets;
+  - audio feature and transcript batches ran.
+
+Tests:
+
+- `gofmt -w internal/server/search_plan.go internal/server/search_plan_test.go internal/database/search_query.go internal/database/search_query_test.go internal/server/server.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Known limitations / next work:
+
+- The local LLM planner is currently a deterministic rule-based fallback. A model-backed planner should call a local sidecar endpoint, still pass generated SQL through the same read-only allowlist, and unload after the configured idle period.
+- The search workbench is intentionally read-only and bounded; it is for diagnostic/research queries, not arbitrary database administration.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-27 Samba Storage Diagnostics And Settings
 
 Implemented:

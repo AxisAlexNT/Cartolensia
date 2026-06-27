@@ -940,3 +940,64 @@ Common health codes:
 - `original_file_missing`: the storage root is available, but the indexed original file is missing at the recorded path.
 
 Use Settings -> Readiness or Settings -> Storage -> Validate to inspect these codes. Do not run missing-file marking after an outage just because a NAS is offline or a share is not exported.
+
+### Search Query Workbench
+
+Universal Search supports ordinary tokens (`ext:mp4`, `kind:video`, `caption:train`, `ocr:station`) and SQL-like clauses (`kind = video and ext = mp4`). Use the Search page's Parse button to inspect how a query will run.
+
+The Search page also contains an advanced, collapsed read-only SQL workbench. It is intended for local diagnostics and research questions over indexed metadata, not database maintenance.
+
+Allowed query shape:
+
+```sql
+select asset_id, display_name, media_kind, extension
+from cartolensia_search_assets
+where extension = 'mp4'
+order by taken_at desc nulls last
+```
+
+Only `SELECT` statements against `cartolensia_search_*` views are accepted. The backend rejects semicolons, comments, data-changing keywords, and raw table names, then runs the statement inside a read-only transaction with a timeout and row limit.
+
+Useful views:
+
+- `cartolensia_search_assets`
+- `cartolensia_search_ai_predictions`
+- `cartolensia_search_tags`
+- `cartolensia_search_transcripts`
+- `cartolensia_search_transcript_segments`
+- `cartolensia_search_documents`
+- `cartolensia_search_video_captions`
+- `cartolensia_search_audio_features`
+- `cartolensia_search_tracks`
+- `cartolensia_search_places`
+
+The "Ask Cartolensia" planner currently uses a deterministic local English/Russian fallback if no local LLM endpoint is configured. When a local LLM is added, keep it local-only and continue to execute generated queries through the same read-only SQL guard.
+
+### Knowledge Base And Knowledge Graph
+
+Use the `Knowledge Base` page to browse extracted facts and ask local tool-grounded questions about the archive. Use the `Knowledge Graph` page to inspect relations such as asset-to-folder, asset-to-device, asset-to-track, asset-to-transcript, asset-to-document-text, and asset-to-tag.
+
+Initial setup:
+
+1. Let discovery, metadata enrichment, OCR, captions, ASR, document extraction, and GPS parsing run as usual.
+2. Open `Knowledge Base`.
+3. Click `Extract facts`.
+4. Repeat extraction later as more metadata appears.
+
+The extractor is intentionally bounded and idempotent. It reads existing PostgreSQL metadata, upserts facts/relations into PostgreSQL, and never reads or writes original files directly. Running extraction repeatedly is safe; stable source-derived IDs prevent duplicate fact rows.
+
+Useful endpoints:
+
+```text
+GET  /api/v1/knowledge/facts?q=Pixel&limit=100
+GET  /api/v1/knowledge/relations?relation=linked_to_track&limit=100
+POST /api/v1/knowledge/extract
+POST /api/v1/knowledge/chat
+```
+
+`POST /api/v1/knowledge/chat` stores the conversation and the tool calls it used. The current implementation is deterministic and local. If a future local LLM is configured, it must use the same tools and read-only SQL guard; do not connect this feature to remote LLM APIs by default.
+
+The read-only SQL workbench also accepts:
+
+- `cartolensia_search_knowledge_facts`
+- `cartolensia_search_knowledge_relations`

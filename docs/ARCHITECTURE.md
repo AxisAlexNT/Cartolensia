@@ -393,3 +393,52 @@ Discovery now handles that shape explicitly:
 This applies to `storage=all` jobs and to direct parent storage scans. It is intentionally metadata-only: unavailable child storage does not delete metadata, does not mark files missing, and does not write to originals. If an operator removes a child storage from config, future parent scans can cover that subtree normally.
 
 The implementation keeps dry-run/preview caps separate from normal discovery. For normal production indexing, `max_files=-1` and `max_bytes=-1` are explicit unlimited sentinels. Missing-file marking remains disabled.
+
+## Read-Only Search Query Layer
+
+Cartolensia now exposes a local research-query layer on top of PostgreSQL instead of requiring a separate Elasticsearch/OpenSearch service for large personal archives.
+
+The normal Universal Search path remains `/api/v1/search` with the `postgres_local` backend. It returns a parsed search plan so the UI can show how a query was interpreted. SQL-like user input such as:
+
+```text
+kind = video and ext = mp4 and caption contains "train"
+```
+
+is translated to safe Cartolensia search tokens. Arbitrary SQL from this path is never executed.
+
+For advanced diagnostics and local research workflows, PostgreSQL migration `018_readonly_search_views.sql` creates curated views named `cartolensia_search_*`. The views expose denormalized, read-only projections of assets, locations, AI predictions, tags, transcripts, transcript segments, documents, video captions, audio features, tracks, and places.
+
+`POST /api/v1/search/sql` accepts only a single `SELECT` against those views. The database runner:
+
+- rejects semicolons and comments;
+- rejects mutation and session-control keywords;
+- rejects references to raw tables or unknown views;
+- runs in a PostgreSQL read-only transaction;
+- applies a statement timeout;
+- wraps the query with a server-side row limit.
+
+This gives the future local LLM planner a safe tool to execute planned queries without turning it into a database administrator. Any model-generated SQL must pass through the same allowlist and timeout.
+
+The current natural-language planner is a deterministic local fallback for English/Russian requests. A future model-backed planner should run only against a local sidecar/model endpoint, should never call remote APIs by default, and should unload after an idle timeout so background AI workers can reclaim VRAM.
+
+## Knowledge Base And Knowledge Graph
+
+Cartolensia now has a local PostgreSQL-backed Knowledge Base/Knowledge Graph layer. It is not a replacement for canonical archive metadata; it is a human-readable, queryable projection mined from existing local facts.
+
+Schema:
+
+- `knowledge_facts` stores subject/predicate/object facts with source kind, source id, optional asset id, confidence, language, evidence, and JSON metadata.
+- `knowledge_relations` stores graph edges between assets and/or named entities such as folders, devices, tags, transcripts, document text, audio features, and GPS tracks.
+- `knowledge_conversations` and `knowledge_messages` store local chat history and tool-call traces.
+- `cartolensia_search_knowledge_facts` and `cartolensia_search_knowledge_relations` expose read-only projections for the search SQL workbench and future local LLM tools.
+
+Extraction is idempotent and bounded. Stable deterministic fact/relation IDs let repeated extraction update existing records instead of duplicating them. The current extractor mines explicit metadata only: media kind, storage location, device metadata, timestamps, geotags, tags, AI predictions, captions, OCR text, transcripts, document text, audio features, track summaries, and known track links.
+
+The Knowledge chat API is tool-first. In the current release it uses a deterministic local English/Russian planner and runs local fact/relation searches. A future local LLM can transform natural-language questions into the same safe tool calls, including read-only SQL against `cartolensia_search_*` views. Remote LLM APIs are not used by default.
+
+Design boundaries:
+
+- extracted facts remain reviewable metadata, not ground truth;
+- the graph is stored in PostgreSQL, not a separate graph database;
+- no extraction step modifies originals;
+- no model-generated SQL may bypass the existing read-only SQL guard.

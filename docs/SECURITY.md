@@ -64,6 +64,12 @@ Admin sessions can perform all actions. API tokens must carry a sufficient scope
 
 Protected write-like endpoints include discovery/hash/metadata/preview starts, plugin rescan, job cancel/retry, password change, and token creation/revocation.
 
+## Read-Only Query Safety
+
+The advanced search workbench is not a general SQL console. It only accepts a single `SELECT` against curated `cartolensia_search_*` views. The backend rejects semicolons, comments, mutation keywords, session-control keywords, and raw table references before the query reaches PostgreSQL. Accepted statements are executed in a read-only transaction with a timeout and server-side row limit.
+
+Model-planned queries must use the same guard. A local LLM may propose a query, but Cartolensia must validate the query through the read-only allowlist before execution. Remote LLM APIs are not used by default.
+
 ## Storage Safety
 
 Original media is immutable in the implemented adapter.
@@ -298,3 +304,15 @@ When an original-media request fails, Cartolensia returns a structured error tha
 - original file missing while storage is otherwise readable.
 
 These diagnostics are metadata about storage reachability only. They do not grant write access, remount shares, alter credentials, or modify originals.
+
+## 2026-06-28 Knowledge Base / Knowledge Graph Safety
+
+The Knowledge Base and Knowledge Graph are derived metadata. They must follow the same originals safety model as OCR, captions, transcripts, embeddings, and previews:
+
+- extraction reads only PostgreSQL/local metadata and does not modify originals;
+- facts and relations can contain AI/OCR/ASR errors and must not be treated as verified ground truth;
+- conversation records and tool-call traces can reveal private archive metadata and require normal authentication;
+- unauthenticated users must not access non-public KB/KG APIs;
+- local LLM planners, when enabled, must not call remote APIs by default;
+- model-generated SQL must be executed only through the existing single-`SELECT`, read-only, allowlisted `cartolensia_search_*` view runner;
+- KB/KG exports should be treated as sensitive metadata because they can summarize private files without containing the original media.

@@ -544,6 +544,88 @@ type VectorSearchResult struct {
 	Match string  `json:"match"`
 }
 
+type PageInfo struct {
+	Limit  int `json:"limit"`
+	Offset int `json:"offset"`
+	Total  int `json:"total"`
+}
+
+type KnowledgeFact struct {
+	ID         string         `json:"id"`
+	AssetID    string         `json:"asset_id,omitempty"`
+	SourceKind string         `json:"source_kind"`
+	SourceID   string         `json:"source_id,omitempty"`
+	Subject    string         `json:"subject"`
+	Predicate  string         `json:"predicate"`
+	Object     string         `json:"object"`
+	Confidence *float64       `json:"confidence,omitempty"`
+	Language   string         `json:"language,omitempty"`
+	Evidence   string         `json:"evidence,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	Metadata   map[string]any `json:"metadata_json,omitempty"`
+}
+
+type KnowledgeRelation struct {
+	ID          string         `json:"id"`
+	FromAssetID string         `json:"from_asset_id,omitempty"`
+	ToAssetID   string         `json:"to_asset_id,omitempty"`
+	FromEntity  string         `json:"from_entity,omitempty"`
+	ToEntity    string         `json:"to_entity,omitempty"`
+	Relation    string         `json:"relation"`
+	Confidence  *float64       `json:"confidence,omitempty"`
+	Evidence    string         `json:"evidence,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Metadata    map[string]any `json:"metadata_json,omitempty"`
+}
+
+type KnowledgeQuery struct {
+	Q          string
+	AssetID    string
+	SourceKind string
+	Predicate  string
+	Relation   string
+	Limit      int
+	Offset     int
+}
+
+type KnowledgeFactPage struct {
+	Facts []KnowledgeFact `json:"facts"`
+	Page  PageInfo        `json:"page"`
+}
+
+type KnowledgeRelationPage struct {
+	Relations []KnowledgeRelation `json:"relations"`
+	Page      PageInfo            `json:"page"`
+}
+
+type KnowledgeExtractionResult struct {
+	FactsInserted     int64          `json:"facts_inserted"`
+	FactsUpdated      int64          `json:"facts_updated"`
+	RelationsInserted int64          `json:"relations_inserted"`
+	RelationsUpdated  int64          `json:"relations_updated"`
+	Limit             int            `json:"limit"`
+	Counts            map[string]int `json:"counts"`
+	Note              string         `json:"note,omitempty"`
+}
+
+type KnowledgeConversation struct {
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	Metadata  map[string]any `json:"metadata_json,omitempty"`
+}
+
+type KnowledgeMessage struct {
+	ID             string           `json:"id"`
+	ConversationID string           `json:"conversation_id"`
+	Role           string           `json:"role"`
+	Content        string           `json:"content"`
+	ToolCalls      []map[string]any `json:"tool_calls_json,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+}
+
 type Component struct {
 	ID             string         `json:"id"`
 	Key            string         `json:"key"`

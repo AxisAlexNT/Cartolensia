@@ -40,6 +40,10 @@ import {
   type Job,
   type JobStats,
   type IndexingStatus,
+  type KnowledgeChatResponse,
+  type KnowledgeExtractionResult,
+  type KnowledgeFact,
+  type KnowledgeRelation,
   type MonthBucket,
   type OCRBlock,
   type PlaceCacheEntry,
@@ -49,6 +53,7 @@ import {
   type Principal,
   type ScanRun,
   type SearchResult,
+  type SearchPlan,
   type SearchPlace,
   type SearchPlacesResponse,
   type SettingsPayload,
@@ -66,7 +71,8 @@ import {
   type TranscodingCapabilities,
   type TranscodingPreset,
   type VideoTrackPlayerSession,
-  type DBExport
+  type DBExport,
+  type ReadOnlySQLResult
 } from "./api";
 import MonthFilterBar from "./components/MonthFilterBar.vue";
 import PagedFileControls from "./components/PagedFileControls.vue";
@@ -94,6 +100,8 @@ const nav = [
   "Face Gallery",
   "Safety Review",
   "Search",
+  "Knowledge Base",
+  "Knowledge Graph",
   "Geo Align",
   "Video Track Player"
 ];
@@ -126,6 +134,10 @@ const navPageAliases: Record<string, string> = {
   "safety-review": "Safety Review",
   search: "Search",
   "universal-search": "Search",
+  "knowledge-base": "Knowledge Base",
+  knowledge: "Knowledge Base",
+  "knowledge-graph": "Knowledge Graph",
+  graph: "Knowledge Graph",
   "geo-align": "Geo Align",
   "video-track-player": "Video Track Player"
 };
@@ -179,6 +191,8 @@ function navIcon(label: string): string {
     "Face Gallery": "bi-person-bounding-box",
     "Safety Review": "bi-shield-exclamation",
     Search: "bi-search-heart",
+    "Knowledge Base": "bi-journal-richtext",
+    "Knowledge Graph": "bi-diagram-3",
     "Geo Align": "bi-crosshair",
     "Video Track Player": "bi-play-btn"
   };
@@ -209,6 +223,26 @@ const universalSearchPlaceResults = ref<SearchPlace[]>([]);
 const universalSearchWarnings = ref<string[]>([]);
 const universalSearchMessage = ref("");
 const universalSearchBackend = ref("");
+const universalSearchPlan = ref<SearchPlan | null>(null);
+const naturalSearchQ = ref("");
+const naturalSearchMessage = ref("");
+const sqlSearchQ = ref("select asset_id, display_name, media_kind, extension, taken_at from cartolensia_search_assets where extension = 'mp4' order by taken_at desc nulls last");
+const sqlSearchResult = ref<ReadOnlySQLResult | null>(null);
+const sqlSearchMessage = ref("");
+const knowledgeFacts = ref<KnowledgeFact[]>([]);
+const knowledgeRelations = ref<KnowledgeRelation[]>([]);
+const knowledgeQ = ref("");
+const knowledgePredicate = ref("");
+const knowledgeRelationFilter = ref("");
+const knowledgeFactsTotal = ref(0);
+const knowledgeRelationsTotal = ref(0);
+const knowledgeLoading = ref(false);
+const knowledgeMessage = ref("");
+const knowledgeExtraction = ref<KnowledgeExtractionResult | null>(null);
+const knowledgeChatInput = ref("");
+const knowledgeChatConversationID = ref("");
+const knowledgeChat = ref<KnowledgeChatResponse | null>(null);
+const knowledgeChatBusy = ref(false);
 const searchPlaceCache = ref<SearchPlacesResponse | null>(null);
 const editablePlaces = ref<PlaceCacheEntry[]>([]);
 const placeCacheQuery = ref("");
@@ -572,6 +606,9 @@ function setActive(next: string, updateURL = true) {
   active.value = route;
   if (route === "Transcripts" && transcriptRows.value.length === 0 && !transcriptLoading.value) {
     void fetchTranscriptsPage(true);
+  }
+  if ((route === "Knowledge Base" || route === "Knowledge Graph") && knowledgeFacts.value.length === 0 && knowledgeRelations.value.length === 0) {
+    void loadKnowledgeBase();
   }
   if (route !== "Asset Detail") {
     localStorage.setItem("cartolensia.route", route);
@@ -3201,6 +3238,7 @@ async function runUniversalSearch() {
     universalSearchTrackResults.value = [];
     universalSearchPlaceResults.value = [];
     universalSearchBackend.value = "";
+    universalSearchPlan.value = null;
     searchPageTotal.value = 0;
     return;
   }
@@ -3211,8 +3249,105 @@ async function runUniversalSearch() {
   universalSearchPlaceResults.value = asArray(response.places);
   universalSearchWarnings.value = asArray(response.warnings);
   universalSearchBackend.value = `${response.backend ?? "postgres_local"} · ${response.backend_mode ?? "metadata/local"}`;
+  universalSearchPlan.value = response.plan ?? null;
   searchPageTotal.value = response.page?.total ?? universalSearchResults.value.length;
   universalSearchMessage.value = `${searchPageTotal.value} media matches (${universalSearchResults.value.length} shown) · ${universalSearchTrackResults.value.length} track results · ${universalSearchPlaceResults.value.length} place matches`;
+}
+
+async function parseUniversalSearch() {
+  const query = universalSearchQ.value.trim();
+  if (!query) return;
+  universalSearchPlan.value = await api.searchParse(query);
+}
+
+async function planNaturalLanguageSearch() {
+  const query = naturalSearchQ.value.trim();
+  if (!query) {
+    naturalSearchMessage.value = "Describe what you want to find in English or Russian.";
+    return;
+  }
+  const plan = await api.searchPlan(query);
+  universalSearchPlan.value = plan;
+  universalSearchQ.value = plan.executable_query;
+  naturalSearchMessage.value = `${plan.planner} produced: ${plan.executable_query}`;
+}
+
+async function runReadOnlySQLSearch() {
+  const sql = sqlSearchQ.value.trim();
+  if (!sql) {
+    sqlSearchMessage.value = "Enter a SELECT query against cartolensia_search_* views.";
+    sqlSearchResult.value = null;
+    return;
+  }
+  sqlSearchMessage.value = "Running read-only query...";
+  sqlSearchResult.value = await api.searchSQL(sql, 200);
+  sqlSearchMessage.value = `${sqlSearchResult.value.count} rows returned from ${sqlSearchResult.value.views.join(", ")}`;
+}
+
+async function loadKnowledgeBase() {
+  knowledgeLoading.value = true;
+  try {
+    const [factPage, relationPage] = await Promise.all([
+      api.knowledgeFacts({
+        q: knowledgeQ.value.trim(),
+        predicate: knowledgePredicate.value.trim(),
+        limit: 100,
+        offset: 0
+      }),
+      api.knowledgeRelations({
+        q: knowledgeQ.value.trim(),
+        relation: knowledgeRelationFilter.value.trim(),
+        limit: 100,
+        offset: 0
+      })
+    ]);
+    knowledgeFacts.value = factPage.facts;
+    knowledgeRelations.value = relationPage.relations;
+    knowledgeFactsTotal.value = factPage.page.total;
+    knowledgeRelationsTotal.value = relationPage.page.total;
+    knowledgeMessage.value = `${knowledgeFactsTotal.value} facts · ${knowledgeRelationsTotal.value} graph relations`;
+  } catch (err) {
+    knowledgeMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    knowledgeLoading.value = false;
+  }
+}
+
+async function extractKnowledgeBatch() {
+  knowledgeLoading.value = true;
+  knowledgeMessage.value = "Extracting a bounded batch of facts and relations from local metadata...";
+  try {
+    knowledgeExtraction.value = await api.extractKnowledge(1000);
+    knowledgeMessage.value = `Extraction upserted ${knowledgeExtraction.value.facts_inserted} facts and ${knowledgeExtraction.value.relations_inserted} relations.`;
+    await loadKnowledgeBase();
+  } catch (err) {
+    knowledgeMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    knowledgeLoading.value = false;
+  }
+}
+
+async function askKnowledgeBase() {
+  const message = knowledgeChatInput.value.trim();
+  if (!message) {
+    knowledgeMessage.value = "Enter a question about your archive.";
+    return;
+  }
+  knowledgeChatBusy.value = true;
+  try {
+    knowledgeChat.value = await api.knowledgeChat(message, knowledgeChatConversationID.value, 25);
+    knowledgeChatConversationID.value = knowledgeChat.value.conversation_id ?? knowledgeChatConversationID.value;
+    knowledgeMessage.value = `Knowledge chat used ${knowledgeChat.value.tool_calls.length} local tool calls.`;
+  } catch (err) {
+    knowledgeMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    knowledgeChatBusy.value = false;
+  }
+}
+
+function openKnowledgeAsset(assetID?: string) {
+  if (!assetID) return;
+  void openAsset(assetID);
 }
 
 async function refreshFaceClusters() {
@@ -5119,6 +5254,8 @@ onMounted(async () => {
     }
   } else if (active.value === "Transcripts") {
     await fetchTranscriptsPage(true);
+  } else if (active.value === "Knowledge Base" || active.value === "Knowledge Graph") {
+    await loadKnowledgeBase();
   }
   await nextTick();
   renderOpenLayers();
@@ -7408,14 +7545,42 @@ onBeforeUnmount(() => {
               <span>Search query</span>
               <input v-model="universalSearchQ" type="search" placeholder="jpg, 2026-05, PXL, camera, safety, mountain, track name..." />
             </label>
+            <button type="button" class="btn btn-outline-secondary" @click="parseUniversalSearch">
+              Parse
+            </button>
             <button type="submit" class="btn btn-primary">
               <i class="bi bi-search" aria-hidden="true"></i>
               Search
             </button>
           </form>
+          <section class="settings-form search-planner-card">
+            <h3><i class="bi bi-magic" aria-hidden="true"></i> Ask Cartolensia</h3>
+            <p class="muted">Describe the files you want in English or Russian. Local planning is deterministic unless a local LLM endpoint is configured; no remote API is used.</p>
+            <div class="inline-form-row">
+              <input v-model="naturalSearchQ" type="search" placeholder="find videos with trains in May 2026 / покажи видео с поездом" @keyup.enter="planNaturalLanguageSearch" />
+              <button type="button" class="btn btn-outline-primary" @click="planNaturalLanguageSearch">Plan query</button>
+              <button type="button" class="btn btn-primary" :disabled="!universalSearchQ.trim()" @click="runUniversalSearch">Run</button>
+            </div>
+            <p v-if="naturalSearchMessage" class="muted">{{ naturalSearchMessage }}</p>
+          </section>
+          <div v-if="universalSearchPlan" class="settings-form search-plan-card">
+            <div class="split-row">
+              <div>
+                <h3>Parsed Query</h3>
+                <p class="muted">{{ universalSearchPlan.planner }} · {{ universalSearchPlan.backend }} · {{ universalSearchPlan.llm_status }}</p>
+              </div>
+              <code>{{ universalSearchPlan.executable_query }}</code>
+            </div>
+            <div class="chip-row">
+              <span v-for="clause in universalSearchPlan.clauses" :key="`${clause.field}-${clause.value}-${clause.token}`" class="status-badge">
+                {{ clause.field }} {{ clause.operator }} {{ clause.value }}
+              </span>
+            </div>
+            <p v-for="note in universalSearchPlan.notes" :key="note" class="muted">{{ note }}</p>
+          </div>
           <p v-if="universalSearchMessage" class="alert">{{ universalSearchMessage }}</p>
           <p v-if="universalSearchBackend" class="muted">
-            Search backend: {{ universalSearchBackend }}. Elasticsearch/OpenSearch are intentionally not enabled in this run.
+            Search backend: {{ universalSearchBackend }}. Curated PostgreSQL/pgvector views are used for production-scale local search; external search clusters remain optional future adapters.
           </p>
           <details class="search-help-panel">
             <summary>Search syntax</summary>
@@ -7430,6 +7595,34 @@ onBeforeUnmount(() => {
               <code>ocr:"station"</code>, <code>caption:train</code>, <code>camera:Pixel</code>,
               <code>place:Armenia</code>, or <code>filename:PXL*, metadata word</code>.
             </p>
+            <p class="muted">
+              SQL-like clauses are translated safely: <code>kind = video and ext = mp4 and caption contains "train"</code>.
+            </p>
+          </details>
+          <details class="search-help-panel">
+            <summary>Read-only SQL over search views</summary>
+            <p class="muted">
+              Advanced diagnostics only. Queries must be a single <code>SELECT</code> against <code>cartolensia_search_*</code> views.
+              Mutating SQL, semicolons, comments, and raw table access are rejected by the backend.
+            </p>
+            <textarea v-model="sqlSearchQ" rows="4" class="wide-textarea"></textarea>
+            <div class="inline-form-row">
+              <button type="button" class="btn btn-outline-primary" @click="runReadOnlySQLSearch">Run read-only query</button>
+              <span v-if="sqlSearchMessage" class="muted">{{ sqlSearchMessage }}</span>
+            </div>
+            <div v-if="sqlSearchResult" class="table-scroll">
+              <p class="muted">{{ sqlSearchResult.note }}</p>
+              <table>
+                <thead>
+                  <tr><th v-for="column in sqlSearchResult.columns" :key="column">{{ column }}</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, idx) in sqlSearchResult.rows" :key="idx">
+                    <td v-for="column in sqlSearchResult.columns" :key="column">{{ row[column] }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </details>
           <div v-if="universalSearchWarnings.length" class="chip-row">
             <span v-for="warning in universalSearchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
@@ -7489,6 +7682,116 @@ onBeforeUnmount(() => {
               </table>
             </article>
           </div>
+        </section>
+
+        <section v-else-if="active === 'Knowledge Base'" class="panel knowledge-page">
+          <header class="panel-head">
+            <div>
+              <h2>Knowledge Base</h2>
+              <span>Human-readable facts mined from local metadata, OCR, transcripts, captions, documents, audio features, geotags, and tracks.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="extractKnowledgeBatch">
+              Extract facts
+            </button>
+          </header>
+          <section class="settings-form">
+            <h3><i class="bi bi-magic" aria-hidden="true"></i> Ask The Local Knowledge Base</h3>
+            <p class="muted">The current runner uses deterministic local tools. It plans the request, searches facts and graph relations, and records the conversation. No remote LLM API is used by default.</p>
+            <div class="inline-form-row">
+              <input v-model="knowledgeChatInput" type="search" placeholder="What was recorded near Lake Ladoga? / Что снято рядом с поездом?" @keyup.enter="askKnowledgeBase" />
+              <button type="button" class="btn btn-primary" :disabled="knowledgeChatBusy" @click="askKnowledgeBase">Ask</button>
+            </div>
+            <p v-if="knowledgeChat?.note" class="muted">{{ knowledgeChat.note }}</p>
+            <article v-if="knowledgeChat" class="knowledge-answer">
+              <h4>Answer</h4>
+              <pre>{{ knowledgeChat.answer }}</pre>
+              <details>
+                <summary>Tool calls and parsed plan</summary>
+                <div class="chip-row">
+                  <span v-for="clause in knowledgeChat.planner.clauses" :key="`${clause.field}-${clause.value}`" class="status-badge">
+                    {{ clause.field }} {{ clause.operator }} {{ clause.value }}
+                  </span>
+                </div>
+                <pre class="compact-json">{{ JSON.stringify(knowledgeChat.tool_calls, null, 2) }}</pre>
+              </details>
+            </article>
+          </section>
+          <section class="settings-form">
+            <h3><i class="bi bi-filter" aria-hidden="true"></i> Browse Facts</h3>
+            <div class="inline-form-row">
+              <input v-model="knowledgeQ" type="search" placeholder="Filter subject, predicate, object, evidence, asset name..." @keyup.enter="loadKnowledgeBase" />
+              <input v-model="knowledgePredicate" type="search" placeholder="predicate, e.g. caption, captured_with, ocr_text" @keyup.enter="loadKnowledgeBase" />
+              <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="loadKnowledgeBase">Search</button>
+            </div>
+            <p v-if="knowledgeMessage" class="alert">{{ knowledgeMessage }}</p>
+            <p v-if="knowledgeExtraction" class="muted">
+              Last extraction batch: {{ knowledgeExtraction.facts_inserted }} fact upserts · {{ knowledgeExtraction.relations_inserted }} relation upserts.
+            </p>
+            <div v-if="knowledgeFacts.length === 0" class="empty-state">No facts match this filter yet.</div>
+            <div v-else class="knowledge-fact-grid">
+              <article v-for="fact in knowledgeFacts" :key="fact.id" class="knowledge-card">
+                <div class="knowledge-card-head">
+                  <strong>{{ fact.subject }}</strong>
+                  <span class="status-badge">{{ fact.predicate }}</span>
+                </div>
+                <p>{{ fact.object }}</p>
+                <small v-if="fact.evidence">{{ fact.evidence }}</small>
+                <div class="tile-actions">
+                  <span class="muted">{{ fact.source_kind }} · {{ fact.language || 'any language' }}</span>
+                  <button v-if="fact.asset_id" type="button" class="btn btn-sm btn-outline-secondary" @click="openKnowledgeAsset(fact.asset_id)">Open asset</button>
+                </div>
+              </article>
+            </div>
+          </section>
+        </section>
+
+        <section v-else-if="active === 'Knowledge Graph'" class="panel knowledge-page">
+          <header class="panel-head">
+            <div>
+              <h2>Knowledge Graph</h2>
+              <span>Relations between assets, devices, folders, tracks, transcripts, document text, tags, and extracted knowledge entities.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="loadKnowledgeBase">Refresh</button>
+          </header>
+          <section class="settings-form">
+            <h3><i class="bi bi-search" aria-hidden="true"></i> Relation Search</h3>
+            <div class="inline-form-row">
+              <input v-model="knowledgeQ" type="search" placeholder="Filter relation endpoints, evidence, asset name..." @keyup.enter="loadKnowledgeBase" />
+              <input v-model="knowledgeRelationFilter" type="search" placeholder="relation, e.g. stored_in_folder, linked_to_track" @keyup.enter="loadKnowledgeBase" />
+              <button type="button" class="btn btn-outline-primary" :disabled="knowledgeLoading" @click="loadKnowledgeBase">Search graph</button>
+            </div>
+            <p class="muted">{{ knowledgeRelationsTotal }} relations match. Showing the first {{ knowledgeRelations.length }} for responsiveness.</p>
+          </section>
+          <section class="knowledge-graph-layout">
+            <article class="settings-form">
+              <h3>Graph Preview</h3>
+              <div class="knowledge-graph-preview">
+                <div v-for="relation in knowledgeRelations.slice(0, 24)" :key="`graph-${relation.id}`" class="knowledge-edge">
+                  <span>{{ relation.from_entity || relation.from_asset_id || 'entity' }}</span>
+                  <strong>{{ relation.relation }}</strong>
+                  <span>{{ relation.to_entity || relation.to_asset_id || 'entity' }}</span>
+                </div>
+              </div>
+            </article>
+            <article class="settings-form">
+              <h3>Relations</h3>
+              <div v-if="knowledgeRelations.length === 0" class="empty-state">No graph relations match this filter yet.</div>
+              <div v-else class="relation-list">
+                <article v-for="relation in knowledgeRelations" :key="relation.id" class="relation-row">
+                  <button v-if="relation.from_asset_id" type="button" class="link-button" @click="openKnowledgeAsset(relation.from_asset_id)">
+                    {{ relation.from_entity || relation.from_asset_id }}
+                  </button>
+                  <span v-else>{{ relation.from_entity || 'entity' }}</span>
+                  <strong>{{ relation.relation }}</strong>
+                  <button v-if="relation.to_asset_id" type="button" class="link-button" @click="openKnowledgeAsset(relation.to_asset_id)">
+                    {{ relation.to_entity || relation.to_asset_id }}
+                  </button>
+                  <span v-else>{{ relation.to_entity || 'entity' }}</span>
+                  <small v-if="relation.evidence">{{ relation.evidence }}</small>
+                </article>
+              </div>
+            </article>
+          </section>
         </section>
 
         <section v-else-if="active === 'Face Gallery'" class="panel face-gallery-page">

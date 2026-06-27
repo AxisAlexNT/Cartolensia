@@ -680,6 +680,103 @@ export type SearchResult = {
   explanation: string;
 };
 
+export type SearchPlanClause = {
+  boolean: string;
+  field: string;
+  operator: string;
+  value: string;
+  token: string;
+};
+
+export type SearchPlan = {
+  raw_query: string;
+  executable_query: string;
+  tokens: string[];
+  clauses: SearchPlanClause[];
+  backend: string;
+  backend_mode: string;
+  planner: string;
+  llm_status: string;
+  warnings: string[];
+  notes: string[];
+  safe_structured: boolean;
+};
+
+export type ReadOnlySQLResult = {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  limit: number;
+  count: number;
+  sql: string;
+  views: string[];
+  note: string;
+};
+
+export type KnowledgeFact = {
+  id: string;
+  asset_id?: string;
+  source_kind: string;
+  source_id?: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  confidence?: number;
+  language?: string;
+  evidence?: string;
+  created_at: string;
+  updated_at: string;
+  metadata_json?: Record<string, unknown>;
+};
+
+export type KnowledgeRelation = {
+  id: string;
+  from_asset_id?: string;
+  to_asset_id?: string;
+  from_entity?: string;
+  to_entity?: string;
+  relation: string;
+  confidence?: number;
+  evidence?: string;
+  created_at: string;
+  metadata_json?: Record<string, unknown>;
+};
+
+export type KnowledgePage<T> = {
+  page: { limit: number; offset: number; total: number };
+} & T;
+
+export type KnowledgeExtractionResult = {
+  facts_inserted: number;
+  facts_updated: number;
+  relations_inserted: number;
+  relations_updated: number;
+  limit: number;
+  counts: Record<string, number>;
+  note?: string;
+};
+
+export type KnowledgeMessage = {
+  id: string;
+  conversation_id: string;
+  role: string;
+  content: string;
+  tool_calls_json?: Array<Record<string, unknown>>;
+  created_at: string;
+};
+
+export type KnowledgeChatResponse = {
+  conversation_id?: string;
+  answer: string;
+  planner: SearchPlan;
+  tool_calls: Array<Record<string, unknown>>;
+  facts: KnowledgeFact[];
+  relations: KnowledgeRelation[];
+  messages?: KnowledgeMessage[];
+  limit: number;
+  llm_status: string;
+  note: string;
+};
+
 export type SearchPlace = {
   query: string;
   name: string;
@@ -725,6 +822,8 @@ export type SearchResponse = {
   tokens: string[];
   backend?: string;
   backend_mode?: string;
+  plan?: SearchPlan;
+  plan_preview?: string;
   results: SearchResult[];
   tracks?: Array<{ track: TrackSummary; matched: string[]; explanation: string }>;
   places?: SearchPlace[];
@@ -1338,6 +1437,63 @@ export const api = {
     request<Record<string, unknown>>(
       `/api/v1/search/vector?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}`
     ),
+  searchParse: (q: string) =>
+    request<SearchPlan>(`/api/v1/search/parse?q=${encodeURIComponent(q)}`),
+  searchPlan: (q: string) =>
+    request<SearchPlan>("/api/v1/search/plan", {
+      method: "POST",
+      body: JSON.stringify({ description: q })
+    }),
+  searchSQL: (sql: string, limit = 200) =>
+    request<ReadOnlySQLResult>("/api/v1/search/sql", {
+      method: "POST",
+      body: JSON.stringify({ sql, limit })
+    }),
+  knowledgeFacts: (params: { q?: string; asset_id?: string; source_kind?: string; predicate?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.q) query.set("q", params.q);
+    if (params.asset_id) query.set("asset_id", params.asset_id);
+    if (params.source_kind) query.set("source_kind", params.source_kind);
+    if (params.predicate) query.set("predicate", params.predicate);
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    const suffix = query.toString();
+    return request<KnowledgePage<{ facts: KnowledgeFact[] }>>(`/api/v1/knowledge/facts${suffix ? `?${suffix}` : ""}`).then((page) => ({
+      ...page,
+      facts: asArray(page.facts),
+      page: page.page ?? { limit: params.limit ?? 50, offset: params.offset ?? 0, total: 0 }
+    }));
+  },
+  knowledgeRelations: (params: { q?: string; asset_id?: string; relation?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.q) query.set("q", params.q);
+    if (params.asset_id) query.set("asset_id", params.asset_id);
+    if (params.relation) query.set("relation", params.relation);
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    const suffix = query.toString();
+    return request<KnowledgePage<{ relations: KnowledgeRelation[] }>>(`/api/v1/knowledge/relations${suffix ? `?${suffix}` : ""}`).then((page) => ({
+      ...page,
+      relations: asArray(page.relations),
+      page: page.page ?? { limit: params.limit ?? 50, offset: params.offset ?? 0, total: 0 }
+    }));
+  },
+  extractKnowledge: (limit = 1000) =>
+    request<KnowledgeExtractionResult>("/api/v1/knowledge/extract", {
+      method: "POST",
+      body: JSON.stringify({ limit })
+    }),
+  knowledgeChat: (message: string, conversationId = "", limit = 25) =>
+    request<KnowledgeChatResponse>("/api/v1/knowledge/chat", {
+      method: "POST",
+      body: JSON.stringify({ message, conversation_id: conversationId, limit })
+    }).then((response) => ({
+      ...response,
+      facts: asArray(response.facts),
+      relations: asArray(response.relations),
+      tool_calls: asArray(response.tool_calls),
+      messages: asArray(response.messages)
+    })),
   search: (q: string, limit = 100, offset = 0) =>
     request<SearchResponse>(
       `/api/v1/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
