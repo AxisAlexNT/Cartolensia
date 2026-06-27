@@ -165,6 +165,64 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 
 For million-file archives, keep preview generation optional and scope discovery to the explicit storage and prefix you intend to index.
 
+### Large Read-Only NAS Mounts
+
+For SMB/NFS/object-storage views mounted at `/originals`, keep the mount
+strictly read-only and place every mutable Cartolensia directory under
+`/var/lib/cartolensia` or another local disk path:
+
+- PostgreSQL data: `/var/lib/cartolensia/postgres`
+- cache/previews/work files: `/var/lib/cartolensia/cache`
+- components/tools: `/var/lib/cartolensia/components`
+- AI model cache: `/var/lib/cartolensia/models`
+- exports/backups: `/var/lib/cartolensia/exports`
+- logs/run state: `/var/lib/cartolensia/logs` and `/var/lib/cartolensia/run`
+
+Use explicit storage and prefix selections for real archives. Do not use
+`storage=all` against production originals. Do not enable missing-file marking
+for read-only NAS indexing.
+
+Recommended first full indexing settings for a large, messy archive:
+
+- `storage`: `originals`
+- `prefix`: a top-level folder, or a prioritized list of year/folder prefixes
+- `max_files`: `-1` for normal indexing only
+- `max_bytes`: `-1` or omitted
+- previews: optional, usually off for the first pass
+- OCR/ASR/AI: opt-in and scoped after core metadata is visible
+- folder workers: conservative first, then increase after watching I/O, DB, RAM,
+  and network utilization
+
+The discovery worker streams directory results and updates folder/file counters
+in the Jobs page. Gallery results should appear while discovery continues;
+Explorer and Search APIs must remain paginated and must not load the whole
+archive into memory.
+
+### Upgrading A Boot-Managed Host
+
+For hosts created with `scripts/remote/bootstrap-cartolensia-user.sh`, use the
+Git upgrade helper when the machine has Internet access:
+
+```bash
+sudo CARTOLENSIA_REPO_URL=https://github.com/<owner>/<repo>.git \
+  CARTOLENSIA_BRANCH=main \
+  bash /opt/cartolensia/current/scripts/remote/upgrade-cartolensia-from-git.sh
+```
+
+The helper creates a PostgreSQL backup before swapping releases, keeps
+`/var/lib/cartolensia` intact, preserves bundled external tools from the
+previous release, and refuses to continue unless `/originals` is mounted
+read-only. It checks mount options only and does not write probe files under
+`/originals`.
+
+Rollback is a symlink change plus service restart:
+
+```bash
+sudo ln -sfn /opt/cartolensia/previous /opt/cartolensia/current
+sudo chown -h cartolensia:cartolensia /opt/cartolensia/current
+sudo systemctl restart cartolensia-ai cartolensia
+```
+
 ## Dry-Run Reports
 
 Scoped discovery dry runs are report-only and require non-empty prefixes. Defaults are conservative: `max_files <= 50`, `max_bytes` defaults to 2 GiB, and missing marking is rejected.
@@ -376,6 +434,7 @@ curl -fsS http://127.0.0.1:18080/api/v1/ai/workers
 curl -fsS http://127.0.0.1:18080/api/v1/vector/status
 docker info --format '{{json .Runtimes}}' || true
 nvidia-smi || true
+ffmpeg -hide_banner -hwaccels || true
 ```
 
 When NVIDIA Container Toolkit is installed, a supervised GPU probe can be run with:
@@ -385,6 +444,17 @@ docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
 This probe may pull the CUDA base image if it is not local. Do not pull heavy PyTorch/ROCm/Intel images unless explicitly approved.
+
+For production systemd installs, the bundled PostgreSQL launcher uses
+`dynamic_shared_memory_type=mmap`. This avoids fragile `/dev/shm` POSIX dynamic
+shared-memory segments in VM/LXC-style deployments and allows the Cartolensia
+backend service to restart independently from the bundled PostgreSQL service.
+
+For AMD/Radeon transcoding, verify that the service account can read
+`/dev/dri/renderD*` and that FFmpeg reports `vaapi`, `drm`, `opencl`, or
+`vulkan` in `ffmpeg -hwaccels`. For NVIDIA transcoding, verify `nvidia-smi` and
+FFmpeg `cuda`/NVENC encoder availability. Host GPU drivers and device passthrough
+are operator responsibilities and are not bundled by Cartolensia.
 
 ## Settings File Picker
 

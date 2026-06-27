@@ -92,6 +92,13 @@ For a remote AI node, start the selected executor flavor on that node:
 ./bin/start-ai-executor cpu-avx2 0.0.0.0 19090
 ```
 
+`bin/start-ai-executor` first looks for `ai-envs/<flavor>/venv/bin/python`,
+then for a bundled `python/bin/python*`, and finally for system `python3`. In
+all cases it adds `ai/python-site` and `services/ai` to `PYTHONPATH`. This lets a
+private offline package ship a full virtual environment when licensing and size
+permit, while also supporting a lighter package that contains Python packages but
+uses the target host's Python interpreter.
+
 Then point the main node at it with `config/remote-executors.local.env`:
 
 ```bash

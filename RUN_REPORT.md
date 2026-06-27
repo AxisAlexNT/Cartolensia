@@ -3061,6 +3061,53 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-27 Remote Production Bootstrap Continuation
+
+Implemented and deployed:
+
+- Mounted the remote SMB originals share at `/originals` as CIFS read-only with `ro,nosuid,nodev,noexec,file_mode=0440,dir_mode=0550`; verified the `cartolensia` user can read it and cannot create a probe file there.
+- Installed the extracted offline bundle under `/opt/cartolensia/current` on the remote root filesystem and kept all writable state under `/var/lib/cartolensia`.
+- Fixed the deployed AI sidecar launcher to support the bundle layout where Python packages are under `ai/python-site` and the interpreter is system `python3`; `cartolensia-ai.service` is now active and reports OCR, image AI, ASR, and audio-analysis capability contracts.
+- Fixed bundled PostgreSQL service stability by running PostgreSQL with `dynamic_shared_memory_type=mmap`; app-only restarts now work without restarting PostgreSQL.
+- Updated `scripts/remote/bootstrap-cartolensia-user.sh` so future remote installs set `CARTOLENSIA_COMPONENT_DIR=/var/lib/cartolensia/components`, preserve model path compatibility, honor AI bind/port env values, and use mmap dynamic shared memory for bundled PostgreSQL.
+- Updated `scripts/release/build-local-full-tarzst.sh` so full local bundles export component/model dirs, use mmap dynamic shared memory for bundled PostgreSQL startup, and let `bin/start-ai-executor` run from either a bundled venv, bundled Python, or host `python3` plus `ai/python-site`.
+- Updated Component Manager backend root selection to respect `CARTOLENSIA_COMPONENT_DIR`; remote readiness now reports `/var/lib/cartolensia/components`.
+- Reworked bounded discovery walking so NAS-scale scans stream discovered file records into PostgreSQL instead of first flattening the entire archive into memory.
+- Added a unit test covering streaming bounded walk cancellation.
+- Updated distribution/offline/operations docs for read-only SMB `/originals`, `/var/lib/cartolensia` runtime state, remote boot services, NVIDIA AI/transcoding, AMD/Radeon VAAPI, AI launcher fallback behavior, and Postgres mmap mode.
+
+Remote validation:
+
+- `cartolensia-postgres`, `cartolensia-ai`, and `cartolensia` are active and enabled on boot.
+- `GET /api/v1/health` returns `ok`.
+- `GET /api/v1/diagnostics/readiness` reports local auth, PostgreSQL, storage `originals`, cache, component dir, model dir, ffmpeg, ffprobe, Tesseract, and AI worker as reachable/ok.
+- Remote GPU/tool probes showed NVIDIA visible through `nvidia-smi`, `/dev/dri` render nodes visible, and ffmpeg hardware accelerators including `cuda`, `vaapi`, `qsv`, `drm`, `opencl`, and `vulkan`.
+- Started remote read-only discovery/indexing for storage `originals` with explicit top-level prefixes, `max_files=-1`, `max_bytes=-1`, no missing marking, and multimedia/PDF extensions only. The first attempt was canceled after identifying the pre-streaming memory issue. The second job is running with streaming inserts; early stats showed assets being inserted while the SMB walk continued.
+- Verified the WebUI is reachable from the operator workstation over the LAN while PostgreSQL and AI remain bound to localhost on the remote host.
+- Requeued discovery with recent year folders first so the UI can populate useful recent media earlier, while still scanning the remaining explicit top-level prefixes afterward.
+
+Tests run:
+
+- `gofmt -w internal/discovery/discovery.go internal/storage/storage.go internal/storage/storage_test.go internal/server/components.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/storage ./internal/discovery ./internal/server`
+- `git diff --check`
+- `npm --prefix webui run build`
+
+Known limitations:
+
+- The deployed full archive does not currently contain the approved image/ASR model weights under the active model directory. The AI sidecar is healthy and OCR is available; non-OCR model-backed features remain lazy/missing until models are imported or bundled.
+- The running discovery job intentionally excludes root `txt/md` files to avoid indexing non-multimedia sensitive text files from the share root. Images, videos, audio, GPS/KML/KMZ/GPX, PDFs, and DJVU are included.
+- Follow-up metadata extraction, hashing, previews, AI/OCR/ASR, and map refresh should be queued after the streaming discovery job completes or in bounded batches.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- remote `/originals` mounted read-only and write probe rejected
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-26 Private Full `tar.zst` Bundle Preparation
 
 Implemented:

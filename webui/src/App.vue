@@ -3870,6 +3870,30 @@ function progressPercent(job: Job): number {
   return Math.min(100, Math.round((job.progress_current / job.progress_total) * 100));
 }
 
+function jobCounterSummary(job: Job): string {
+  const counters = job.counters ?? {};
+  const parts: string[] = [];
+  if (counters.folders_scanned || counters.folders_queued) {
+    parts.push(`folders ${counters.folders_scanned ?? 0}/${counters.folders_queued ?? "?"}`);
+  }
+  if (counters.files_seen) {
+    parts.push(`files seen ${counters.files_seen}`);
+  }
+  if (counters.files_returned) {
+    parts.push(`matched ${counters.files_returned}`);
+  }
+  if (counters.files_skipped) {
+    parts.push(`skipped ${counters.files_skipped}`);
+  }
+  if (counters.scanned || counters.created || counters.updated) {
+    parts.push(`indexed ${counters.scanned ?? 0}`);
+  }
+  if (counters.bytes) {
+    parts.push(`${formatBytes(counters.bytes)}`);
+  }
+  return parts.join(" · ");
+}
+
 const mapFeatures = computed(() => {
   const features = mapData.value?.features;
   return Array.isArray(features) ? (features as Array<Record<string, unknown>>) : [];
@@ -4912,6 +4936,7 @@ onBeforeUnmount(() => {
               <progress :value="job.progress_current" :max="job.progress_total ?? 100"></progress>
               <span>{{ job.status }} · attempt {{ job.attempts ?? 0 }} / {{ job.max_attempts ?? 0 }}</span>
               <span>{{ job.progress_current }} / {{ job.progress_total ?? "?" }} · {{ progressPercent(job) }}%</span>
+              <small v-if="jobCounterSummary(job)">{{ jobCounterSummary(job) }}</small>
               <small>{{ job.logs?.at(-1)?.message ?? job.error }}</small>
             </article>
           </div>
@@ -4935,6 +4960,7 @@ onBeforeUnmount(() => {
               </div>
               <progress :value="selectedJob.progress_current" :max="selectedJob.progress_total ?? 100"></progress>
               <small>{{ selectedJob.id }}</small>
+              <small v-if="jobCounterSummary(selectedJob)">{{ jobCounterSummary(selectedJob) }}</small>
               <pre class="logbox">{{ JSON.stringify(selectedJob.logs ?? [], null, 2) }}</pre>
             </article>
             <article v-for="job in jobs" :key="job.id" class="job">
@@ -4947,6 +4973,7 @@ onBeforeUnmount(() => {
               </div>
               <progress :value="job.progress_current" :max="job.progress_total ?? 100"></progress>
               <span>{{ job.status }} · {{ job.progress_current }} / {{ job.progress_total ?? "?" }}</span>
+              <small v-if="jobCounterSummary(job)">{{ jobCounterSummary(job) }}</small>
               <small>{{ job.error }}</small>
             </article>
           </div>

@@ -173,11 +173,61 @@ sudo systemctl start cartolensia-postgres cartolensia-ai cartolensia
 sudo systemctl status cartolensia
 ```
 
+For SMB/CIFS originals, keep credentials outside the repo and mount the share
+read-only. A typical `/etc/fstab` entry looks like:
+
+```fstab
+//fileserver.example/media /originals cifs credentials=/etc/cartolensia/smb-originals.credentials,ro,nosuid,nodev,noexec,uid=cartolensia,gid=cartolensia,file_mode=0440,dir_mode=0550,iocharset=utf8,vers=3.1.1,nofail,_netdev,x-systemd.automount 0 0
+```
+
+`/etc/cartolensia/smb-originals.credentials` must be mode `0600` or stricter and
+must never be committed. Confirm the mount with `findmnt -T /originals` and a
+negative write test as the `cartolensia` user before indexing. Runtime writes
+belong under `/var/lib/cartolensia`; the bootstrap sets
+`CARTOLENSIA_COMPONENT_DIR=/var/lib/cartolensia/components` and keeps cache,
+exports, logs, and PostgreSQL data under `/var/lib/cartolensia`.
+
 For NVIDIA AI/transcoding the host must provide the NVIDIA driver and, for
 containerized GPU use, NVIDIA Container Toolkit. For Ryzen/Radeon VAAPI
 transcoding the `cartolensia` service user must be able to read
 `/dev/dri/renderD*`; the bootstrap adds `video` and `render` groups and sets
 `LIBVA_DRIVER_NAME=radeonsi`/`VDPAU_DRIVER=radeonsi` defaults.
+
+### Git-Based Remote Upgrades
+
+Boot-managed hosts can be upgraded from Git without re-indexing the archive.
+The metadata database and component/model directories live under
+`/var/lib/cartolensia` and are preserved across release swaps.
+
+On the remote host:
+
+```bash
+sudo CARTOLENSIA_REPO_URL=https://github.com/<owner>/<repo>.git \
+  CARTOLENSIA_BRANCH=main \
+  bash /opt/cartolensia/current/scripts/remote/upgrade-cartolensia-from-git.sh
+```
+
+The upgrade script:
+
+- verifies that `/originals` is a mounted filesystem and has read-only mount
+  options;
+- does not create write-probe files under `/originals`;
+- writes a PostgreSQL custom-format backup to
+  `/var/lib/cartolensia/exports/backups`;
+- fetches the configured Git branch into `/opt/cartolensia/source`;
+- copies the current release forward so bundled ffmpeg, PostgreSQL,
+  Tesseract, Python runtime, and other reviewed payloads remain available;
+- overlays the freshly built backend, WebUI, configs, scripts, docs, and
+  migrations;
+- moves `/opt/cartolensia/current` atomically to the new release and leaves
+  `/opt/cartolensia/previous` pointing at the old release;
+- restarts only `cartolensia-ai` and `cartolensia` by default.
+
+If the target is air-gapped, build a new local full bundle on a connected
+machine instead and extract it into `/opt/cartolensia/releases/<version>`.
+Then move `/opt/cartolensia/current` to that release and restart services. The
+same `/var/lib/cartolensia` database/cache/component layout is reused, so a
+full re-index is not required.
 
 ### Remote Executors
 

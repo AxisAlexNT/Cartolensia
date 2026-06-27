@@ -111,12 +111,17 @@ type Job struct {
 }
 
 type Counters struct {
-	Scanned int64 `json:"scanned"`
-	Created int64 `json:"created"`
-	Updated int64 `json:"updated"`
-	Hashed  int64 `json:"hashed"`
-	Bytes   int64 `json:"bytes"`
-	Errors  int64 `json:"errors"`
+	Scanned        int64 `json:"scanned"`
+	Created        int64 `json:"created"`
+	Updated        int64 `json:"updated"`
+	Hashed         int64 `json:"hashed"`
+	Bytes          int64 `json:"bytes"`
+	Errors         int64 `json:"errors"`
+	FoldersQueued  int64 `json:"folders_queued,omitempty"`
+	FoldersScanned int64 `json:"folders_scanned,omitempty"`
+	FilesSeen      int64 `json:"files_seen,omitempty"`
+	FilesReturned  int64 `json:"files_returned,omitempty"`
+	FilesSkipped   int64 `json:"files_skipped,omitempty"`
 }
 
 type LogLine struct {

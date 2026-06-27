@@ -57,6 +57,7 @@ type WalkOptions struct {
 	FolderQueueDepth  int
 	IncludeExtensions []string
 	ExcludePatterns   []string
+	Progress          func(WalkReport)
 }
 
 var supportedExtensions = []string{
@@ -289,6 +290,21 @@ func (a *FSAdapter) ListRecursive(ctx context.Context) ([]FileInfo, error) {
 }
 
 func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) ([]FileInfo, WalkReport, error) {
+	var files []FileInfo
+	var mu sync.Mutex
+	report, err := a.WalkRecursiveBounded(ctx, opts, func(info FileInfo) error {
+		mu.Lock()
+		defer mu.Unlock()
+		files = append(files, info)
+		return nil
+	})
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].StorageURL < files[j].StorageURL
+	})
+	return files, report, err
+}
+
+func (a *FSAdapter) WalkRecursiveBounded(ctx context.Context, opts WalkOptions, visit func(FileInfo) error) (WalkReport, error) {
 	report := WalkReport{Complete: true, SkippedReasons: map[string]int{}}
 	if opts.MaxFiles == 0 {
 		opts.MaxFiles = 50
@@ -310,15 +326,59 @@ func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) 
 	defer cancel()
 	folderTasks := make(chan string, opts.FolderQueueDepth)
 	fileTasks := make(chan string, max(16, opts.FolderQueueDepth*4))
+	progressDone := make(chan struct{})
 	var folderWG sync.WaitGroup
 	var fileWG sync.WaitGroup
 	var mu sync.Mutex
-	var files []FileInfo
 	limitReached := false
+	var firstErr error
+	snapshot := func() WalkReport {
+		mu.Lock()
+		defer mu.Unlock()
+		out := report
+		out.SkippedReasons = map[string]int{}
+		for k, v := range report.SkippedReasons {
+			out.SkippedReasons[k] = v
+		}
+		return out
+	}
+	if opts.Progress != nil {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ticker.C:
+					opts.Progress(snapshot())
+				}
+			}
+		}()
+	}
+	defer func() {
+		close(progressDone)
+		if opts.Progress != nil {
+			opts.Progress(snapshot())
+		}
+	}()
 	addSkipped := func(reason string) {
 		mu.Lock()
 		report.FilesSkipped++
 		report.SkippedReasons[reason]++
+		mu.Unlock()
+	}
+	setErr := func(err error) {
+		if err == nil {
+			return
+		}
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			report.Complete = false
+			report.SkippedReasons["callback_error"]++
+			cancel()
+		}
 		mu.Unlock()
 	}
 	markLimit := func() bool {
@@ -338,26 +398,32 @@ func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) 
 		defer mu.Unlock()
 		return limitReached
 	}
-	enqueueFolder := func(rel string) error {
+	enqueueFolder := func(rel string) (bool, error) {
 		if rel == "" {
-			return nil
+			return true, nil
 		}
 		if shouldStop() {
-			return nil
+			return true, nil
 		}
 		folderWG.Add(1)
 		mu.Lock()
 		report.FoldersQueued++
 		mu.Unlock()
-		select {
-		case folderTasks <- rel:
-			return nil
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			folderWG.Done()
 			if shouldStop() {
-				return nil
+				return true, nil
 			}
-			return ctx.Err()
+			return false, err
+		}
+		select {
+		case folderTasks <- rel:
+			return true, nil
+		default:
+			// A wide directory can fill the bounded queue while every folder
+			// worker is still enumerating child directories. Process the child
+			// inline instead of blocking all workers on enqueue.
+			return false, nil
 		}
 	}
 	processFile := func(relative string) error {
@@ -389,13 +455,18 @@ func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) 
 			markLimit()
 			return nil
 		}
-		files = append(files, info)
 		report.FilesReturned++
 		report.BytesSeen += info.SizeBytes
 		mu.Unlock()
+		if visit != nil {
+			if err := visit(info); err != nil {
+				setErr(err)
+			}
+		}
 		return nil
 	}
-	processFolder := func(rel string) error {
+	var processFolder func(string) error
+	processFolder = func(rel string) error {
 		defer folderWG.Done()
 		if shouldStop() {
 			return nil
@@ -441,8 +512,14 @@ func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) 
 				continue
 			}
 			if entry.IsDir() {
-				if err := enqueueFolder(childRel); err != nil {
+				queued, err := enqueueFolder(childRel)
+				if err != nil {
 					return err
+				}
+				if !queued {
+					if err := processFolder(childRel); err != nil {
+						return err
+					}
 				}
 				continue
 			}
@@ -484,20 +561,23 @@ func (a *FSAdapter) ListRecursiveBounded(ctx context.Context, opts WalkOptions) 
 	for _, prefix := range opts.Prefixes {
 		rel, err := NormalizeRelativePath(prefix)
 		if err != nil {
-			return nil, report, err
+			return report, err
 		}
-		if err := enqueueFolder(rel); err != nil {
-			return nil, report, err
+		queued, err := enqueueFolder(rel)
+		if err != nil {
+			return report, err
+		}
+		if !queued {
+			if err := processFolder(rel); err != nil {
+				return report, err
+			}
 		}
 	}
 	folderWG.Wait()
 	close(folderTasks)
 	close(fileTasks)
 	fileWG.Wait()
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].StorageURL < files[j].StorageURL
-	})
-	return files, report, nil
+	return report, firstErr
 }
 
 func (a *FSAdapter) Open(relativePath string) (*os.File, FileInfo, error) {

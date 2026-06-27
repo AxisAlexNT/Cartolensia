@@ -559,9 +559,13 @@ func componentDefinitionByKey(key string) (componentDefinition, bool) {
 }
 
 func componentRoot() string {
-	root, err := filepath.Abs(filepath.Join(".cartolensia", "components"))
+	configured := strings.TrimSpace(os.Getenv("CARTOLENSIA_COMPONENT_DIR"))
+	if configured == "" {
+		configured = filepath.Join(".cartolensia", "components")
+	}
+	root, err := filepath.Abs(configured)
 	if err != nil {
-		return filepath.Join(".cartolensia", "components")
+		return configured
 	}
 	return root
 }

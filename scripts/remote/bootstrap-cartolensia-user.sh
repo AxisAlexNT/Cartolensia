@@ -83,7 +83,9 @@ CARTOLENSIA_ADMIN_PASSWORD_FILE=${admin_password_file}
 CARTOLENSIA_HTTP_ADDR=${HTTP_ADDR}
 CARTOLENSIA_POSTGRES_PORT=${POSTGRES_PORT}
 CARTOLENSIA_AI_WORKER_ENDPOINT=http://127.0.0.1:${AI_PORT}
+CARTOLENSIA_COMPONENT_DIR=${CARTOLENSIA_DATA_DIR}/components
 CARTOLENSIA_AI_MODEL_DIR=${CARTOLENSIA_CURRENT}/models
+CARTOLENSIA_MODEL_DIR=${CARTOLENSIA_CURRENT}/models
 CARTOLENSIA_AI_FLAVOR=${AI_FLAVOR}
 CARTOLENSIA_LIBVA_DRIVER_NAME=radeonsi
 CARTOLENSIA_VDPAU_DRIVER=radeonsi
@@ -114,7 +116,7 @@ SupplementaryGroups=video render docker
 EnvironmentFile=/etc/cartolensia/cartolensia.env
 WorkingDirectory=/opt/cartolensia/current
 ExecStartPre=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec /opt/cartolensia/current/bin/ensure-postgres-db'
-ExecStart=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec components/postgres/bin/postgres -D "$CARTOLENSIA_DATA_DIR/postgres" -p "${CARTOLENSIA_POSTGRES_PORT:-15432}" -k "$CARTOLENSIA_DATA_DIR/run"'
+ExecStart=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec components/postgres/bin/postgres -D "$CARTOLENSIA_DATA_DIR/postgres" -p "${CARTOLENSIA_POSTGRES_PORT:-15432}" -k "$CARTOLENSIA_DATA_DIR/run" -c dynamic_shared_memory_type=mmap'
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -142,7 +144,7 @@ Environment=NVIDIA_VISIBLE_DEVICES=all
 Environment=NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 Environment=LIBVA_DRIVER_NAME=radeonsi
 Environment=VDPAU_DRIVER=radeonsi
-ExecStart=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec ./bin/start-ai-executor "${CARTOLENSIA_AI_FLAVOR:-nvidia-cu128}" 0.0.0.0 19090'
+ExecStart=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec ./bin/start-ai-executor "${CARTOLENSIA_AI_FLAVOR:-nvidia-cu128}" "${CARTOLENSIA_AI_BIND:-0.0.0.0}" "${CARTOLENSIA_AI_PORT:-19090}"'
 Restart=on-failure
 RestartSec=5
 

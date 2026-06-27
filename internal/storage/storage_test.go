@@ -95,6 +95,84 @@ func TestFSAdapterSkipsSymlinks(t *testing.T) {
 	}
 }
 
+func TestFSAdapterWalkRecursiveBoundedStreamsAndCancels(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "album", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"album/one.jpg", "album/two.jpg", "album/nested/three.jpg"} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel)), []byte("dummy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter, err := NewFSAdapter("fixture", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopErr := errors.New("stop after first streamed file")
+	visited := 0
+	report, err := adapter.WalkRecursiveBounded(context.Background(), WalkOptions{
+		Prefixes:          []string{"album"},
+		MaxFiles:          -1,
+		MaxBytes:          -1,
+		MaxFolderWorkers:  2,
+		MaxFileWorkers:    2,
+		FolderQueueDepth:  4,
+		IncludeExtensions: []string{"jpg"},
+	}, func(FileInfo) error {
+		visited++
+		return stopErr
+	})
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("expected callback error, got %v", err)
+	}
+	if visited == 0 {
+		t.Fatal("expected streaming callback to be called")
+	}
+	if report.Complete {
+		t.Fatal("expected incomplete report after callback cancellation")
+	}
+}
+
+func TestFSAdapterWalkRecursiveBoundedHandlesSaturatedFolderQueue(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 12; i++ {
+		dir := filepath.Join(root, "wide", "child-"+string(rune('a'+i)))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "photo.jpg"), []byte("dummy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter, err := NewFSAdapter("fixture", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visited := 0
+	report, err := adapter.WalkRecursiveBounded(context.Background(), WalkOptions{
+		Prefixes:          []string{"wide"},
+		MaxFiles:          -1,
+		MaxBytes:          -1,
+		MaxFolderWorkers:  1,
+		MaxFileWorkers:    1,
+		FolderQueueDepth:  1,
+		IncludeExtensions: []string{"jpg"},
+	}, func(FileInfo) error {
+		visited++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visited != 12 {
+		t.Fatalf("expected all files to be visited, got %d", visited)
+	}
+	if report.FilesReturned != 12 || !report.Complete {
+		t.Fatalf("unexpected walk report: %#v", report)
+	}
+}
+
 func TestParseURLRejectsEncodedTraversal(t *testing.T) {
 	if _, err := ParseURL("fs://fixture/photos/%2e%2e/secret.jpg"); !errors.Is(err, ErrTraversal) {
 		t.Fatalf("expected traversal error, got %v", err)

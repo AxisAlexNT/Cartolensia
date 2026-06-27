@@ -399,7 +399,9 @@ export CARTOLENSIA_TRANSCODE_PREFERRED_ACCELERATORS="${CARTOLENSIA_TRANSCODE_PRE
 export PATH="${ROOT}/components/ffmpeg-btbn/bin:${ROOT}/components/tesseract/bin:${ROOT}/components/postgres/bin:${PATH}"
 export LD_LIBRARY_PATH="${ROOT}/components/ffmpeg-btbn/lib:${ROOT}/components/tesseract/lib:${ROOT}/components/postgres/lib:${ROOT}/components/postgres/pkglib:${LD_LIBRARY_PATH:-}"
 export TESSDATA_PREFIX="${TESSDATA_PREFIX:-${ROOT}/components/tesseract/share/tessdata}"
+export CARTOLENSIA_COMPONENT_DIR="${CARTOLENSIA_COMPONENT_DIR:-${ROOT}/components}"
 export CARTOLENSIA_AI_MODEL_DIR="${CARTOLENSIA_AI_MODEL_DIR:-${ROOT}/models}"
+export CARTOLENSIA_MODEL_DIR="${CARTOLENSIA_MODEL_DIR:-${CARTOLENSIA_AI_MODEL_DIR}}"
 mkdir -p "${CARTOLENSIA_DATA_DIR}/"{cache,components,models,exports,logs,run}
 SH
   cat >"${STAGE}/bin/ensure-postgres-db" <<'SH'
@@ -418,10 +420,15 @@ if [ ! -x "${ROOT}/components/postgres/bin/pg_ctl" ]; then
 fi
 mkdir -p "${PGDATA}" "${RUN_DIR}" "$(dirname "${LOG}")"
 if [ ! -d "${PGDATA}/base" ]; then
-  "${ROOT}/components/postgres/bin/initdb" -D "${PGDATA}" --encoding=UTF8 --locale=C --auth=trust
+  INITDB_SHARE="${ROOT}/components/postgres/share"
+  if [ -d "${INITDB_SHARE}" ]; then
+    "${ROOT}/components/postgres/bin/initdb" -D "${PGDATA}" -L "${INITDB_SHARE}" --encoding=UTF8 --locale=C --auth=trust
+  else
+    "${ROOT}/components/postgres/bin/initdb" -D "${PGDATA}" --encoding=UTF8 --locale=C --auth=trust
+  fi
 fi
 if ! "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" status >/dev/null 2>&1; then
-  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${PORT} -k ${RUN_DIR}" -w start
+  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${PORT} -k ${RUN_DIR} -c dynamic_shared_memory_type=mmap" -w start
   started_here=1
 else
   started_here=0
@@ -459,7 +466,7 @@ CARTOLENSIA_KEEP_BOOTSTRAP_POSTGRES_RUNNING=1 "${ROOT}/bin/ensure-postgres-db"
 if "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" status >/dev/null 2>&1; then
   echo "PostgreSQL is already running for ${PGDATA}."
 else
-  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${CARTOLENSIA_POSTGRES_PORT:-15432} -k ${CARTOLENSIA_DATA_DIR}/run" start
+  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${CARTOLENSIA_POSTGRES_PORT:-15432} -k ${CARTOLENSIA_DATA_DIR}/run -c dynamic_shared_memory_type=mmap" start
 fi
 SH
   cat >"${STAGE}/bin/start-cartolensia" <<'SH'
@@ -562,11 +569,22 @@ FLAVOR="${1:-cpu-avx2}"
 HOST="${2:-0.0.0.0}"
 PORT="${3:-19090}"
 VENV="${ROOT}/ai-envs/${FLAVOR}/venv"
-if [ ! -x "${VENV}/bin/python" ]; then
-  echo "AI environment not bundled for flavor ${FLAVOR}: ${VENV}" >&2
+PY=""
+if [ -x "${VENV}/bin/python" ]; then
+  PY="${VENV}/bin/python"
+elif [ -x "${ROOT}/python/bin/python3" ]; then
+  PY="${ROOT}/python/bin/python3"
+elif [ -x "${ROOT}/python/bin/python" ]; then
+  PY="${ROOT}/python/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  PY="$(command -v python)"
+else
+  echo "No Python runtime found for AI executor flavor ${FLAVOR}." >&2
   exit 1
 fi
-export PYTHONPATH="${ROOT}/services/ai:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT}/ai/python-site:${ROOT}/services/ai:${PYTHONPATH:-}"
 export CARTOLENSIA_AI_MODE="${CARTOLENSIA_AI_MODE:-real}"
 export CARTOLENSIA_AI_MODEL_DIR="${CARTOLENSIA_AI_MODEL_DIR:-${ROOT}/models}"
 case "${FLAVOR}" in
@@ -575,7 +593,7 @@ case "${FLAVOR}" in
   rocm*) export CARTOLENSIA_AI_DEVICE="${CARTOLENSIA_AI_DEVICE:-cuda}" ;;
   *) export CARTOLENSIA_AI_DEVICE="${CARTOLENSIA_AI_DEVICE:-cpu}" ;;
 esac
-exec "${VENV}/bin/python" -m cartolensia_ai.server --host "${HOST}" --port "${PORT}"
+exec "${PY}" -m cartolensia_ai.server --host "${HOST}" --port "${PORT}"
 SH
   cat >"${STAGE}/bin/start-transcode-node" <<'SH'
 #!/usr/bin/env bash

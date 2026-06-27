@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
@@ -254,28 +255,10 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 				_ = r.failJob(ctx, *job, cause)
 				return cause
 			}
-			walked, report, err := adapter.ListRecursiveBounded(ctx, storage.WalkOptions{
-				Prefixes:          prefixes,
-				MaxFiles:          payload.MaxFiles,
-				MaxBytes:          payload.MaxBytes,
-				MaxFolderWorkers:  r.MaxFolderWorkers,
-				MaxFileWorkers:    r.MaxFileWorkers,
-				FolderQueueDepth:  r.FolderQueueDepth,
-				IncludeExtensions: payload.IncludeExtensions,
-				ExcludePatterns:   payload.ExcludePatterns,
-			})
-			if err != nil {
-				job.Counters.Errors++
-				jobs.AddLog(job, "error", err.Error())
-				cause := classifyStorageFailure(err)
-				_ = r.failJob(ctx, *job, cause)
-				return cause
+			if err := r.scanBounded(ctx, job, adapter, storageConfig.Name, prefixes, payload); err != nil {
+				return err
 			}
-			files = walked
-			jobs.AddLog(job, "info", fmt.Sprintf("bounded scan storage %s prefixes %v: returned %d files, seen %d, complete=%t", storageConfig.Name, prefixes, report.FilesReturned, report.FilesSeen, report.Complete))
-			if !report.Complete {
-				jobs.AddLog(job, "warn", "bounded scan stopped at max_files or max_bytes limit; missing-file marking remains disabled")
-			}
+			continue
 		} else {
 			if isRealArchiveRoot(storageConfig.Root) {
 				cause := jobs.Permanent(fmt.Errorf("unbounded discovery is refused for real archive storage"))
@@ -338,6 +321,130 @@ func (r Runner) Scan(ctx context.Context, job *jobs.Job) error {
 	}
 	jobs.AddLog(job, "info", "discovery scan completed")
 	return r.completeJob(ctx, *job)
+}
+
+func (r Runner) scanBounded(ctx context.Context, job *jobs.Job, adapter *storage.FSAdapter, storageName string, prefixes []string, payload ScanPayload) error {
+	job.ProgressTotal = nil
+	jobs.AddLog(job, "info", fmt.Sprintf("streaming bounded scan storage %s prefixes %v", storageName, prefixes))
+	if err := r.updateJob(ctx, *job); err != nil {
+		return err
+	}
+	var lastUpdate time.Time
+	var lastProgressUpdate time.Time
+	var lastProgressLog time.Time
+	var scanMu sync.Mutex
+	walkCtx, cancelWalk := context.WithCancel(ctx)
+	defer cancelWalk()
+	cancelPollDone := make(chan struct{})
+	var cancelPollErr error
+	go func() {
+		defer close(cancelPollDone)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-walkCtx.Done():
+				return
+			case <-ticker.C:
+				scanMu.Lock()
+				err := r.checkCanceled(ctx, job)
+				scanMu.Unlock()
+				if err != nil {
+					cancelPollErr = err
+					cancelWalk()
+					return
+				}
+			}
+		}
+	}()
+	report, err := adapter.WalkRecursiveBounded(walkCtx, storage.WalkOptions{
+		Prefixes:          prefixes,
+		MaxFiles:          payload.MaxFiles,
+		MaxBytes:          payload.MaxBytes,
+		MaxFolderWorkers:  r.MaxFolderWorkers,
+		MaxFileWorkers:    r.MaxFileWorkers,
+		FolderQueueDepth:  r.FolderQueueDepth,
+		IncludeExtensions: payload.IncludeExtensions,
+		ExcludePatterns:   payload.ExcludePatterns,
+		Progress: func(report storage.WalkReport) {
+			scanMu.Lock()
+			defer scanMu.Unlock()
+			applyWalkReportCounters(job, report)
+			if time.Since(lastProgressLog) > 30*time.Second {
+				lastProgressLog = time.Now()
+				jobs.AddLog(job, "info", fmt.Sprintf("walk progress: folders %d/%d, files seen %d, media returned %d, skipped %d", report.FoldersScanned, report.FoldersQueued, report.FilesSeen, report.FilesReturned, report.FilesSkipped))
+			}
+			if time.Since(lastProgressUpdate) > 5*time.Second {
+				lastProgressUpdate = time.Now()
+				_ = r.updateJob(ctx, *job)
+			}
+		},
+	}, func(file storage.FileInfo) error {
+		scanMu.Lock()
+		defer scanMu.Unlock()
+		if file.MediaKind == "other" {
+			return nil
+		}
+		if job.ProgressCurrent%50 == 0 {
+			if err := r.checkCanceled(ctx, job); err != nil {
+				return err
+			}
+		}
+		result, err := r.Store.UpsertDiscoveredFile(ctx, file)
+		if err != nil {
+			job.Counters.Errors++
+			jobs.AddLog(job, "error", fmt.Sprintf("%s: %v", file.StorageURL, err))
+			return nil
+		}
+		job.Counters.Scanned++
+		job.Counters.Bytes += file.SizeBytes
+		if result.Created {
+			job.Counters.Created++
+		} else {
+			job.Counters.Updated++
+		}
+		if err := r.applyTextHints(ctx, result.Asset.ID, file); err != nil {
+			job.Counters.Errors++
+			jobs.AddLog(job, "warn", fmt.Sprintf("%s: fixture hints skipped: %v", file.StorageURL, err))
+		}
+		job.ProgressCurrent++
+		if job.ProgressCurrent%250 == 0 || time.Since(lastUpdate) > 2*time.Second {
+			lastUpdate = time.Now()
+			if err := r.updateJob(ctx, *job); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	cancelWalk()
+	<-cancelPollDone
+	if cancelPollErr != nil {
+		return cancelPollErr
+	}
+	if errors.Is(err, jobs.ErrCanceled) {
+		return err
+	}
+	if err != nil {
+		job.Counters.Errors++
+		jobs.AddLog(job, "error", err.Error())
+		cause := classifyStorageFailure(err)
+		_ = r.failJob(ctx, *job, cause)
+		return cause
+	}
+	jobs.AddLog(job, "info", fmt.Sprintf("bounded scan storage %s prefixes %v: returned %d files, seen %d, folders %d/%d, complete=%t", storageName, prefixes, report.FilesReturned, report.FilesSeen, report.FoldersScanned, report.FoldersQueued, report.Complete))
+	applyWalkReportCounters(job, report)
+	if !report.Complete {
+		jobs.AddLog(job, "warn", "bounded scan stopped at max_files or max_bytes limit; missing-file marking remains disabled")
+	}
+	return r.updateJob(ctx, *job)
+}
+
+func applyWalkReportCounters(job *jobs.Job, report storage.WalkReport) {
+	job.Counters.FoldersQueued = int64(report.FoldersQueued)
+	job.Counters.FoldersScanned = int64(report.FoldersScanned)
+	job.Counters.FilesSeen = int64(report.FilesSeen)
+	job.Counters.FilesReturned = int64(report.FilesReturned)
+	job.Counters.FilesSkipped = int64(report.FilesSkipped)
 }
 
 func containsRealArchiveStorage(storages []storage.Config) bool {
