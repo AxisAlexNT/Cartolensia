@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
@@ -63,20 +64,8 @@ func (s *Server) readinessChecks(ctx context.Context) []readinessCheck {
 	} else {
 		add("database", "database", "Durable database", "warn", "production deployments should use PostgreSQL", map[string]any{"backend": s.deps.StoreBackend})
 	}
-	for _, st := range s.deps.Config.Storages {
-		status := "ok"
-		summary := "storage root is readable and strict read-only"
-		details := map[string]any{"name": st.Name, "root": st.Root, "mode": st.Mode, "kind": st.Kind}
-		if st.Mode != "strict_read_only" {
-			status = "warn"
-			summary = "storage is not strict_read_only"
-		}
-		if err := probeReadableDir(st.Root); err != nil {
-			status = "error"
-			summary = "storage root is not readable: " + err.Error()
-			details["error"] = err.Error()
-		}
-		add("storage."+st.Name, "storage", "Storage "+st.Name, status, summary, details)
+	for _, check := range s.storageReadinessChecks() {
+		checks = append(checks, check)
 	}
 
 	cacheStatus, cacheSummary := writableDirStatus(s.deps.Config.Cache.Dir)
@@ -130,6 +119,41 @@ func (s *Server) readinessChecks(ctx context.Context) []readinessCheck {
 	return checks
 }
 
+func (s *Server) storageReadinessChecks() []readinessCheck {
+	storages := s.deps.Config.Storages
+	results := make([]readinessCheck, len(storages))
+	var wg sync.WaitGroup
+	for i, st := range storages {
+		i, st := i, st
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			status := "ok"
+			summary := "storage root is readable and strict read-only"
+			details := map[string]any{"name": st.Name, "root": st.Root, "mode": st.Mode, "kind": st.Kind}
+			if st.Mode != "strict_read_only" {
+				status = "warn"
+				summary = "storage is not strict_read_only"
+			}
+			if err := probeReadableDirBounded(st.Root, 750*time.Millisecond); err != nil {
+				status = "warn"
+				summary = "storage root is unavailable: " + err.Error()
+				details["error"] = err.Error()
+			}
+			results[i] = readinessCheck{
+				ID:       "storage." + st.Name,
+				Category: "storage",
+				Label:    "Storage " + st.Name,
+				Status:   status,
+				Summary:  summary,
+				Details:  details,
+			}
+		}()
+	}
+	wg.Wait()
+	return results
+}
+
 func probeReadableDir(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -143,6 +167,24 @@ func probeReadableDir(path string) error {
 		return err
 	}
 	return file.Close()
+}
+
+func probeReadableDirBounded(path string, timeout time.Duration) error {
+	type result struct {
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		done <- result{err: probeReadableDir(path)}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.err
+	case <-timer.C:
+		return fmt.Errorf("storage probe timed out after %s", timeout)
+	}
 }
 
 func writableDirStatus(path string) (string, string) {

@@ -1474,6 +1474,38 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	tokens := searchTokens(raw)
+	if fastPage, ok, err := s.queryFastSearchAssets(r.Context(), tokens, limit, offset); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	} else if ok {
+		searchCtx := assetSearchContext{}
+		backend := s.searchBackend()
+		type result struct {
+			Asset       catalog.Asset `json:"asset"`
+			Matched     []string      `json:"matched"`
+			Explanation string        `json:"explanation"`
+		}
+		results := make([]result, 0, len(fastPage.Assets))
+		for _, asset := range fastPage.Assets {
+			matched := assetSearchMatches(asset, tokens, searchCtx)
+			if len(tokens) > 0 && len(matched) == 0 {
+				matched = []string{"asset filter"}
+			}
+			results = append(results, result{Asset: asset, Matched: matched, Explanation: searchExplanation(matched)})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"query":        raw,
+			"tokens":       tokens,
+			"backend":      backend.ID(),
+			"backend_mode": backend.Mode(),
+			"results":      results,
+			"tracks":       []any{},
+			"places":       []any{},
+			"warnings":     searchWarnings(tokens),
+			"page":         fastPage.Page,
+		})
+		return
+	}
 	page, err := s.queryAllSearchAssets(r.Context(), tokens)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -1530,6 +1562,43 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"warnings":     searchWarnings(tokens),
 		"page":         catalog.Page{Limit: limit, Offset: offset, Total: total},
 	})
+}
+
+func (s *Server) queryFastSearchAssets(ctx context.Context, tokens []string, limit, offset int) (catalog.AssetPage, bool, error) {
+	if len(tokens) != 1 {
+		return catalog.AssetPage{}, false, nil
+	}
+	prefix, plain := splitSearchToken(tokens[0])
+	plain = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(plain), "."))
+	if plain == "" {
+		return catalog.AssetPage{}, false, nil
+	}
+	query := catalog.AssetQuery{Limit: limit, Offset: offset, Sort: "taken_at"}
+	switch prefix {
+	case "ext", "extension":
+		query.Extension = plain
+	case "kind", "type", "media", "media_kind":
+		query.MediaKind = plain
+	case "":
+		if !isSupportedExtensionSearchToken(plain) {
+			return catalog.AssetPage{}, false, nil
+		}
+		query.Extension = plain
+	default:
+		return catalog.AssetPage{}, false, nil
+	}
+	page, err := s.deps.Store.QueryAssets(ctx, query)
+	return page, true, err
+}
+
+func isSupportedExtensionSearchToken(token string) bool {
+	token = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(token), "."))
+	for _, ext := range storage.SupportedExtensions() {
+		if token == ext {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) queryAllSearchAssets(ctx context.Context, tokens []string) (catalog.AssetPage, error) {

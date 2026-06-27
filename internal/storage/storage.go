@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -233,7 +234,7 @@ func NewFSAdapter(name, root string) (*FSAdapter, error) {
 	evalRoot, err := filepath.EvalSymlinks(absRoot)
 	if err == nil {
 		absRoot = evalRoot
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if !nonFatalSymlinkResolutionError(err) {
 		return nil, fmt.Errorf("resolve root symlinks: %w", err)
 	}
 	return &FSAdapter{name: name, root: filepath.Clean(absRoot)}, nil
@@ -756,13 +757,24 @@ func (a *FSAdapter) safePath(relativePath string) (string, error) {
 	evalFull, err := filepath.EvalSymlinks(cleanFull)
 	if err == nil {
 		cleanFull = evalFull
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if !nonFatalSymlinkResolutionError(err) {
 		return "", err
 	}
 	if !isWithin(a.root, cleanFull) {
 		return "", ErrTraversal
 	}
 	return cleanFull, nil
+}
+
+func nonFatalSymlinkResolutionError(err error) bool {
+	return err == nil ||
+		errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, syscall.ENODEV) ||
+		errors.Is(err, syscall.ENOTCONN) ||
+		errors.Is(err, syscall.EHOSTDOWN) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, syscall.EIO)
 }
 
 func isWithin(root, target string) bool {

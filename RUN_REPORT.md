@@ -3311,6 +3311,76 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-27 Post-Outage Remote Startup And Offline Storage Degradation
+
+Issue:
+
+- After the utility outage, rjazhenka booted PostgreSQL and the AI sidecar, but the main Cartolensia app did not serve UI/API while the Samba-backed originals roots were unavailable.
+- Root cause: filesystem storage initialization treated `filepath.EvalSymlinks` errors such as `ENODEV` from unavailable CIFS mounts as fatal, so one offline originals storage could block the whole metadata service.
+- Readiness diagnostics also probed offline storage roots sequentially, taking about 26 seconds.
+- On the 615k-asset remote index, `ext:mp4` search timed out because search loaded all matching assets before pagination.
+
+Implemented:
+
+- Storage registry now tolerates unavailable filesystem roots at startup for expected offline mount errors (`not exist`, `ENODEV`, `ENOTCONN`, host unreachable/down, timeout, `EIO`).
+- File access remains strict:
+  - relative paths are still normalized;
+  - traversal checks still run;
+  - storage writes remain disabled by the read-only adapter.
+- Readiness storage checks are now timeout-bounded and parallelized.
+- Unavailable originals now report readiness `warn`, not deployment `error`, when DB/cache/AI/UI are otherwise healthy.
+- Search now has a paginated fast path for explicit asset filters:
+  - `ext:mp4`;
+  - `extension:mp4`;
+  - `kind:video` / `media:video`;
+  - plain tokens that exactly match a supported extension, such as `mp4`.
+
+Remote validation on rjazhenka:
+
+- Services active:
+  - `cartolensia-postgres`;
+  - `cartolensia-ai`;
+  - `cartolensia`.
+- Listeners active:
+  - PostgreSQL `127.0.0.1:15432`;
+  - AI sidecar `0.0.0.0:19090`;
+  - HTTPS `*:18443`;
+  - HTTP redirect `*:18080`.
+- LAN URL: `https://192.168.237.126:18443/`.
+- Authenticated readiness:
+  - overall `warn`;
+  - `0` errors;
+  - `11` ok checks;
+  - `6` storage warnings for currently unavailable Samba/original roots;
+  - readiness time improved to about `0.77 s`.
+- Metadata-only API checks while originals were unavailable:
+  - stats returned `615353` assets, `443932` photos, `28580` videos, `8781` audio files, `5521` tracks, and `12.5 TB` total indexed bytes;
+  - GPS tracks endpoint returned immediately;
+  - `ext:mp4` search returned `10 / 24735` matches in about `0.22 s`;
+  - plain `mp4` search returned `10 / 24735` matches in about `0.22 s`.
+
+Tests:
+
+- `gofmt -w internal/storage/storage.go internal/storage/storage_test.go internal/server/readiness.go internal/server/readiness_test.go internal/server/server.go internal/server/server_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/storage ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Known limitations / next work:
+
+- App startup still took roughly 25 seconds before binding HTTPS after restart. It no longer fails when Samba is absent, but startup timing should be profiled separately.
+- Offline originals mean original media playback/open-original can fail until the Samba server is back, but metadata, tracks, jobs, AI records, search, and cached data can continue to serve.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-27 OCR/Captions Asset Navigation Fix
 
 Fixed and deployed to rjazhenka:

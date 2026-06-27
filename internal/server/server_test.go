@@ -608,6 +608,11 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 		t.Fatalf("OCR search status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=ext:mp4&limit=1", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"extension"`) || !strings.Contains(rec.Body.String(), `"total":1`) {
+		t.Fatalf("extension search status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=ocr:laboratory", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched OCR text"`) {
 		t.Fatalf("OCR prefix search status %d body %s", rec.Code, rec.Body.String())

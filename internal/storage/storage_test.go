@@ -3,9 +3,11 @@ package storage
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -92,6 +94,47 @@ func TestFSAdapterSkipsSymlinks(t *testing.T) {
 	}
 	if _, _, err := adapter.Open("linked.jpg"); !errors.Is(err, ErrTraversal) {
 		t.Fatalf("expected traversal through symlink, got %v", err)
+	}
+}
+
+func TestFSAdapterAllowsUnavailableRootAtStartup(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-mounted")
+	reg, err := NewRegistry([]Config{{Name: "offline", Kind: "fs", Root: root, Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatalf("offline storage root should not prevent startup: %v", err)
+	}
+	cfg, err := reg.GetStorage("offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Root != filepath.Clean(root) {
+		t.Fatalf("expected clean configured root to be preserved, got %q", cfg.Root)
+	}
+	adapter, err := reg.Adapter("offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Stat("photo.jpg"); err == nil {
+		t.Fatal("expected file access against unavailable root to fail")
+	}
+}
+
+func TestNonFatalSymlinkResolutionErrorIncludesOfflineMountErrors(t *testing.T) {
+	for _, err := range []error{
+		fs.ErrNotExist,
+		syscall.ENODEV,
+		syscall.ENOTCONN,
+		syscall.EHOSTDOWN,
+		syscall.EHOSTUNREACH,
+		syscall.ETIMEDOUT,
+		syscall.EIO,
+	} {
+		if !nonFatalSymlinkResolutionError(err) {
+			t.Fatalf("expected %v to be non-fatal during storage initialization", err)
+		}
+	}
+	if nonFatalSymlinkResolutionError(syscall.EPERM) {
+		t.Fatal("permission errors should remain fatal during symlink resolution")
 	}
 }
 
