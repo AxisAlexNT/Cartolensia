@@ -294,6 +294,14 @@ export type TranscriptRecord = {
   }>;
 };
 
+export type TranscriptPage = {
+  transcripts: TranscriptRecord[];
+  limit: number;
+  offset: number;
+  total: number;
+  note?: string;
+};
+
 export type AudioFeatureRecord = {
   asset_id: string;
   duration_seconds?: number;
@@ -1026,7 +1034,15 @@ export const api = {
       method: "DELETE"
     }),
   tracks: async () => asArray(await request<TrackSummary[] | null>("/api/v1/tracks")),
-  gpsTracks: async () => asArray(await request<TrackSummary[] | null>("/api/v1/gps/tracks")),
+  gpsTracks: async (params: { limit?: number; offset?: number; q?: string; sort?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    if (params.q) query.set("q", params.q);
+    if (params.sort) query.set("sort", params.sort);
+    const suffix = query.toString();
+    return asArray(await request<TrackSummary[] | null>(`/api/v1/gps/tracks${suffix ? `?${suffix}` : ""}`));
+  },
   gpsTrack: (id: string) =>
     request<TrackDetail>(`/api/v1/gps/tracks/${encodeURIComponent(id)}`).then((detail) => ({
       ...detail,
@@ -1230,8 +1246,21 @@ export const api = {
     }),
   aiSummary: () => request<Record<string, unknown>>("/api/v1/ai/summary"),
   aiTags: () => request<Record<string, unknown>>("/api/v1/ai/tags"),
-  aiPredictions: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/predictions?limit=${limit}`),
-  aiFaces: (limit = 100) => request<Record<string, unknown>>(`/api/v1/ai/faces?limit=${limit}`),
+  transcripts: (limit = 200, offset = 0) =>
+    request<TranscriptPage>(`/api/v1/transcripts?limit=${limit}&offset=${offset}`).then((page) => ({
+      ...page,
+      transcripts: asArray(page.transcripts)
+    })),
+  aiPredictions: (limit = 100, offset = 0, q = "") => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (q.trim()) query.set("q", q.trim());
+    return request<Record<string, unknown>>(`/api/v1/ai/predictions?${query.toString()}`);
+  },
+  aiFaces: (limit = 100, offset = 0, q = "") => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (q.trim()) query.set("q", q.trim());
+    return request<Record<string, unknown>>(`/api/v1/ai/faces?${query.toString()}`);
+  },
   aiSafety: () => request<Record<string, unknown>>("/api/v1/ai/safety"),
   faceClusters: () => request<{ clusters: FaceCluster[]; total: number; provisional_note?: string }>("/api/v1/faces/clusters"),
   faceClusterAssets: (clusterId: string) =>

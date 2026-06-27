@@ -62,6 +62,7 @@ import {
   type TrackDetail,
   type TrackProfile,
   type TrackSummary,
+  type TranscriptRecord,
   type TranscodingCapabilities,
   type TranscodingPreset,
   type VideoTrackPlayerSession,
@@ -69,6 +70,7 @@ import {
 } from "./api";
 import MonthFilterBar from "./components/MonthFilterBar.vue";
 import PagedFileControls from "./components/PagedFileControls.vue";
+import TypeaheadSearch, { type TypeaheadResult } from "./components/TypeaheadSearch.vue";
 
 const nav = [
   "Explorer",
@@ -87,6 +89,7 @@ const nav = [
   "Base AI",
   "AI Classification",
   "OCR",
+  "Transcripts",
   "Captions",
   "Face Gallery",
   "Safety Review",
@@ -115,6 +118,8 @@ const navPageAliases: Record<string, string> = {
   ai: "Base AI",
   "ai-classification": "AI Classification",
   ocr: "OCR",
+  transcripts: "Transcripts",
+  transcript: "Transcripts",
   captions: "Captions",
   faces: "Face Gallery",
   "face-gallery": "Face Gallery",
@@ -169,6 +174,7 @@ function navIcon(label: string): string {
     "Base AI": "bi-cpu",
     "AI Classification": "bi-tags",
     OCR: "bi-body-text",
+    Transcripts: "bi-file-earmark-text",
     Captions: "bi-chat-square-text",
     "Face Gallery": "bi-person-bounding-box",
     "Safety Review": "bi-shield-exclamation",
@@ -263,6 +269,10 @@ const pluginSettingsMode = ref<"ui" | "yaml">("ui");
 const dbExports = ref<DBExport[]>([]);
 const dbExportMessage = ref("");
 const tracks = ref<TrackSummary[]>([]);
+const trackSearchQ = ref("");
+const tracksLoadingMore = ref(false);
+const tracksHasMore = ref(true);
+const trackPageSize = 200;
 const selectedTrack = ref<TrackDetail | null>(null);
 const selectedTrackAltitude = ref<TrackProfile | null>(null);
 const selectedTrackSpeed = ref<TrackProfile | null>(null);
@@ -395,6 +405,15 @@ const aiVectorQuery = ref("brick path");
 const aiVectorResults = ref<Record<string, unknown>[]>([]);
 const ocrPageQuery = ref("");
 const captionsPageQuery = ref("");
+const aiPredictionLimit = ref(500);
+const aiFaceLimit = ref(500);
+const faceClusterLimit = ref(200);
+const transcriptRows = ref<TranscriptRecord[]>([]);
+const transcriptQuery = ref("");
+const transcriptLoading = ref(false);
+const transcriptsHasMore = ref(true);
+const transcriptSearchResults = ref<SearchResult[]>([]);
+const transcriptSearchMessage = ref("");
 const vectorConfigHighlight = ref(false);
 const vectorStatus = ref<Record<string, unknown> | null>(null);
 const faceClustersPayload = ref<{ clusters: FaceCluster[]; total: number; provisional_note?: string } | null>(null);
@@ -551,6 +570,9 @@ function asArray<T>(value: T[] | null | undefined): T[] {
 function setActive(next: string, updateURL = true) {
   const route = safeRoute(next);
   active.value = route;
+  if (route === "Transcripts" && transcriptRows.value.length === 0 && !transcriptLoading.value) {
+    void fetchTranscriptsPage(true);
+  }
   if (route !== "Asset Detail") {
     localStorage.setItem("cartolensia.route", route);
   }
@@ -713,6 +735,130 @@ async function fetchVisibleJobs(): Promise<Job[]> {
     return bTime - aTime;
   });
 }
+
+async function fetchTracksPage(reset = false) {
+  if (tracksLoadingMore.value) return;
+  tracksLoadingMore.value = true;
+  try {
+    const offset = reset ? 0 : tracks.value.length;
+    const rows = await api.gpsTracks({
+      limit: trackPageSize,
+      offset,
+      q: trackSearchQ.value.trim(),
+      sort: "time_desc"
+    });
+    if (reset) {
+      tracks.value = rows;
+    } else {
+      const seen = new Set(tracks.value.map((track) => track.track_asset_id));
+      tracks.value = [...tracks.value, ...rows.filter((track) => !seen.has(track.track_asset_id))];
+    }
+    tracksHasMore.value = rows.length >= trackPageSize;
+    videoTrackTrackOptions.value = tracks.value;
+  } finally {
+    tracksLoadingMore.value = false;
+  }
+}
+
+async function loadAllTracks() {
+  let guard = 0;
+  while (tracksHasMore.value && guard < 100) {
+    guard += 1;
+    await fetchTracksPage(false);
+  }
+}
+
+function selectTrackSearchResult(item: TypeaheadResult) {
+  const track = tracks.value.find((candidate) => candidate.track_asset_id === item.key);
+  if (track) {
+    trackSearchQ.value = track.name;
+    void openTrack(track.track_asset_id);
+  }
+}
+
+async function goToTrackSearchSelection() {
+  if (trackTypeaheadResults.value.length > 0) {
+    selectTrackSearchResult(trackTypeaheadResults.value[0]);
+    return;
+  }
+  await fetchTracksPage(true);
+}
+
+async function fetchTranscriptsPage(reset = false) {
+  if (transcriptLoading.value) return;
+  transcriptLoading.value = true;
+  try {
+    const offset = reset ? 0 : transcriptRows.value.length;
+    const page = await api.transcripts(200, offset);
+    if (reset) {
+      transcriptRows.value = page.transcripts;
+    } else {
+      const seen = new Set(transcriptRows.value.map((transcript) => transcript.id));
+      transcriptRows.value = [
+        ...transcriptRows.value,
+        ...page.transcripts.filter((transcript) => !seen.has(transcript.id))
+      ];
+    }
+    transcriptsHasMore.value = page.transcripts.length >= page.limit;
+  } finally {
+    transcriptLoading.value = false;
+  }
+}
+
+async function loadAllTranscripts() {
+  let guard = 0;
+  while (transcriptsHasMore.value && guard < 100) {
+    guard += 1;
+    await fetchTranscriptsPage(false);
+  }
+}
+
+async function searchTranscripts() {
+  const query = transcriptQuery.value.trim();
+  if (!query) {
+    transcriptSearchResults.value = [];
+    transcriptSearchMessage.value = "";
+    return;
+  }
+  const response = await api.search(`transcript:${query}`, 100);
+  transcriptSearchResults.value = asArray(response.results);
+  transcriptSearchMessage.value = `${response.page.total} transcript search matches`;
+}
+
+function selectTranscriptSearchResult(item: TypeaheadResult) {
+  const transcript = transcriptRows.value.find((candidate) => candidate.id === item.key);
+  if (!transcript) return;
+  void openAsset(transcript.asset_id);
+}
+
+async function refreshAILists() {
+  const [predictions, faces] = await Promise.all([
+    api.aiPredictions(aiPredictionLimit.value, 0, ""),
+    api.aiFaces(aiFaceLimit.value, 0, "")
+  ]);
+  aiPredictionPayload.value = predictions;
+  aiFacePayload.value = faces;
+}
+
+async function loadMoreAILists(kind: "predictions" | "faces" | "all" = "all") {
+  if (kind === "predictions" || kind === "all") {
+    aiPredictionLimit.value = Math.min(5000, aiPredictionLimit.value + 500);
+  }
+  if (kind === "faces" || kind === "all") {
+    aiFaceLimit.value = Math.min(5000, aiFaceLimit.value + 500);
+  }
+  await refreshAILists();
+}
+
+async function loadAllAILists(kind: "predictions" | "faces" | "all" = "all") {
+  if (kind === "predictions" || kind === "all") {
+    aiPredictionLimit.value = Math.min(5000, Math.max(aiPredictionLimit.value, aiPredictionTotal.value || 5000));
+  }
+  if (kind === "faces" || kind === "all") {
+    aiFaceLimit.value = Math.min(5000, Math.max(aiFaceLimit.value, aiFaceTotal.value || 5000));
+  }
+  await refreshAILists();
+}
 const transcodeTemplateSafe = computed(() => {
   const stripped = transcodeTemplate.value
     .replaceAll("${input}", "")
@@ -735,6 +881,9 @@ const aiModelCards = computed(() => [
 ]);
 const aiTags = computed(() => asArray((aiTagPayload.value?.tags as unknown[]) ?? []));
 const aiPredictions = computed(() => asArray((aiPredictionPayload.value?.predictions as unknown[]) ?? []));
+const aiPredictionTotal = computed(() => Number(aiPredictionPayload.value?.total_predictions ?? aiPredictions.value.length));
+const aiFaceTotal = computed(() => Number(aiFacePayload.value?.total ?? aiFaces.value.length));
+const aiTagTotal = computed(() => Number(aiPredictionPayload.value?.total_tags ?? aiTags.value.length));
 const ocrPredictionRows = computed(() => {
   const query = ocrPageQuery.value.trim().toLowerCase();
   return aiPredictions.value.filter((raw) => {
@@ -765,6 +914,34 @@ function recordAssetID(row: unknown): string {
   return String((row as Record<string, unknown> | null | undefined)?.asset_id ?? "").trim();
 }
 
+function fuzzyIncludes(value: unknown, query: string): boolean {
+  return String(value ?? "").toLowerCase().includes(query);
+}
+
+function trackMatchesQuery(track: TrackSummary, query: string): boolean {
+  return [
+    track.name,
+    track.track_asset_id,
+    track.source_format,
+    track.start_time,
+    track.end_time,
+    track.distance_m ? `${(track.distance_m / 1000).toFixed(2)} km` : "",
+    track.point_count
+  ].some((value) => fuzzyIncludes(value, query));
+}
+
+function transcriptMatchesQuery(transcript: TranscriptRecord, query: string): boolean {
+  return [
+    transcript.id,
+    transcript.asset_id,
+    transcript.source_kind,
+    transcript.language,
+    transcript.model,
+    transcript.full_text,
+    transcript.created_at
+  ].some((value) => fuzzyIncludes(value, query));
+}
+
 const aiFaces = computed(() => asArray((aiFacePayload.value?.faces as unknown[]) ?? []));
 const aiSafetyCandidates = computed(() => asArray((aiSafetyPayload.value?.candidates as unknown[]) ?? []));
 const faceClusters = computed(() => asArray(faceClustersPayload.value?.clusters));
@@ -782,6 +959,44 @@ const filteredFaceClusters = computed(() => {
     ].join(" ").toLowerCase();
     return text.includes(query);
   });
+});
+const visibleFaceClusters = computed(() => filteredFaceClusters.value.slice(0, faceClusterLimit.value));
+const trackTypeaheadResults = computed<TypeaheadResult[]>(() => {
+  const query = trackSearchQ.value.trim().toLowerCase();
+  if (query.length < 2) return [];
+  return tracks.value
+    .filter((track) => trackMatchesQuery(track, query))
+    .slice(0, 20)
+    .map((track) => ({
+      key: track.track_asset_id,
+      type: track.source_format ?? "track",
+      name: track.name,
+      detail: [
+        track.start_time ? track.start_time.slice(0, 19) : "",
+        track.end_time ? `-> ${track.end_time.slice(0, 19)}` : "",
+        track.distance_m ? `${(track.distance_m / 1000).toFixed(2)} km` : "",
+        `${track.point_count} points`
+      ].filter(Boolean).join(" ")
+    }));
+});
+const transcriptTypeaheadResults = computed<TypeaheadResult[]>(() => {
+  const query = transcriptQuery.value.trim().toLowerCase();
+  if (query.length < 2) return [];
+  return transcriptRows.value
+    .filter((transcript) => transcriptMatchesQuery(transcript, query))
+    .slice(0, 20)
+    .map((transcript) => ({
+      key: transcript.id,
+      type: transcript.source_kind || "transcript",
+      name: transcript.full_text.slice(0, 120) || transcript.asset_id,
+      originalName: transcript.language,
+      detail: `${transcript.asset_id.slice(0, 8)} · ${transcript.model ?? "model unknown"} · ${transcript.created_at ?? ""}`
+    }));
+});
+const visibleTranscriptRows = computed(() => {
+  const query = transcriptQuery.value.trim().toLowerCase();
+  if (!query) return transcriptRows.value;
+  return transcriptRows.value.filter((transcript) => transcriptMatchesQuery(transcript, query));
 });
 const visibleAssetFaces = computed(() => {
   const faces = asArray(assetDetail.value?.face_detections as unknown[]) as FaceDetection[];
@@ -2467,7 +2682,7 @@ async function refresh() {
       api.duplicates(),
       api.assetMonths(),
       api.status(),
-      api.gpsTracks(),
+      api.gpsTracks({ limit: trackPageSize, offset: 0, q: trackSearchQ.value.trim(), sort: "time_desc" }),
       api.map(mapQuery()),
       api.mapStatus(),
       api.albums(),
@@ -2482,8 +2697,8 @@ async function refresh() {
 	      api.vectorStatus(),
 	      api.aiSummary(),
 	      api.aiTags(),
-	      api.aiPredictions(),
-	      api.aiFaces(),
+	      api.aiPredictions(aiPredictionLimit.value, 0, ""),
+	      api.aiFaces(aiFaceLimit.value, 0, ""),
 	      api.aiSafety(),
 	      api.faceClusters(),
 	      api.settings(),
@@ -2520,6 +2735,7 @@ async function refresh() {
     backendMonthBuckets.value = asArray(monthData);
     backend.value = backendStatus;
     tracks.value = asArray(trackRows);
+    tracksHasMore.value = tracks.value.length >= trackPageSize;
     videoTrackTrackOptions.value = tracks.value;
     if (videoTrackSelectedTracks.value.length === 0 && videoTrackSession.value?.track_ids?.length) {
       videoTrackSelectedTracks.value = tracks.value.filter((track) =>
@@ -4844,6 +5060,8 @@ onMounted(async () => {
     } else {
       await openPublicAsset(assetID);
     }
+  } else if (active.value === "Transcripts") {
+    await fetchTranscriptsPage(true);
   }
   await nextTick();
   renderOpenLayers();
@@ -6145,12 +6363,37 @@ onBeforeUnmount(() => {
           <header class="panel-head">
             <h2>GPS/KML Tracks</h2>
             <div class="actions">
-              <span>{{ tracks.length }} tracks</span>
+              <span>
+                {{ tracks.length }} loaded<span v-if="stats?.tracks"> of {{ stats.tracks }}</span> tracks
+              </span>
               <button type="button" @click="trackMediaViewMode = trackMediaViewMode === 'table' ? 'tile' : 'table'">
                 {{ trackMediaViewMode === "table" ? "Tile media" : "Table media" }}
               </button>
             </div>
           </header>
+          <div class="list-toolbar">
+            <TypeaheadSearch
+              v-model="trackSearchQ"
+              :results="trackTypeaheadResults"
+              :loading="tracksLoadingMore"
+              placeholder="Search track name, date, format, distance..."
+              go-label="Find tracks"
+              @select="selectTrackSearchResult"
+              @go="goToTrackSearchSelection"
+            />
+            <div class="actions">
+              <button type="button" class="btn btn-sm btn-outline-primary" :disabled="tracksLoadingMore" @click="fetchTracksPage(true)">
+                Search / refresh
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="tracksLoadingMore || !tracksHasMore" @click="fetchTracksPage(false)">
+                Load more
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="tracksLoadingMore || !tracksHasMore" @click="loadAllTracks">
+                Load all
+              </button>
+            </div>
+          </div>
+          <p class="muted">Track lists are paged for large archives. Search matches prefixes, suffixes, and middle substrings.</p>
           <p v-if="tracks.length === 0" class="empty-state">
             <span v-if="(stats?.tracks ?? 0) > 0">
               {{ stats?.tracks }} track-like assets are indexed, but no parsed GPS/KML/KMZ/GPZ summaries exist yet.
@@ -6767,7 +7010,7 @@ onBeforeUnmount(() => {
               <div v-if="aiTags.length === 0" class="empty-state">No AI tags stored yet.</div>
               <div v-else class="chip-row">
                 <button
-                  v-for="tag in aiTags.slice(0, 40)"
+                  v-for="tag in aiTags"
                   :key="`${String((tag as Record<string, unknown>).source)}-${String((tag as Record<string, unknown>).tag)}`"
                   type="button"
                   class="chip button-chip"
@@ -6793,7 +7036,7 @@ onBeforeUnmount(() => {
               <table v-else>
                 <thead><tr><th>Asset</th><th>Tag</th><th>Source</th><th>Action</th></tr></thead>
                 <tbody>
-                  <tr v-for="candidate in aiSafetyCandidates.slice(0, 20)" :key="`${String((candidate as Record<string, unknown>).asset_id)}-${String((candidate as Record<string, unknown>).tag)}`">
+                  <tr v-for="candidate in aiSafetyCandidates" :key="`${String((candidate as Record<string, unknown>).asset_id)}-${String((candidate as Record<string, unknown>).tag)}`">
                     <td><button type="button" class="link-button" @click="openAsset(String((candidate as Record<string, unknown>).asset_id))">{{ String((candidate as Record<string, unknown>).asset_id).slice(0, 8) }}</button></td>
                     <td>{{ (candidate as Record<string, unknown>).tag }}</td>
                     <td>{{ (candidate as Record<string, unknown>).source }}</td>
@@ -6807,14 +7050,18 @@ onBeforeUnmount(() => {
               <div class="section-title">
                 <div>
                   <h3><i class="bi bi-table" aria-hidden="true"></i> Recent Predictions</h3>
-                  <p class="muted">Latest stored model outputs across classification, captions, safety, and faces.</p>
+                  <p class="muted">{{ aiPredictions.length }} loaded<span v-if="aiPredictionTotal"> of {{ aiPredictionTotal }}</span> predictions across classification, captions, safety, and OCR.</p>
+                </div>
+                <div class="actions">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiPredictions.length >= aiPredictionTotal" @click="loadMoreAILists('predictions')">Load more</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiPredictions.length >= aiPredictionTotal" @click="loadAllAILists('predictions')">Load all</button>
                 </div>
               </div>
               <div v-if="aiPredictions.length === 0" class="empty-state">No AI predictions stored yet.</div>
               <table v-else>
                 <thead><tr><th>Asset</th><th>Task</th><th>Label</th><th>Confidence</th><th>Model</th><th>Created</th></tr></thead>
                 <tbody>
-                  <tr v-for="prediction in aiPredictions.slice(0, 80)" :key="String((prediction as Record<string, unknown>).id)">
+                  <tr v-for="prediction in aiPredictions" :key="String((prediction as Record<string, unknown>).id)">
                     <td><button type="button" class="link-button" @click="openAsset(String((prediction as Record<string, unknown>).asset_id))">{{ String((prediction as Record<string, unknown>).asset_id).slice(0, 8) }}</button></td>
                     <td>{{ (prediction as Record<string, unknown>).task }}</td>
                     <td>{{ (prediction as Record<string, unknown>).label }}</td>
@@ -6827,13 +7074,21 @@ onBeforeUnmount(() => {
             </article>
 
             <article class="settings-form">
-              <h3><i class="bi bi-person-bounding-box" aria-hidden="true"></i> Face Detections</h3>
-              <p class="muted">Local-only face boxes. No real-world identity is inferred.</p>
+              <div class="section-title">
+                <div>
+                  <h3><i class="bi bi-person-bounding-box" aria-hidden="true"></i> Face Detections</h3>
+                  <p class="muted">{{ aiFaces.length }} loaded<span v-if="aiFaceTotal"> of {{ aiFaceTotal }}</span> local-only face boxes. No real-world identity is inferred.</p>
+                </div>
+                <div class="actions">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiFaces.length >= aiFaceTotal" @click="loadMoreAILists('faces')">Load more</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiFaces.length >= aiFaceTotal" @click="loadAllAILists('faces')">Load all</button>
+                </div>
+              </div>
               <div v-if="aiFaces.length === 0" class="empty-state">No face detections stored.</div>
               <table v-else>
                 <thead><tr><th>Asset</th><th>Confidence</th><th>Box</th></tr></thead>
                 <tbody>
-                  <tr v-for="face in aiFaces.slice(0, 30)" :key="String((face as Record<string, unknown>).id)">
+                  <tr v-for="face in aiFaces" :key="String((face as Record<string, unknown>).id)">
                     <td><button type="button" class="link-button" @click="openAsset(String((face as Record<string, unknown>).asset_id))">{{ String((face as Record<string, unknown>).asset_id).slice(0, 8) }}</button></td>
                     <td>{{ typeof (face as Record<string, unknown>).confidence === 'number' ? Number((face as Record<string, unknown>).confidence).toFixed(3) : '' }}</td>
                     <td>{{ Number((face as Record<string, unknown>).width ?? 0).toFixed(2) }} × {{ Number((face as Record<string, unknown>).height ?? 0).toFixed(2) }}</td>
@@ -6882,6 +7137,16 @@ onBeforeUnmount(() => {
             </label>
           </div>
           <article class="settings-form settings-wide">
+            <div class="section-title">
+              <div>
+                <h3>OCR Records</h3>
+                <p class="muted">{{ ocrPredictionRows.length }} matching rows from {{ aiPredictions.length }} loaded predictions<span v-if="aiPredictionTotal"> of {{ aiPredictionTotal }}</span>.</p>
+              </div>
+              <div class="actions">
+                <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiPredictions.length >= aiPredictionTotal" @click="loadMoreAILists('predictions')">Load more</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiPredictions.length >= aiPredictionTotal" @click="loadAllAILists('predictions')">Load all</button>
+              </div>
+            </div>
             <div v-if="ocrPredictionRows.length === 0" class="empty-state">No OCR records match this filter.</div>
             <table v-else>
               <thead><tr><th>Text</th><th>Language</th><th>Confidence</th><th>Model</th><th>Created</th><th>Asset</th></tr></thead>
@@ -6909,6 +7174,73 @@ onBeforeUnmount(() => {
           </article>
         </section>
 
+        <section v-else-if="active === 'Transcripts'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Transcripts</h2>
+              <span>Search speech transcripts extracted from audio and video. Transcript text is local metadata only.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" @click="requestAIJob('transcribe')">
+              <i class="bi bi-soundwave" aria-hidden="true"></i>
+              Transcribe current scope
+            </button>
+          </header>
+          <div class="list-toolbar">
+            <TypeaheadSearch
+              v-model="transcriptQuery"
+              :results="transcriptTypeaheadResults"
+              :loading="transcriptLoading"
+              placeholder="Search transcript text, language, model, or asset id..."
+              go-label="Search transcripts"
+              @select="selectTranscriptSearchResult"
+              @go="searchTranscripts"
+            />
+            <div class="actions">
+              <button type="button" class="btn btn-sm btn-outline-primary" :disabled="transcriptLoading" @click="fetchTranscriptsPage(true)">Refresh list</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="transcriptLoading || !transcriptsHasMore" @click="fetchTranscriptsPage(false)">Load more</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="transcriptLoading || !transcriptsHasMore" @click="loadAllTranscripts">Load all</button>
+            </div>
+          </div>
+          <p v-if="transcriptSearchMessage" class="alert">{{ transcriptSearchMessage }}</p>
+          <div v-if="transcriptSearchResults.length" class="search-result-tiles">
+            <article v-for="result in transcriptSearchResults" :key="result.asset.id" class="search-result-card">
+              <img v-if="result.asset.media_kind === 'photo'" :src="`/api/v1/media/${result.asset.id}/preview`" alt="" loading="lazy" />
+              <span v-else class="media-fallback">{{ result.asset.media_kind }}</span>
+              <strong>{{ result.asset.display_name }}</strong>
+              <small>{{ result.explanation }}</small>
+              <a class="btn btn-sm btn-outline-secondary" :href="assetHref(result.asset.id)" @click="openAssetLink($event, result.asset.id)">Open asset</a>
+            </article>
+          </div>
+          <article class="settings-form settings-wide">
+            <div class="section-title">
+              <div>
+                <h3>Stored Transcripts</h3>
+                <p class="muted">{{ visibleTranscriptRows.length }} matching rows from {{ transcriptRows.length }} loaded transcripts.</p>
+              </div>
+            </div>
+            <div v-if="visibleTranscriptRows.length === 0" class="empty-state">
+              No transcripts match this filter. Run ASR from Base AI or an audio/video asset page, or load more rows.
+            </div>
+            <table v-else>
+              <thead><tr><th>Transcript</th><th>Language</th><th>Source</th><th>Model</th><th>Created</th><th>Asset</th></tr></thead>
+              <tbody>
+                <tr v-for="transcript in visibleTranscriptRows" :key="transcript.id">
+                  <td class="wide-text-cell">{{ transcript.full_text.slice(0, 240) }}</td>
+                  <td>{{ transcript.language ?? "" }}</td>
+                  <td>{{ transcript.source_kind }}</td>
+                  <td>{{ transcript.model ?? "" }}</td>
+                  <td>{{ transcript.created_at }}</td>
+                  <td>
+                    <a class="btn btn-sm btn-outline-secondary" :href="assetHref(transcript.asset_id)" @click="openAssetLink($event, transcript.asset_id)">
+                      Open asset
+                    </a>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </section>
+
         <section v-else-if="active === 'Captions'" class="panel">
           <header class="panel-head">
             <div>
@@ -6927,6 +7259,16 @@ onBeforeUnmount(() => {
             </label>
           </div>
           <article class="settings-form settings-wide">
+            <div class="section-title">
+              <div>
+                <h3>Caption Records</h3>
+                <p class="muted">{{ captionPredictionRows.length }} matching rows from {{ aiPredictions.length }} loaded predictions<span v-if="aiPredictionTotal"> of {{ aiPredictionTotal }}</span>.</p>
+              </div>
+              <div class="actions">
+                <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiPredictions.length >= aiPredictionTotal" @click="loadMoreAILists('predictions')">Load more</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="aiPredictions.length >= aiPredictionTotal" @click="loadAllAILists('predictions')">Load all</button>
+              </div>
+            </div>
             <div v-if="captionPredictionRows.length === 0" class="empty-state">No captions match this filter.</div>
             <table v-else>
               <thead><tr><th>Caption</th><th>Task</th><th>Model</th><th>Created</th><th>Asset</th></tr></thead>
@@ -7106,11 +7448,18 @@ onBeforeUnmount(() => {
               <input v-model="faceSearchQ" type="search" placeholder="name, asset, provisional, unassigned..." />
             </label>
           </div>
+          <div class="list-toolbar compact-toolbar">
+            <span>{{ visibleFaceClusters.length }} shown<span v-if="filteredFaceClusters.length !== visibleFaceClusters.length"> of {{ filteredFaceClusters.length }} matching</span><span v-if="faceClustersPayload?.total"> · {{ faceClustersPayload.total }} total clusters</span></span>
+            <div class="actions">
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="visibleFaceClusters.length >= filteredFaceClusters.length" @click="faceClusterLimit += 200">Load more</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="visibleFaceClusters.length >= filteredFaceClusters.length" @click="faceClusterLimit = filteredFaceClusters.length">Load all</button>
+            </div>
+          </div>
           <div class="face-gallery-layout">
             <aside class="face-cluster-list">
               <div v-if="filteredFaceClusters.length === 0" class="empty-state">No face detections match this search.</div>
               <button
-                v-for="cluster in filteredFaceClusters"
+                v-for="cluster in visibleFaceClusters"
                 :key="cluster.id"
                 type="button"
                 :class="['face-cluster-card', { active: selectedFaceCluster?.id === cluster.id }]"

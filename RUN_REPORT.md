@@ -3710,3 +3710,57 @@ Tests:
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
 
 Safety: no backend restart was performed; active production jobs were not interrupted. No originals/Samba writes, no missing marking, no DB reset, no commit, no push.
+
+## 2026-06-27 Large List Navigation and Transcript Search
+
+Issue observed:
+
+- GPS/KML Tracks showed `200 tracks` while Stats reported `1,806` tracks.
+- Large metadata pages such as OCR, Captions, AI Classification, and Face Gallery had implicit frontend slices without a clear way to load more.
+- Large selector-style controls need search/typeahead behavior instead of huge dropdowns.
+- There was no dedicated transcript search page for ASR output.
+
+Implemented:
+
+- Added reusable `TypeaheadSearch` Vue component with Bootstrap-style input, Go button, keyboard navigation, and dropdown results.
+- GPS/KML Tracks page now:
+  - loads tracks in pages of 200 using existing backend `limit`/`offset`/`q`;
+  - shows loaded-vs-total track counts;
+  - has searchable fuzzy track lookup by name/date/format/distance;
+  - includes `Load more` and `Load all`.
+- Added `Transcripts` navigation page:
+  - lists stored ASR transcripts in pages;
+  - supports transcript text/typeahead search;
+  - can run ASR on the current scope;
+  - opens matching assets from transcript rows and transcript search results.
+- OCR and Captions pages now show how many rows are loaded from the shared prediction payload and have `Load more` / `Load all` controls.
+- AI Classification and Face Gallery no longer hide rows via silent small template slices; face clusters have explicit `Load more` / `Load all`.
+- Backend AI metadata endpoints now support higher limits, offset, and query filtering for predictions/faces. This is tested locally and will take effect on rjazhenka after the next backend deploy/restart.
+
+Remote deployment:
+
+- Rebuilt and deployed `webui/dist` to rjazhenka only, avoiding a backend restart while active indexing/AI jobs are running.
+- The live WebUI at `https://192.168.237.126:18443/` now includes the track paging/typeahead and Transcripts page.
+
+Tests:
+
+- `gofmt -w internal/server/server.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Known limitations:
+
+- AI/OCR/Captions large-result paging above the old backend cap needs the next backend restart/deploy on rjazhenka. It was intentionally not restarted during active production jobs.
+- Track paging works with the current live backend because `/api/v1/gps/tracks` already supports `limit`, `offset`, and `q`.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no backend restart during active jobs
+- no commit
+- no push

@@ -4006,11 +4006,28 @@ func (s *Server) handleAIFaces(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	limit := intQuery(r.URL.Query(), "limit", 100, 1, 500)
-	if len(faces) > limit {
-		faces = faces[:limit]
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if query != "" {
+		filtered := faces[:0]
+		for _, face := range faces {
+			text := strings.ToLower(strings.Join([]string{
+				face.ID,
+				face.AssetID,
+				face.ClusterID,
+				face.PluginID,
+				stringFromMetadata(face.Metadata),
+			}, " "))
+			if strings.Contains(text, query) {
+				filtered = append(filtered, face)
+			}
+		}
+		faces = filtered
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"faces": faces, "total": s.aiDataCounts(r.Context())["face_detections"]})
+	total := len(faces)
+	limit := intQuery(r.URL.Query(), "limit", 100, 1, 5000)
+	offset := intQuery(r.URL.Query(), "offset", 0, 0, 1000000)
+	faces = slicePage(faces, limit, offset)
+	writeJSON(w, http.StatusOK, map[string]any{"faces": faces, "total": total, "limit": limit, "offset": offset})
 }
 
 func (s *Server) handleFaceClusters(w http.ResponseWriter, r *http.Request) {
@@ -5053,28 +5070,114 @@ func (s *Server) handleAIPredictions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	limit := intQuery(r.URL.Query(), "limit", 100, 1, 500)
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if query != "" {
+		tags = filterAssetTags(tags, query)
+		predictions = filterAIPredictions(predictions, query)
+		faces = filterFaceDetections(faces, query)
+	}
+	totalTags := len(tags)
+	totalPredictions := len(predictions)
+	totalFaces := len(faces)
+	totalEmbeddings := len(embeddings)
+	limit := intQuery(r.URL.Query(), "limit", 100, 1, 5000)
+	offset := intQuery(r.URL.Query(), "offset", 0, 0, 1000000)
 	if assetID == "" {
-		if len(tags) > limit {
-			tags = tags[:limit]
-		}
-		if len(predictions) > limit {
-			predictions = predictions[:limit]
-		}
-		if len(faces) > limit {
-			faces = faces[:limit]
-		}
-		if len(embeddings) > limit {
-			embeddings = embeddings[:limit]
-		}
+		tags = slicePage(tags, limit, offset)
+		predictions = slicePage(predictions, limit, offset)
+		faces = slicePage(faces, limit, offset)
+		embeddings = slicePage(embeddings, limit, offset)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"asset_id":    assetID,
-		"tags":        tags,
-		"predictions": predictions,
-		"faces":       faces,
-		"embeddings":  summarizeAssetEmbeddings(embeddings),
+		"asset_id":          assetID,
+		"tags":              tags,
+		"predictions":       predictions,
+		"faces":             faces,
+		"embeddings":        summarizeAssetEmbeddings(embeddings),
+		"limit":             limit,
+		"offset":            offset,
+		"total_tags":        totalTags,
+		"total_predictions": totalPredictions,
+		"total_faces":       totalFaces,
+		"total_embeddings":  totalEmbeddings,
 	})
+}
+
+func slicePage[T any](rows []T, limit, offset int) []T {
+	if offset >= len(rows) {
+		return []T{}
+	}
+	end := offset + limit
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[offset:end]
+}
+
+func stringFromMetadata(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Sprint(metadata)
+	}
+	return string(data)
+}
+
+func filterAssetTags(tags []catalog.AssetTag, query string) []catalog.AssetTag {
+	filtered := tags[:0]
+	for _, tag := range tags {
+		text := strings.ToLower(strings.Join([]string{
+			tag.AssetID,
+			tag.Tag,
+			tag.Source,
+			tag.PluginID,
+			stringFromMetadata(tag.Metadata),
+		}, " "))
+		if strings.Contains(text, query) {
+			filtered = append(filtered, tag)
+		}
+	}
+	return filtered
+}
+
+func filterAIPredictions(predictions []catalog.AIPrediction, query string) []catalog.AIPrediction {
+	filtered := predictions[:0]
+	for _, prediction := range predictions {
+		text := strings.ToLower(strings.Join([]string{
+			prediction.ID,
+			prediction.AssetID,
+			prediction.PluginID,
+			prediction.WorkerID,
+			prediction.Task,
+			prediction.Label,
+			prediction.ModelName,
+			prediction.ModelVersion,
+			stringFromMetadata(prediction.Metadata),
+		}, " "))
+		if strings.Contains(text, query) {
+			filtered = append(filtered, prediction)
+		}
+	}
+	return filtered
+}
+
+func filterFaceDetections(faces []catalog.FaceDetection, query string) []catalog.FaceDetection {
+	filtered := faces[:0]
+	for _, face := range faces {
+		text := strings.ToLower(strings.Join([]string{
+			face.ID,
+			face.AssetID,
+			face.ClusterID,
+			face.PluginID,
+			stringFromMetadata(face.Metadata),
+		}, " "))
+		if strings.Contains(text, query) {
+			filtered = append(filtered, face)
+		}
+	}
+	return filtered
 }
 
 func (s *Server) handleOCRRuns(w http.ResponseWriter, r *http.Request) {
