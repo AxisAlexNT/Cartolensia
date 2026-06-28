@@ -192,19 +192,22 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 	if err != nil {
 		return err
 	}
-	if payload.Limit > 0 && total > payload.Limit {
-		total = payload.Limit
+	processed := maxInt(payload.Processed, 0)
+	stored := maxInt(payload.Stored, 0)
+	failed := maxInt(payload.Failed, 0)
+	progressTotal := processed + failed + total
+	if payload.Limit > 0 && progressTotal > payload.Limit {
+		progressTotal = payload.Limit
 	}
-	job.ProgressTotal = int64Ptr(total)
-	job.ProgressCurrent = 0
-	job.Counters.Scanned = int64(total)
-	jobs.AddLog(job, "info", fmt.Sprintf("AI backfill %s started: media=%s missing=%d batch=%d limit=%d", payload.Task, payload.MediaKind, total, payload.BatchSize, payload.Limit))
+	job.ProgressTotal = int64Ptr(progressTotal)
+	job.ProgressCurrent = int64(processed + failed)
+	job.Counters.Scanned = int64(progressTotal)
+	job.Counters.Updated = int64(stored)
+	job.Counters.Errors = int64(failed)
+	jobs.AddLog(job, "info", fmt.Sprintf("AI backfill %s started: media=%s remaining=%d processed=%d stored=%d failed=%d batch=%d limit=%d", payload.Task, payload.MediaKind, total, processed, stored, failed, payload.BatchSize, payload.Limit))
 	if err := s.deps.Store.UpdateLeasedJob(ctx, *job, workerID); err != nil {
 		return err
 	}
-	processed := 0
-	stored := 0
-	failed := 0
 	failedIDs := map[string]struct{}{}
 	for payload.Limit < 0 || processed+failed < payload.Limit {
 		if err := s.cancelAIBackfillIfRequested(ctx, job, workerID); err != nil {
@@ -255,7 +258,7 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 			return s.aiWorkerMediaURL(asset.ID)
 		}, func(result aiJobResult) {
 			latest = result
-			job.ProgressCurrent = int64(processed + result.Processed + result.Skipped + len(result.Errors))
+			job.ProgressCurrent = int64(processed + failed + result.Processed + result.Skipped + len(result.Errors))
 			job.Counters.Updated = int64(stored + result.Stored)
 			job.Counters.Errors = int64(failed + len(result.Errors))
 			if progressErr == nil && time.Since(lastProgressFlush) >= 5*time.Second {

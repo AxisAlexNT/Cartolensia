@@ -43,7 +43,8 @@ type DatabaseConfig struct {
 }
 
 type CacheConfig struct {
-	Dir string `json:"dir" yaml:"dir"`
+	Dir                string `json:"dir" yaml:"dir"`
+	PersistentPreviews bool   `json:"persistent_previews,omitempty" yaml:"persistent_previews,omitempty"`
 }
 
 type StorageConfig struct {

@@ -1329,7 +1329,11 @@ func (db *DB) ReleaseExpiredLeases(ctx context.Context, now time.Time) (int64, e
 				when status='cancel_requested' then error
 				else coalesce(error, 'job lease expired; retry queued')
 			end
-		where status in ('running', 'cancel_requested') and lease_expires_at < $1
+		where status in ('running', 'cancel_requested')
+			and (
+				lease_expires_at < $1
+				or (status='cancel_requested' and lease_expires_at is null)
+			)
 	`, now)
 	if err != nil {
 		return 0, err

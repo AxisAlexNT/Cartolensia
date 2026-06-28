@@ -1426,16 +1426,24 @@ func (s *MemoryStore) ReleaseExpiredLeases(_ context.Context, now time.Time) (in
 func (s *MemoryStore) releaseExpiredLeasesLocked(now time.Time) (int64, error) {
 	var released int64
 	for id, job := range s.jobs {
-		if job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.Before(now) {
+		if job.Status != jobs.StatusRunning && job.Status != jobs.StatusCancelRequested {
 			continue
 		}
-		if job.Status != jobs.StatusRunning && job.Status != jobs.StatusCancelRequested {
+		if job.LeaseExpiresAt == nil {
+			if job.Status != jobs.StatusCancelRequested {
+				continue
+			}
+		} else if !job.LeaseExpiresAt.Before(now) {
 			continue
 		}
 		released++
 		if job.Status == jobs.StatusCancelRequested {
 			_ = jobs.Cancel(&job)
-			jobs.AddLog(&job, "warn", "expired lease cancelled after cancellation request")
+			if job.LeaseExpiresAt == nil {
+				jobs.AddLog(&job, "warn", "unowned cancellation request finalized")
+			} else {
+				jobs.AddLog(&job, "warn", "expired lease cancelled after cancellation request")
+			}
 			s.jobs[id] = cloneJob(job)
 			continue
 		}

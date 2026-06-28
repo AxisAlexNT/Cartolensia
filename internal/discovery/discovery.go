@@ -565,7 +565,11 @@ func (r Runner) HashUnhashed(ctx context.Context, job *jobs.Job) error {
 	if len(targets) == 0 {
 		jobs.AddLog(job, "warn", r.hashNoTargetsReason(assets, payload))
 	}
-	total := int64(len(targets))
+	alreadyHashed := job.ProgressCurrent
+	if job.Counters.Hashed > alreadyHashed {
+		alreadyHashed = job.Counters.Hashed
+	}
+	total := alreadyHashed + int64(len(targets))
 	job.ProgressTotal = &total
 	if err := r.updateJob(ctx, *job); err != nil {
 		return err

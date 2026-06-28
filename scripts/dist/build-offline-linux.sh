@@ -137,6 +137,7 @@ http:
   addr: "127.0.0.1:18080"
 cache:
   dir: ".cartolensia/cache"
+  persistent_previews: false
 storages:
   - name: "offline_media"
     kind: "fs"
@@ -154,6 +155,7 @@ database:
   url: "postgres://cartolensia@127.0.0.1:55433/cartolensia?sslmode=disable"
 cache:
   dir: ".cartolensia/cache"
+  persistent_previews: false
 storages:
   - name: "offline_media"
     kind: "fs"

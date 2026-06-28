@@ -4576,6 +4576,89 @@ Safety confirmation:
 - no commit;
 - no push.
 
+## 2026-06-28 Continuation: SSD-Aware Preview Mode, PostgreSQL Tuning, And AI Queue Recovery
+
+Scope:
+
+- Focused on the production rjazhenka deployment while the full NAS/originals scan continued.
+- Addressed SSD write amplification, misleading long-job progress, stale canceled jobs, and missing AI backfill lanes.
+- Kept originals/Samba storage strictly read-only and did not reset PostgreSQL.
+
+Implemented and deployed:
+
+- Added `cache.persistent_previews` with production configs defaulting to `false`.
+- Added on-demand image preview generation:
+  - serves resized JPEG previews directly from memory;
+  - does not write preview files;
+  - does not upsert preview-cache DB rows when persistent previews are disabled.
+- Updated `/api/v1/previews/status` to report preview mode (`on_demand` or `persistent`).
+- Added and deployed `scripts/remote/tune-postgres-for-large-ingest.sh`.
+- Tuned remote PostgreSQL for large ingest with safer SSD behavior:
+  - `wal_compression=pglz`;
+  - `checkpoint_timeout=15min`;
+  - `checkpoint_completion_target=0.9`;
+  - `max_wal_size=8GB`;
+  - `effective_io_concurrency=200`;
+  - `random_page_cost=1.1`;
+  - `maintenance_work_mem=512MB`;
+  - lower autovacuum analyze/vacuum scale factors.
+- Kept `synchronous_commit` unchanged; no unsafe durability shortcut was applied.
+- Fixed AI backfill resume accounting so restarted jobs keep saved `processed`, `stored`, and `failed` counters instead of looking reset.
+- Fixed stale `cancel_requested` cleanup for jobs with no live worker lease.
+- Fixed hash progress accounting so resumed hash jobs include already hashed files in `progress_total`.
+
+Remote validation:
+
+- rjazhenka is running the updated backend from `/opt/cartolensia/current/bin/cartolensia`.
+- TLS is reusing the cached self-signed certificate under `/var/lib/cartolensia/cache/tls`.
+- `/api/v1/previews/status` reports `mode: on_demand` and `persistent_previews: false`.
+- A sample photo preview returned `X-Cartolensia-Preview-Cache: on-demand`.
+- PostgreSQL tuning was applied and reloaded successfully.
+- Stale canceled jobs were cleaned up; only active production work remained.
+- AI sidecar is reachable and CUDA-backed; vector store is `pgvector_ivfflat`.
+- Missing AI lanes were queued and then observed running:
+  - OCR;
+  - captions/descriptions;
+  - safety/NSFW;
+  - embeddings;
+  - classification;
+  - face detection;
+  - video transcription.
+- Hash progress corrected after the worker lease cycle to `157657 / 265305` instead of showing current progress above total.
+- A live resource sample showed high system load and continuous sidecar requests, but low instantaneous GPU utilization. Current throughput is mostly constrained by SMB reads, image/audio decoding, OCR, and PostgreSQL writes rather than a single dense GPU batch.
+
+Current large-table state observed:
+
+- `track_points`: about `70.8M` rows and `20.1 GB`;
+- `gps_track_render_points`: about `7.7M` rows and `1.9 GB`;
+- `asset_embeddings`: about `1.6 GB`;
+- PostgreSQL DB total: about `26.6 GB`;
+- Cartolensia cache/model/component directories are outside originals.
+
+Optimization status:
+
+- Normal map rendering uses `gps_track_render_points`, not raw `track_points`.
+- Raw `track_points` remain necessary for exact track detail, sync, nearest-point, and full-fidelity analysis.
+- No heavy `VACUUM FULL`, index rebuild, or raw-track compaction was run during active ingest because those would cause large SSD writes.
+- Planner statistics were refreshed with `ANALYZE` for high-traffic metadata/search/render tables.
+- Further possible future optimization, if DB size becomes a limiting factor, is a planned migration to chunked/compressed raw track storage plus retained render-cache rows. That was not attempted in this run because it is a high-blast-radius migration.
+
+Tests run:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- remote authenticated checks for jobs, AI status, preview mode, PostgreSQL tuning, and GPU/service activity.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
 ## 2026-06-28 Heatmap Page
 
 Scope:

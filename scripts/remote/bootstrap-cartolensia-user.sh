@@ -125,7 +125,7 @@ SupplementaryGroups=video render docker
 EnvironmentFile=/etc/cartolensia/cartolensia.env
 WorkingDirectory=/opt/cartolensia/current
 ExecStartPre=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec /opt/cartolensia/current/bin/ensure-postgres-db'
-ExecStart=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec components/postgres/bin/postgres -D "$CARTOLENSIA_DATA_DIR/postgres" -p "${CARTOLENSIA_POSTGRES_PORT:-15432}" -k "$CARTOLENSIA_DATA_DIR/run" -c dynamic_shared_memory_type=mmap'
+ExecStart=/bin/bash -lc 'source /opt/cartolensia/current/bin/cartolensia-env; exec components/postgres/bin/postgres -D "$CARTOLENSIA_DATA_DIR/postgres" -p "${CARTOLENSIA_POSTGRES_PORT:-15432}" -k "$CARTOLENSIA_DATA_DIR/run" ${CARTOLENSIA_POSTGRES_TUNING_OPTS:--c dynamic_shared_memory_type=mmap -c wal_compression=on -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c max_wal_size=8GB -c effective_io_concurrency=200 -c random_page_cost=1.1 -c maintenance_work_mem=512MB -c autovacuum_vacuum_scale_factor=0.05 -c autovacuum_analyze_scale_factor=0.02}'
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

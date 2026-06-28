@@ -1102,6 +1102,69 @@ Large deployments should watch `track_points`, `asset_locations`,
 If `job_logs` grows too quickly, reduce log verbosity for long backfills or prune
 old succeeded job logs after exporting an essential backup.
 
+### Preview Cache Write Policy
+
+Production configs default to:
+
+```yaml
+cache:
+  persistent_previews: false
+```
+
+With this mode Cartolensia generates image previews on demand and serves them
+from memory. It does not write thumbnail files and does not create preview cache
+rows for normal browsing. This is the preferred default for SSD-sensitive large
+archives where originals live on read-only NAS storage.
+
+Enable persistent previews only when the operator explicitly wants a local
+thumbnail cache and has provisioned enough write endurance and disk space:
+
+```yaml
+cache:
+  persistent_previews: true
+```
+
+Persistent preview files are still written only under the configured Cartolensia
+cache directory, never beside originals.
+
+### PostgreSQL Large-Ingest Tuning
+
+For large NAS imports, run the bundled tuning helper after PostgreSQL is
+initialized:
+
+```bash
+sudo -u cartolensia \
+  CARTOLENSIA_PSQL=/opt/cartolensia/current/components/postgres/bin/psql \
+  CARTOLENSIA_DATABASE_URL='postgres://cartolensia:cartolensia@127.0.0.1:15432/cartolensia?sslmode=disable' \
+  /opt/cartolensia/current/scripts/remote/tune-postgres-for-large-ingest.sh
+```
+
+The helper enables WAL compression, lengthens checkpoints, raises the WAL budget,
+and tunes planner/autovacuum defaults for metadata-heavy ingest. It intentionally
+does not disable `synchronous_commit` and does not run destructive maintenance.
+
+Avoid `VACUUM FULL`, index rebuilds, and large table rewrites during active
+discovery/AI backfill unless there is a measured emergency. Those operations can
+write many gigabytes and block normal work. Prefer ordinary autovacuum plus
+targeted `ANALYZE` on hot tables.
+
+### Interpreting GPU Utilization
+
+During large SMB-backed AI backfills, instantaneous GPU utilization can look low
+even when Cartolensia is working correctly. The pipeline alternates between:
+
+- reading originals through the strict read-only storage adapter;
+- decoding images/video/audio;
+- running OCR/ASR subprocesses;
+- writing PostgreSQL metadata and pgvector rows;
+- short CUDA inference bursts.
+
+Use Jobs plus AI sidecar logs to verify sustained progress. A healthy run should
+show advancing `ai_backfill` progress and frequent sidecar requests for
+classification, embeddings, safety, captions, OCR, faces, and transcripts. Do
+not increase concurrency solely to chase 100% GPU utilization; watch NAS read
+load, system load, RAM, VRAM, PostgreSQL write rate, and SSD SMART write counters.
+
 ### Cached Self-Signed TLS
 
 When `http.tls_auto_self_signed` is enabled, Cartolensia writes generated

@@ -6745,6 +6745,31 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID s
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if !s.deps.Config.Cache.PersistentPreviews {
+		info, data, err := preview.GenerateImageBytes(r.Context(), asset, file)
+		closeErr := file.Close()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, info)
+			return
+		}
+		if closeErr != nil {
+			writeError(w, http.StatusInternalServerError, closeErr)
+			return
+		}
+		if info.Status == preview.StatusUnsupported {
+			writeJSON(w, http.StatusUnsupportedMediaType, info)
+			return
+		}
+		if info.Status != preview.StatusReady {
+			writeJSON(w, http.StatusNotImplemented, info)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("X-Cartolensia-Preview-Status", string(info.Status))
+		w.Header().Set("X-Cartolensia-Preview-Cache", "on-demand")
+		http.ServeContent(w, r, "preview.jpg", asset.UpdatedAt, bytes.NewReader(data))
+		return
+	}
 	info, err := preview.GenerateImage(r.Context(), s.deps.Config.Cache.Dir, asset, file)
 	closeErr := file.Close()
 	entry, indexErr := s.deps.Store.UpsertPreviewCacheEntry(r.Context(), preview.IndexEntry(asset, info, "default"))
@@ -6784,10 +6809,14 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, assetID s
 }
 
 func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[string]any {
+	previewInfo := preview.InfoForAsset("", asset)
+	if s.deps.Config.Cache.PersistentPreviews {
+		previewInfo = preview.InfoForAsset(s.deps.Config.Cache.Dir, asset)
+	}
 	detail := map[string]any{
 		"asset":        asset,
 		"locations":    asset.Locations,
-		"preview":      preview.InfoForAsset(s.deps.Config.Cache.Dir, asset),
+		"preview":      previewInfo,
 		"metadata":     asset.Metadata,
 		"visibility":   map[string]any{"public": assetIsPublic(asset)},
 		"timestamps":   map[string]any{"first_seen_at": asset.FirstSeenAt, "updated_at": asset.UpdatedAt},

@@ -139,6 +139,7 @@ database:
   migrations_dir: "./internal/catalog/migrations"
 cache:
   dir: "./data/cache"
+  persistent_previews: false
 storages:
   - name: originals
     kind: fs
@@ -441,6 +442,7 @@ export TESSDATA_PREFIX="${TESSDATA_PREFIX:-${ROOT}/components/tesseract/share/te
 export CARTOLENSIA_COMPONENT_DIR="${CARTOLENSIA_COMPONENT_DIR:-${ROOT}/components}"
 export CARTOLENSIA_AI_MODEL_DIR="${CARTOLENSIA_AI_MODEL_DIR:-${ROOT}/models}"
 export CARTOLENSIA_MODEL_DIR="${CARTOLENSIA_MODEL_DIR:-${CARTOLENSIA_AI_MODEL_DIR}}"
+export CARTOLENSIA_POSTGRES_TUNING_OPTS="${CARTOLENSIA_POSTGRES_TUNING_OPTS:--c dynamic_shared_memory_type=mmap -c wal_compression=on -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c max_wal_size=8GB -c effective_io_concurrency=200 -c random_page_cost=1.1 -c maintenance_work_mem=512MB -c autovacuum_vacuum_scale_factor=0.05 -c autovacuum_analyze_scale_factor=0.02}"
 mkdir -p "${CARTOLENSIA_DATA_DIR}/"{cache,components,models,exports,logs,run}
 SH
   cat >"${STAGE}/bin/ensure-postgres-db" <<'SH'
@@ -467,7 +469,7 @@ if [ ! -d "${PGDATA}/base" ]; then
   fi
 fi
 if ! "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" status >/dev/null 2>&1; then
-  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${PORT} -k ${RUN_DIR} -c dynamic_shared_memory_type=mmap" -w start
+  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${PORT} -k ${RUN_DIR} ${CARTOLENSIA_POSTGRES_TUNING_OPTS}" -w start
   started_here=1
 else
   started_here=0
@@ -505,7 +507,7 @@ CARTOLENSIA_KEEP_BOOTSTRAP_POSTGRES_RUNNING=1 "${ROOT}/bin/ensure-postgres-db"
 if "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" status >/dev/null 2>&1; then
   echo "PostgreSQL is already running for ${PGDATA}."
 else
-  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${CARTOLENSIA_POSTGRES_PORT:-15432} -k ${CARTOLENSIA_DATA_DIR}/run -c dynamic_shared_memory_type=mmap" start
+  "${ROOT}/components/postgres/bin/pg_ctl" -D "${PGDATA}" -l "${LOG}" -o "-p ${CARTOLENSIA_POSTGRES_PORT:-15432} -k ${CARTOLENSIA_DATA_DIR}/run ${CARTOLENSIA_POSTGRES_TUNING_OPTS}" start
 fi
 SH
   cat >"${STAGE}/bin/start-cartolensia" <<'SH'

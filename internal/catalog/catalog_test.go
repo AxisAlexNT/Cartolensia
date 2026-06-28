@@ -147,6 +147,39 @@ func TestMemoryJobCancellation(t *testing.T) {
 	}
 }
 
+func TestMemoryJobCancellationWithoutLeaseIsFinalized(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	queued, _ := store.EnqueueJob(ctx, jobs.New("ai_ocr", nil))
+	leased, err := store.LeaseNextJob(ctx, "worker-a", nil, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.RequestCancelJob(ctx, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled.WorkerID = ""
+	cancelled.LeaseExpiresAt = nil
+	if err := store.UpdateJob(ctx, cancelled); err != nil {
+		t.Fatal(err)
+	}
+	released, err := store.ReleaseExpiredLeases(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released != 1 {
+		t.Fatalf("expected one finalized cancellation, got %d", released)
+	}
+	final, err := store.GetJob(ctx, leased.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != jobs.StatusCanceled {
+		t.Fatalf("expected canceled, got %#v", final)
+	}
+}
+
 func TestBuildExplorerViewGroupsFolders(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()

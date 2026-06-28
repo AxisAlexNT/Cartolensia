@@ -987,7 +987,19 @@ func (s *Server) handlePreviewStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cache_dir": s.deps.Config.Cache.Dir, "stats": stats})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cache_dir":           s.deps.Config.Cache.Dir,
+		"persistent_previews": s.deps.Config.Cache.PersistentPreviews,
+		"mode":                previewCacheMode(s.deps.Config.Cache.PersistentPreviews),
+		"stats":               stats,
+	})
+}
+
+func previewCacheMode(persistent bool) string {
+	if persistent {
+		return "persistent"
+	}
+	return "on_demand"
 }
 
 func (s *Server) handlePreviewCache(w http.ResponseWriter, r *http.Request) {

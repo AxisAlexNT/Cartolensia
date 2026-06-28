@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -169,6 +170,32 @@ func GenerateImage(ctx context.Context, cacheDir string, asset catalog.Asset, re
 		return Info{Status: StatusFailed, CacheKey: CacheKey(asset), CachePath: cachePath, Message: err.Error()}, err
 	}
 	return Info{Status: StatusReady, CacheKey: CacheKey(asset), CachePath: cachePath}, nil
+}
+
+func GenerateImageBytes(ctx context.Context, asset catalog.Asset, reader io.Reader) (Info, []byte, error) {
+	loc, ok := catalog.FirstLocation(asset)
+	if !ok {
+		return Info{Status: StatusUnsupported, Message: "asset has no storage location"}, nil, nil
+	}
+	if loc.MediaKind != "photo" {
+		return Info{Status: StatusUnsupported, CacheKey: CacheKey(asset), Message: "preview generation supports photos only"}, nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return Info{Status: StatusFailed, CacheKey: CacheKey(asset), Message: err.Error()}, nil, err
+	}
+	src, _, err := image.Decode(reader)
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown format") {
+			return Info{Status: StatusUnsupported, CacheKey: CacheKey(asset), Message: "image format is unsupported by the built-in decoder"}, nil, nil
+		}
+		return Info{Status: StatusFailed, CacheKey: CacheKey(asset), Message: err.Error()}, nil, err
+	}
+	thumb := resizeNearest(src, 256)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, thumb, &jpeg.Options{Quality: 82}); err != nil {
+		return Info{Status: StatusFailed, CacheKey: CacheKey(asset), Message: err.Error()}, nil, err
+	}
+	return Info{Status: StatusReady, CacheKey: CacheKey(asset)}, buf.Bytes(), nil
 }
 
 func ensureInsideCache(cacheDir, target string) error {
