@@ -769,11 +769,25 @@ export type KnowledgeChatResponse = {
   answer: string;
   planner: SearchPlan;
   tool_calls: Array<Record<string, unknown>>;
+  media: SearchResult[];
   facts: KnowledgeFact[];
   relations: KnowledgeRelation[];
+  sql_results?: ReadOnlySQLResult[];
   messages?: KnowledgeMessage[];
   limit: number;
   llm_status: string;
+  note: string;
+};
+
+export type KnowledgeLLMStatus = {
+  mode: string;
+  provider: string;
+  endpoint: string;
+  model: string;
+  configured: boolean;
+  reachable: boolean;
+  models?: string[];
+  error?: string;
   note: string;
 };
 
@@ -856,7 +870,7 @@ export type SettingsPayload = {
   pending_settings?: Record<string, unknown>;
   restart_required: Record<string, unknown>;
   yaml_bound_fields: string[];
-  effective: Record<string, unknown>;
+  effective?: Record<string, unknown>;
 };
 
 export type ReadinessCheck = {
@@ -1351,6 +1365,8 @@ export const api = {
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
   aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
+  aiBackfill: (payload: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/api/v1/ai/backfill/start", { method: "POST", body: JSON.stringify(payload) }),
   deleteOCRBlock: (assetId: string, blockId: string) =>
     request<{ status: string }>(`/api/v1/assets/${encodeURIComponent(assetId)}/ocr/${encodeURIComponent(blockId)}`, {
       method: "DELETE"
@@ -1489,11 +1505,14 @@ export const api = {
       body: JSON.stringify({ message, conversation_id: conversationId, limit })
     }).then((response) => ({
       ...response,
+      media: asArray(response.media).map((item) => ({ ...item, asset: normalizeAsset(item.asset) })),
       facts: asArray(response.facts),
       relations: asArray(response.relations),
       tool_calls: asArray(response.tool_calls),
+      sql_results: asArray(response.sql_results),
       messages: asArray(response.messages)
     })),
+  knowledgeLLMStatus: () => request<KnowledgeLLMStatus>("/api/v1/knowledge/llm/status"),
   search: (q: string, limit = 100, offset = 0) =>
     request<SearchResponse>(
       `/api/v1/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
@@ -1535,6 +1554,7 @@ export const api = {
     yaml_bound_fields: asArray(payload.yaml_bound_fields),
     effective: payload.effective && typeof payload.effective === "object" ? payload.effective : {}
   })),
+  settingsEffective: () => request<Record<string, unknown>>("/api/v1/settings/effective"),
   pendingSettings: () => request<Record<string, unknown>>("/api/v1/settings/pending"),
   patchPendingSettings: (settings: Record<string, unknown>) =>
     request<Record<string, unknown>>("/api/v1/settings/pending", {

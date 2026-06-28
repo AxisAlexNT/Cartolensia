@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"sort"
@@ -44,6 +45,108 @@ func (s *MemoryStore) QueryAssets(ctx context.Context, query AssetQuery) (AssetP
 	total := len(assets)
 	limit, offset := normalizePage(query.Limit, query.Offset)
 	return AssetPage{Assets: paginateAssets(assets, limit, offset), Page: Page{Limit: limit, Offset: offset, Total: total}}, nil
+}
+
+func (s *MemoryStore) QueryAIMissingAssets(_ context.Context, query AIMissingQuery) (AssetPage, error) {
+	limit, offset := normalizePage(query.Limit, query.Offset)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Asset, 0)
+	for _, asset := range s.assets {
+		if query.MediaKind != "" && asset.MediaKind != query.MediaKind {
+			continue
+		}
+		if query.MaxDurationSeconds > 0 && assetDurationSeconds(asset) > query.MaxDurationSeconds {
+			continue
+		}
+		if s.aiAssetTaskCompleteLocked(asset.ID, query.Task) {
+			continue
+		}
+		out = append(out, cloneAsset(asset))
+	}
+	sortAssets(out, "taken_at")
+	total := len(out)
+	if offset >= len(out) {
+		return AssetPage{Assets: []Asset{}, Page: Page{Limit: limit, Offset: offset, Total: total}}, nil
+	}
+	end := offset + limit
+	if end > len(out) {
+		end = len(out)
+	}
+	return AssetPage{Assets: out[offset:end], Page: Page{Limit: limit, Offset: offset, Total: total}}, nil
+}
+
+func (s *MemoryStore) UpsertAIAssetTaskStatus(_ context.Context, status AIAssetTaskStatus) (AIAssetTaskStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[status.AssetID]; !ok {
+		return AIAssetTaskStatus{}, ErrNotFound
+	}
+	if strings.TrimSpace(status.Task) == "" {
+		return AIAssetTaskStatus{}, errors.New("AI task is required")
+	}
+	if status.Status == "" {
+		status.Status = "succeeded"
+	}
+	if status.Metadata == nil {
+		status.Metadata = map[string]any{}
+	}
+	status.UpdatedAt = time.Now().UTC()
+	s.aiTaskStatuses[status.AssetID+"\x00"+status.Task] = status
+	return status, nil
+}
+
+func (s *MemoryStore) aiAssetTaskCompleteLocked(assetID, task string) bool {
+	if status, ok := s.aiTaskStatuses[assetID+"\x00"+task]; ok && status.Status == "succeeded" {
+		return true
+	}
+	switch task {
+	case "classify_image", "safety_nsfw", "describe_image", "ocr_image":
+		for _, prediction := range s.aiPredictions[assetID] {
+			if prediction.Task == task {
+				return true
+			}
+		}
+	case "detect_faces":
+		return len(s.faceDetections[assetID]) > 0
+	case "embed_image":
+		for key := range s.assetEmbeddings {
+			if strings.HasPrefix(key, assetID+"\x00") {
+				return true
+			}
+		}
+	case "transcribe_audio":
+		return len(s.transcripts[assetID]) > 0
+	case "analyze_audio":
+		_, ok := s.audioFeatures[assetID]
+		return ok
+	}
+	return false
+}
+
+func assetDurationSeconds(asset Asset) float64 {
+	if asset.Metadata == nil {
+		return 0
+	}
+	for _, key := range []string{"duration_seconds", "duration"} {
+		switch value := asset.Metadata[key].(type) {
+		case float64:
+			return value
+		case float32:
+			return float64(value)
+		case int:
+			return float64(value)
+		case int64:
+			return float64(value)
+		case json.Number:
+			f, _ := value.Float64()
+			return f
+		case string:
+			f, _ := strconv.ParseFloat(value, 64)
+			return f
+		}
+	}
+	return 0
 }
 
 func filterAssets(assets []Asset, query AssetQuery, store *MemoryStore) []Asset {
@@ -526,6 +629,18 @@ func (s *MemoryStore) QueryTrackPoints(_ context.Context, query TrackPointQuery)
 			maxPoints = 500
 		}
 		out = simplifyCatalogPoints(out, maxPoints)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) QueryTrackPointsBatch(ctx context.Context, query TrackPointBatchQuery) (map[string][]TrackPoint, error) {
+	out := make(map[string][]TrackPoint, len(query.TrackAssetIDs))
+	for _, trackID := range query.TrackAssetIDs {
+		points, err := s.QueryTrackPoints(ctx, TrackPointQuery{TrackAssetID: trackID, Simplify: true, MaxPoints: query.MaxPointsPerTrack})
+		if err != nil {
+			return nil, err
+		}
+		out[trackID] = points
 	}
 	return out, nil
 }

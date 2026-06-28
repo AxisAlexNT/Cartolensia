@@ -3,14 +3,17 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/AxisAlexNT/Cartolensia/internal/catalog"
+	"github.com/AxisAlexNT/Cartolensia/internal/database"
 )
 
 type knowledgeFactStore interface {
@@ -31,17 +34,50 @@ type knowledgeConversationStore interface {
 	ListKnowledgeMessages(context.Context, string, int) ([]catalog.KnowledgeMessage, error)
 }
 
+type knowledgeReadOnlySQLStore interface {
+	ReadOnlySearchQuery(context.Context, string, int) (database.ReadOnlyQueryResult, error)
+}
+
+type knowledgeMediaResult struct {
+	Asset       catalog.Asset `json:"asset"`
+	Matched     []string      `json:"matched"`
+	Explanation string        `json:"explanation"`
+}
+
 type knowledgeChatResponse struct {
-	ConversationID string                      `json:"conversation_id,omitempty"`
-	Answer         string                      `json:"answer"`
-	Planner        searchPlan                  `json:"planner"`
-	ToolCalls      []map[string]any            `json:"tool_calls"`
-	Facts          []catalog.KnowledgeFact     `json:"facts"`
-	Relations      []catalog.KnowledgeRelation `json:"relations"`
-	Messages       []catalog.KnowledgeMessage  `json:"messages,omitempty"`
-	Limit          int                         `json:"limit"`
-	LLMStatus      string                      `json:"llm_status"`
-	Note           string                      `json:"note"`
+	ConversationID string                         `json:"conversation_id,omitempty"`
+	Answer         string                         `json:"answer"`
+	Planner        searchPlan                     `json:"planner"`
+	ToolCalls      []map[string]any               `json:"tool_calls"`
+	Media          []knowledgeMediaResult         `json:"media"`
+	Facts          []catalog.KnowledgeFact        `json:"facts"`
+	Relations      []catalog.KnowledgeRelation    `json:"relations"`
+	SQLResults     []database.ReadOnlyQueryResult `json:"sql_results,omitempty"`
+	Messages       []catalog.KnowledgeMessage     `json:"messages,omitempty"`
+	Limit          int                            `json:"limit"`
+	LLMStatus      string                         `json:"llm_status"`
+	Note           string                         `json:"note"`
+}
+
+type knowledgeToolRequest struct {
+	Tool      string `json:"tool"`
+	Query     string `json:"query,omitempty"`
+	Predicate string `json:"predicate,omitempty"`
+	Relation  string `json:"relation,omitempty"`
+	SQL       string `json:"sql,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type knowledgeLLMStatus struct {
+	Mode       string   `json:"mode"`
+	Provider   string   `json:"provider"`
+	Endpoint   string   `json:"endpoint"`
+	Model      string   `json:"model"`
+	Configured bool     `json:"configured"`
+	Reachable  bool     `json:"reachable"`
+	Models     []string `json:"models,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Note       string   `json:"note"`
 }
 
 func (s *Server) handleKnowledgeFacts(w http.ResponseWriter, r *http.Request) {
@@ -185,19 +221,76 @@ func (s *Server) handleKnowledgeChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (s *Server) handleKnowledgeLLMStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	status := s.localLLMStatus(r.Context())
+	writeJSON(w, http.StatusOK, status)
+}
+
 func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limit int, factStore knowledgeFactStore, relationStore knowledgeRelationStore) (knowledgeChatResponse, error) {
 	plan := s.buildNaturalLanguageSearchPlan(message)
 	terms := knowledgeChatTerms(message, plan)
 	facts := []catalog.KnowledgeFact{}
 	relations := []catalog.KnowledgeRelation{}
+	media := []knowledgeMediaResult{}
+	sqlResults := []database.ReadOnlyQueryResult{}
 	seenFacts := map[string]struct{}{}
 	seenRelations := map[string]struct{}{}
+	seenMedia := map[string]struct{}{}
 	toolCalls := []map[string]any{
 		{"tool": "search_plan", "query": message, "executable_query": plan.Executable, "tokens": plan.Tokens},
+	}
+	addFacts := func(items []catalog.KnowledgeFact) {
+		for _, fact := range items {
+			if _, ok := seenFacts[fact.ID]; ok {
+				continue
+			}
+			facts = append(facts, fact)
+			seenFacts[fact.ID] = struct{}{}
+			if len(facts) >= limit {
+				break
+			}
+		}
+	}
+	addRelations := func(items []catalog.KnowledgeRelation) {
+		for _, relation := range items {
+			if _, ok := seenRelations[relation.ID]; ok {
+				continue
+			}
+			relations = append(relations, relation)
+			seenRelations[relation.ID] = struct{}{}
+			if len(relations) >= limit {
+				break
+			}
+		}
+	}
+	addMedia := func(items []knowledgeMediaResult) {
+		for _, item := range items {
+			if _, ok := seenMedia[item.Asset.ID]; ok {
+				continue
+			}
+			media = append(media, item)
+			seenMedia[item.Asset.ID] = struct{}{}
+			if len(media) >= limit {
+				break
+			}
+		}
 	}
 	perTermLimit := limit
 	if len(terms) > 1 {
 		perTermLimit = max(5, limit/len(terms))
+	}
+	if strings.TrimSpace(plan.Executable) != "" {
+		mediaResults, total, err := s.searchKnowledgeMedia(ctx, plan, min(limit, 25))
+		if err != nil {
+			toolCalls = append(toolCalls, map[string]any{"tool": "search_media", "query": plan.Executable, "error": err.Error()})
+		} else {
+			addMedia(mediaResults)
+			toolCalls = append(toolCalls, map[string]any{"tool": "search_media", "query": plan.Executable, "returned": len(mediaResults), "total": total})
+		}
 	}
 	for _, term := range terms {
 		factPage, err := factStore.ListKnowledgeFacts(ctx, catalog.KnowledgeQuery{Q: term, Limit: perTermLimit})
@@ -212,34 +305,69 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 			map[string]any{"tool": "knowledge_fact_search", "query": term, "returned": len(factPage.Facts), "total": factPage.Page.Total},
 			map[string]any{"tool": "knowledge_relation_search", "query": term, "returned": len(relationPage.Relations), "total": relationPage.Page.Total},
 		)
-		for _, fact := range factPage.Facts {
-			if _, ok := seenFacts[fact.ID]; ok {
-				continue
-			}
-			facts = append(facts, fact)
-			seenFacts[fact.ID] = struct{}{}
-			if len(facts) >= limit {
-				break
-			}
-		}
-		for _, relation := range relationPage.Relations {
-			if _, ok := seenRelations[relation.ID]; ok {
-				continue
-			}
-			relations = append(relations, relation)
-			seenRelations[relation.ID] = struct{}{}
-			if len(relations) >= limit {
-				break
+		addFacts(factPage.Facts)
+		addRelations(relationPage.Relations)
+	}
+	llmPlanningStatus := "not_used"
+	if runtimeStringSetting("knowledge.runner_mode", "deterministic") == "local_llm" {
+		requests, status, err := s.planKnowledgeToolsWithLocalLLM(ctx, message, plan)
+		llmPlanningStatus = status
+		toolCalls = append(toolCalls, map[string]any{"tool": "local_llm_tool_planner", "status": status, "requests": requests, "error": errorString(err)})
+		if err == nil {
+			for _, request := range requests {
+				switch request.Tool {
+				case "search_media":
+					queryPlan := s.buildNaturalLanguageSearchPlan(firstNonEmpty(request.Query, message))
+					results, total, err := s.searchKnowledgeMedia(ctx, queryPlan, clampKnowledgeLimit(request.Limit, min(limit, 25)))
+					if err != nil {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "error": err.Error()})
+						continue
+					}
+					addMedia(results)
+					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "returned": len(results), "total": total})
+				case "search_facts":
+					page, err := factStore.ListKnowledgeFacts(ctx, catalog.KnowledgeQuery{Q: request.Query, Predicate: request.Predicate, Limit: clampKnowledgeLimit(request.Limit, perTermLimit)})
+					if err != nil {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "error": err.Error()})
+						continue
+					}
+					addFacts(page.Facts)
+					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "predicate": request.Predicate, "returned": len(page.Facts), "total": page.Page.Total})
+				case "search_relations":
+					page, err := relationStore.ListKnowledgeRelations(ctx, catalog.KnowledgeQuery{Q: request.Query, Relation: request.Relation, Limit: clampKnowledgeLimit(request.Limit, perTermLimit)})
+					if err != nil {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "error": err.Error()})
+						continue
+					}
+					addRelations(page.Relations)
+					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "relation": request.Relation, "returned": len(page.Relations), "total": page.Page.Total})
+				case "readonly_sql":
+					sqlStore, ok := s.deps.Store.(knowledgeReadOnlySQLStore)
+					if !ok {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "sql_sha256": sqlDigest(request.SQL), "error": "read-only SQL is available only with PostgreSQL"})
+						continue
+					}
+					result, err := sqlStore.ReadOnlySearchQuery(ctx, request.SQL, clampKnowledgeLimit(request.Limit, 50))
+					if err != nil {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "sql_sha256": sqlDigest(request.SQL), "error": err.Error()})
+						continue
+					}
+					sqlResults = append(sqlResults, result)
+					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "sql_sha256": sqlDigest(result.SQL), "views": result.Views, "returned": result.Count})
+				}
 			}
 		}
 	}
-	answer := buildKnowledgeAnswer(message, facts, relations)
+	answer := buildKnowledgeAnswer(message, media, facts, relations, sqlResults)
 	llmStatus := "not_used"
 	note := "Local deterministic tool runner. Configure a local LLM endpoint to synthesize richer answers; remote LLM APIs are not used by default."
 	if runtimeStringSetting("knowledge.runner_mode", "deterministic") == "local_llm" {
-		llmAnswer, status, llmNote, err := s.synthesizeKnowledgeWithLocalLLM(ctx, message, plan, facts, relations)
+		llmAnswer, status, llmNote, err := s.synthesizeKnowledgeWithLocalLLM(ctx, message, plan, media, facts, relations, sqlResults)
 		llmStatus = status
 		note = llmNote
+		if llmPlanningStatus != "not_used" {
+			note = note + " Tool planner status: " + llmPlanningStatus + "."
+		}
 		toolCalls = append(toolCalls, map[string]any{"tool": "local_llm_synthesis", "status": status, "error": errorString(err)})
 		if err == nil && strings.TrimSpace(llmAnswer) != "" {
 			answer = llmAnswer
@@ -248,18 +376,20 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 		}
 	}
 	return knowledgeChatResponse{
-		Answer:    answer,
-		Planner:   plan,
-		ToolCalls: toolCalls,
-		Facts:     facts,
-		Relations: relations,
-		Limit:     limit,
-		LLMStatus: llmStatus,
-		Note:      note,
+		Answer:     answer,
+		Planner:    plan,
+		ToolCalls:  toolCalls,
+		Media:      media,
+		Facts:      facts,
+		Relations:  relations,
+		SQLResults: sqlResults,
+		Limit:      limit,
+		LLMStatus:  llmStatus,
+		Note:       note,
 	}, nil
 }
 
-func (s *Server) synthesizeKnowledgeWithLocalLLM(ctx context.Context, message string, plan searchPlan, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation) (string, string, string, error) {
+func (s *Server) synthesizeKnowledgeWithLocalLLM(ctx context.Context, message string, plan searchPlan, media []knowledgeMediaResult, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation, sqlResults []database.ReadOnlyQueryResult) (string, string, string, error) {
 	provider := strings.ToLower(strings.TrimSpace(runtimeStringSetting("knowledge.llm_provider", "ollama")))
 	endpoint := strings.TrimRight(strings.TrimSpace(runtimeStringSetting("knowledge.llm_endpoint", "http://127.0.0.1:11434")), "/")
 	model := strings.TrimSpace(runtimeStringSetting("knowledge.llm_model", ""))
@@ -278,7 +408,7 @@ func (s *Server) synthesizeKnowledgeWithLocalLLM(ctx context.Context, message st
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
-	prompt := knowledgeLLMPrompt(message, plan, facts, relations)
+	prompt := knowledgeLLMPrompt(message, plan, media, facts, relations, sqlResults)
 	switch provider {
 	case "ollama":
 		answer, err := postOllamaChat(ctx, endpoint, model, prompt)
@@ -297,7 +427,50 @@ func (s *Server) synthesizeKnowledgeWithLocalLLM(ctx context.Context, message st
 	}
 }
 
-func knowledgeLLMPrompt(message string, plan searchPlan, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation) string {
+func (s *Server) planKnowledgeToolsWithLocalLLM(ctx context.Context, message string, plan searchPlan) ([]knowledgeToolRequest, string, error) {
+	provider := strings.ToLower(strings.TrimSpace(runtimeStringSetting("knowledge.llm_provider", "ollama")))
+	endpoint := strings.TrimRight(strings.TrimSpace(runtimeStringSetting("knowledge.llm_endpoint", "http://127.0.0.1:11434")), "/")
+	model := strings.TrimSpace(runtimeStringSetting("knowledge.llm_model", ""))
+	if model == "" {
+		return nil, "local_llm_missing_model", fmt.Errorf("knowledge.llm_model is empty")
+	}
+	if endpoint == "" {
+		return nil, "local_llm_missing_endpoint", fmt.Errorf("knowledge.llm_endpoint is empty")
+	}
+	timeoutSeconds := runtimeIntSetting("knowledge.llm_timeout_seconds", 60)
+	if timeoutSeconds < 5 {
+		timeoutSeconds = 5
+	}
+	if timeoutSeconds > 60 {
+		timeoutSeconds = 60
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	prompt := knowledgeToolPlanPrompt(message, plan)
+	var answer string
+	var err error
+	switch provider {
+	case "ollama":
+		answer, err = postOllamaChat(ctx, endpoint, model, prompt)
+	case "openai_compatible", "vllm", "openai-compatible":
+		answer, err = postOpenAICompatibleChat(ctx, endpoint, model, prompt)
+	default:
+		return nil, "local_llm_bad_provider", fmt.Errorf("unsupported local LLM provider %q", provider)
+	}
+	if err != nil {
+		return nil, "local_llm_planner_error", err
+	}
+	requests, err := parseKnowledgeToolRequests(answer)
+	if err != nil {
+		return nil, "local_llm_planner_bad_json", err
+	}
+	if len(requests) == 0 {
+		return nil, "local_llm_planner_empty", nil
+	}
+	return requests, "local_llm_planner_ok", nil
+}
+
+func knowledgeLLMPrompt(message string, plan searchPlan, media []knowledgeMediaResult, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation, sqlResults []database.ReadOnlyQueryResult) string {
 	maxItems := runtimeIntSetting("knowledge.llm_max_context_items", 24)
 	if maxItems < 4 {
 		maxItems = 4
@@ -313,6 +486,15 @@ func knowledgeLLMPrompt(message string, plan searchPlan, facts []catalog.Knowled
 	builder.WriteString(message)
 	builder.WriteString("\n\nParsed safe query:\n")
 	builder.WriteString(searchPlanPreview(plan))
+	builder.WriteString("\n\nMedia search results:\n")
+	for i, result := range media {
+		if i >= maxItems {
+			builder.WriteString(fmt.Sprintf("- plus %d more media results not shown to the model\n", len(media)-i))
+			break
+		}
+		builder.WriteString(fmt.Sprintf("- asset_id=%s name=%s kind=%s taken_at=%s matched=%s\n",
+			result.Asset.ID, compactFactObject(result.Asset.DisplayName), result.Asset.MediaKind, assetTakenAtString(result.Asset), strings.Join(result.Matched, ",")))
+	}
 	builder.WriteString("\n\nFacts:\n")
 	for i, fact := range facts {
 		if i >= maxItems {
@@ -332,13 +514,192 @@ func knowledgeLLMPrompt(message string, plan searchPlan, facts []catalog.Knowled
 			firstNonEmpty(relation.FromAssetID, "(none)"), compactFactObject(relation.FromEntity), relation.Relation,
 			firstNonEmpty(relation.ToAssetID, "(none)"), compactFactObject(relation.ToEntity), compactFactObject(relation.Evidence)))
 	}
+	builder.WriteString("\nRead-only SQL tool results:\n")
+	for i, result := range sqlResults {
+		if i >= 3 {
+			builder.WriteString(fmt.Sprintf("- plus %d more SQL result sets not shown to the model\n", len(sqlResults)-i))
+			break
+		}
+		builder.WriteString(fmt.Sprintf("- views=%s rows=%d columns=%s\n", strings.Join(result.Views, ","), result.Count, strings.Join(result.Columns, ",")))
+		for rowIdx, row := range result.Rows {
+			if rowIdx >= min(8, maxItems) {
+				builder.WriteString(fmt.Sprintf("  - plus %d more rows not shown\n", len(result.Rows)-rowIdx))
+				break
+			}
+			rowJSON, _ := json.Marshal(row)
+			builder.WriteString("  - ")
+			builder.WriteString(compactFactObject(string(rowJSON)))
+			builder.WriteString("\n")
+		}
+	}
 	return builder.String()
 }
 
+func knowledgeToolPlanPrompt(message string, plan searchPlan) string {
+	var builder strings.Builder
+	builder.WriteString("You are a local Cartolensia archive query planner. Return only compact JSON, no markdown. ")
+	builder.WriteString("Allowed tools: search_media, search_facts, search_relations, readonly_sql. ")
+	builder.WriteString("Every tool is read-only and bounded. Do not request writes or raw tables. ")
+	builder.WriteString("readonly_sql may SELECT only from cartolensia_search_* views.\n")
+	builder.WriteString(`JSON shape: {"tools":[{"tool":"search_media","query":"kind:photo 2025-05..2025-08 поезд","limit":12},{"tool":"search_facts","query":"поезд","limit":12},{"tool":"search_relations","query":"поезд","limit":12},{"tool":"readonly_sql","sql":"select asset_id, display_name, media_kind from cartolensia_search_assets where media_kind='photo' limit 20","limit":20}]}`)
+	builder.WriteString("\nUser request:\n")
+	builder.WriteString(message)
+	builder.WriteString("\nDeterministic parsed query:\n")
+	builder.WriteString(plan.Executable)
+	return builder.String()
+}
+
+func parseKnowledgeToolRequests(raw string) ([]knowledgeToolRequest, error) {
+	raw = strings.TrimSpace(raw)
+	start := strings.Index(raw, "{")
+	end := strings.LastIndex(raw, "}")
+	if start < 0 || end < start {
+		return nil, fmt.Errorf("local LLM did not return a JSON object")
+	}
+	raw = raw[start : end+1]
+	var payload struct {
+		Tools []knowledgeToolRequest `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, err
+	}
+	out := make([]knowledgeToolRequest, 0, min(len(payload.Tools), 8))
+	for _, request := range payload.Tools {
+		request.Tool = strings.TrimSpace(strings.ToLower(request.Tool))
+		request.Query = strings.TrimSpace(request.Query)
+		request.Predicate = strings.TrimSpace(request.Predicate)
+		request.Relation = strings.TrimSpace(request.Relation)
+		request.SQL = strings.TrimSpace(request.SQL)
+		request.Limit = clampKnowledgeLimit(request.Limit, 12)
+		switch request.Tool {
+		case "search_media":
+			if request.Query == "" {
+				continue
+			}
+		case "search_facts", "search_relations":
+			if request.Query == "" && request.Predicate == "" && request.Relation == "" {
+				continue
+			}
+		case "readonly_sql":
+			if request.SQL == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, request)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) searchKnowledgeMedia(ctx context.Context, plan searchPlan, limit int) ([]knowledgeMediaResult, int, error) {
+	limit = clampKnowledgeLimit(limit, 12)
+	query := assetQueryFromSearchPlan(plan, limit)
+	page, err := s.deps.Store.QueryAssets(ctx, query)
+	if err != nil {
+		return nil, 0, err
+	}
+	results := make([]knowledgeMediaResult, 0, len(page.Assets))
+	searchCtx := assetSearchContext{}
+	for _, asset := range page.Assets {
+		matched := assetSearchMatches(asset, plan.Tokens, searchCtx)
+		if len(matched) == 0 {
+			matched = []string{"bounded media search"}
+		}
+		results = append(results, knowledgeMediaResult{Asset: asset, Matched: matched, Explanation: searchExplanation(matched)})
+	}
+	return results, page.Page.Total, nil
+}
+
+func assetQueryFromSearchPlan(plan searchPlan, limit int) catalog.AssetQuery {
+	query := catalog.AssetQuery{Limit: limit, Sort: "taken_at"}
+	freeText := []string{}
+	for _, token := range plan.Tokens {
+		prefix, plain := splitSearchToken(token)
+		plain = strings.TrimSpace(strings.Trim(plain, `"`))
+		switch prefix {
+		case "kind", "type", "media", "media_kind":
+			query.MediaKind = plain
+		case "ext", "extension":
+			query.Extension = strings.TrimPrefix(plain, ".")
+		case "filename", "path":
+			freeText = append(freeText, wildcardToLikeText(plain))
+		case "":
+			if start, end, ok := searchDateRangeBounds(token); ok {
+				if !start.IsZero() {
+					query.TakenFrom = &start
+				}
+				if !end.IsZero() {
+					query.TakenTo = &end
+				}
+			} else {
+				freeText = append(freeText, wildcardToLikeText(plain))
+			}
+		}
+	}
+	if len(freeText) == 0 && strings.TrimSpace(plan.RawQuery) != "" && len(plan.Tokens) == 0 {
+		freeText = append(freeText, wildcardToLikeText(plan.RawQuery))
+	}
+	query.Q = strings.TrimSpace(strings.Join(uniqueStrings(freeText), " "))
+	return query
+}
+
+func searchDateRangeBounds(token string) (time.Time, time.Time, bool) {
+	if strings.Contains(token, "..") {
+		startRaw, endRaw, _ := strings.Cut(token, "..")
+		start, startOK := parseSearchDateBound(startRaw, false)
+		end, endOK := parseSearchDateBound(endRaw, true)
+		return start, end, startOK || endOK
+	}
+	start, startOK := parseSearchDateBound(token, false)
+	end, endOK := parseSearchDateBound(token, true)
+	return start, end, startOK || endOK
+}
+
+func assetTakenAtString(asset catalog.Asset) string {
+	if asset.TakenAt == nil {
+		return ""
+	}
+	return asset.TakenAt.Format(time.RFC3339)
+}
+
+func clampKnowledgeLimit(value, fallback int) int {
+	if fallback <= 0 {
+		fallback = 12
+	}
+	if value <= 0 {
+		value = fallback
+	}
+	if value < 1 {
+		value = 1
+	}
+	if value > 50 {
+		value = 50
+	}
+	return value
+}
+
+func sqlDigest(sql string) string {
+	sum := sha256.Sum256([]byte(sql))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
 func postOllamaChat(ctx context.Context, endpoint, model, prompt string) (string, error) {
+	keepAlive := runtimeIntSetting("knowledge.llm_idle_unload_minutes", 5)
+	if keepAlive < 0 {
+		keepAlive = 0
+	}
 	payload := map[string]any{
-		"model":  model,
-		"stream": false,
+		"model":      model,
+		"stream":     false,
+		"keep_alive": fmt.Sprintf("%dm", keepAlive),
+		"options": map[string]any{
+			"temperature": 0.1,
+			"top_p":       0.8,
+		},
 		"messages": []map[string]string{
 			{"role": "system", "content": "You answer archive questions using only provided local evidence."},
 			{"role": "user", "content": prompt},
@@ -350,7 +711,7 @@ func postOllamaChat(ctx context.Context, endpoint, model, prompt string) (string
 		} `json:"message"`
 		Error string `json:"error"`
 	}
-	if err := postLocalLLMJSON(ctx, endpoint+"/api/chat", payload, &response); err != nil {
+	if err := postLocalLLMJSON(ctx, localLLMURL(endpoint, "/api/chat"), payload, &response); err != nil {
 		return "", err
 	}
 	if response.Error != "" {
@@ -363,6 +724,7 @@ func postOpenAICompatibleChat(ctx context.Context, endpoint, model, prompt strin
 	payload := map[string]any{
 		"model":       model,
 		"temperature": 0.1,
+		"max_tokens":  1200,
 		"messages": []map[string]string{
 			{"role": "system", "content": "You answer archive questions using only provided local evidence."},
 			{"role": "user", "content": prompt},
@@ -376,7 +738,7 @@ func postOpenAICompatibleChat(ctx context.Context, endpoint, model, prompt strin
 		} `json:"choices"`
 		Error any `json:"error"`
 	}
-	if err := postLocalLLMJSON(ctx, endpoint+"/v1/chat/completions", payload, &response); err != nil {
+	if err := postLocalLLMJSON(ctx, localLLMURL(endpoint, "/v1/chat/completions"), payload, &response); err != nil {
 		return "", err
 	}
 	if response.Error != nil {
@@ -386,6 +748,116 @@ func postOpenAICompatibleChat(ctx context.Context, endpoint, model, prompt strin
 		return "", fmt.Errorf("local LLM returned no choices")
 	}
 	return strings.TrimSpace(response.Choices[0].Message.Content), nil
+}
+
+func localLLMURL(endpoint, path string) string {
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	if endpoint == "" {
+		return path
+	}
+	if strings.HasPrefix(path, "/v1/") && strings.HasSuffix(endpoint, "/v1") {
+		return endpoint + strings.TrimPrefix(path, "/v1")
+	}
+	return endpoint + path
+}
+
+func (s *Server) localLLMStatus(ctx context.Context) knowledgeLLMStatus {
+	mode := runtimeStringSetting("knowledge.runner_mode", "deterministic")
+	provider := strings.ToLower(strings.TrimSpace(runtimeStringSetting("knowledge.llm_provider", "ollama")))
+	endpoint := strings.TrimRight(strings.TrimSpace(runtimeStringSetting("knowledge.llm_endpoint", "http://127.0.0.1:11434")), "/")
+	model := strings.TrimSpace(runtimeStringSetting("knowledge.llm_model", ""))
+	status := knowledgeLLMStatus{
+		Mode:       mode,
+		Provider:   provider,
+		Endpoint:   endpoint,
+		Model:      model,
+		Configured: mode == "local_llm" && endpoint != "" && model != "",
+		Note:       "Local LLM mode uses only bounded read-only tool results. Remote LLM APIs are not used by default.",
+	}
+	if endpoint == "" {
+		status.Error = "knowledge.llm_endpoint is empty"
+		return status
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	switch provider {
+	case "ollama":
+		models, err := getOllamaModels(ctx, endpoint)
+		status.Models = models
+		status.Reachable = err == nil
+		if err != nil {
+			status.Error = err.Error()
+		}
+	case "openai_compatible", "vllm", "openai-compatible":
+		models, err := getOpenAICompatibleModels(ctx, endpoint)
+		status.Models = models
+		status.Reachable = err == nil
+		if err != nil {
+			status.Error = err.Error()
+		}
+	default:
+		status.Error = fmt.Sprintf("unsupported provider %q", provider)
+	}
+	return status
+}
+
+func getOllamaModels(ctx context.Context, endpoint string) ([]string, error) {
+	var response struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := getLocalLLMJSON(ctx, localLLMURL(endpoint, "/api/tags"), &response); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(response.Models))
+	for _, model := range response.Models {
+		if model.Name != "" {
+			models = append(models, model.Name)
+		}
+	}
+	return models, nil
+}
+
+func getOpenAICompatibleModels(ctx context.Context, endpoint string) ([]string, error) {
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := getLocalLLMJSON(ctx, localLLMURL(endpoint, "/v1/models"), &response); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(response.Data))
+	for _, model := range response.Data {
+		if model.ID != "" {
+			models = append(models, model.ID)
+		}
+	}
+	return models, nil
+}
+
+func getLocalLLMJSON(ctx context.Context, rawURL string, out any) error {
+	if _, err := url.ParseRequestURI(rawURL); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("local LLM HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return json.Unmarshal(responseBody, out)
 }
 
 func postLocalLLMJSON(ctx context.Context, url string, payload any, out any) error {
@@ -469,14 +941,24 @@ func knowledgeChatTerms(message string, plan searchPlan) []string {
 	return terms
 }
 
-func buildKnowledgeAnswer(message string, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation) string {
+func buildKnowledgeAnswer(message string, media []knowledgeMediaResult, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation, sqlResults []database.ReadOnlyQueryResult) string {
 	var builder strings.Builder
 	builder.WriteString("I searched the local Knowledge Base and Knowledge Graph for: ")
 	builder.WriteString(message)
 	builder.WriteString("\n\n")
-	if len(facts) == 0 && len(relations) == 0 {
+	if len(media) == 0 && len(facts) == 0 && len(relations) == 0 && len(sqlResults) == 0 {
 		builder.WriteString("No mined facts or relations matched yet. Run knowledge extraction after OCR, transcripts, captions, and metadata jobs have produced more local metadata.")
 		return builder.String()
+	}
+	if len(media) > 0 {
+		builder.WriteString("Relevant media:\n")
+		for i, result := range media {
+			if i >= 8 {
+				builder.WriteString(fmt.Sprintf("- plus %d more media results\n", len(media)-i))
+				break
+			}
+			builder.WriteString(fmt.Sprintf("- %s (%s, %s) — %s\n", result.Asset.DisplayName, result.Asset.MediaKind, assetTakenAtString(result.Asset), result.Explanation))
+		}
 	}
 	if len(facts) > 0 {
 		builder.WriteString("Relevant facts:\n")
@@ -510,6 +992,12 @@ func buildKnowledgeAnswer(message string, facts []catalog.KnowledgeFact, relatio
 				builder.WriteString(")")
 			}
 			builder.WriteString("\n")
+		}
+	}
+	if len(sqlResults) > 0 {
+		builder.WriteString("\nRead-only query summaries:\n")
+		for _, result := range sqlResults {
+			builder.WriteString(fmt.Sprintf("- %d rows from %s\n", result.Count, strings.Join(result.Views, ",")))
 		}
 	}
 	builder.WriteString("\nThis answer is tool-grounded only; extracted facts can contain OCR/AI errors and should remain reviewable.")

@@ -45,17 +45,33 @@ var runtimeSettings = struct {
 	"search.geocoder_provider":                          "local_place_cache",
 	"search.geocoder_provider_url":                      "https://nominatim.openstreetmap.org",
 	"search.reverse_geocode_radius_m":                   100,
-	"search.runner_mode":                                "deterministic",
-	"knowledge.runner_mode":                             "deterministic",
-	"knowledge.llm_provider":                            "ollama",
-	"knowledge.llm_endpoint":                            "http://127.0.0.1:11434",
-	"knowledge.llm_model":                               "",
-	"knowledge.llm_timeout_seconds":                     60,
-	"knowledge.llm_idle_unload_minutes":                 5,
-	"knowledge.llm_max_context_items":                   24,
+	"search.runner_mode":                                envStringDefault("CARTOLENSIA_SEARCH_RUNNER_MODE", "deterministic"),
+	"knowledge.runner_mode":                             envStringDefault("CARTOLENSIA_KNOWLEDGE_RUNNER_MODE", "deterministic"),
+	"knowledge.llm_provider":                            envStringDefault("CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER", "ollama"),
+	"knowledge.llm_endpoint":                            envStringDefault("CARTOLENSIA_KNOWLEDGE_LLM_ENDPOINT", "http://127.0.0.1:11434"),
+	"knowledge.llm_model":                               envStringDefault("CARTOLENSIA_KNOWLEDGE_LLM_MODEL", ""),
+	"knowledge.llm_timeout_seconds":                     envIntDefault("CARTOLENSIA_KNOWLEDGE_LLM_TIMEOUT_SECONDS", 60),
+	"knowledge.llm_idle_unload_minutes":                 envIntDefault("CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES", 5),
+	"knowledge.llm_max_context_items":                   envIntDefault("CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS", 24),
 	"ai.worker_endpoint":                                "http://127.0.0.1:19090",
 	"transcode.session_ttl":                             "2h",
 }}
+
+func envStringDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envIntDefault(name string, fallback int) int {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
 
 var pluginSettings = struct {
 	sync.RWMutex
@@ -67,7 +83,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.settingsPayload())
+	writeJSON(w, http.StatusOK, s.settingsPayload(boolQuery(r.URL.Query().Get("include_effective"))))
 }
 
 func (s *Server) handleSettingsSchema(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +92,7 @@ func (s *Server) handleSettingsSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tabs":             s.settingsPayload()["tabs"],
+		"tabs":             s.settingsPayload(false)["tabs"],
 		"runtime_settings": runtimeSettingsSchema(),
 		"pending_settings": pendingSettingsSchema(),
 		"plugin_settings":  "see /api/v1/plugins/{id}/settings/schema",
@@ -234,8 +250,8 @@ func (s *Server) handleSettingsRestartRequired(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, restartRequiredSettings())
 }
 
-func (s *Server) settingsPayload() map[string]any {
-	return map[string]any{
+func (s *Server) settingsPayload(includeEffective bool) map[string]any {
+	payload := map[string]any{
 		"tabs": []map[string]any{
 			{"id": "general", "label": "General", "runtime": true},
 			{"id": "server", "label": "Server/HTTP/HTTPS", "runtime": false},
@@ -262,15 +278,18 @@ func (s *Server) settingsPayload() map[string]any {
 		"pending_settings":  s.pendingSettingsSnapshot(),
 		"restart_required":  restartRequiredSettings(),
 		"yaml_bound_fields": yamlBoundSettings(),
-		"effective": map[string]any{
+	}
+	if includeEffective {
+		payload["effective"] = map[string]any{
 			"http":     s.deps.Config.HTTP,
 			"cache":    s.deps.Config.Cache,
 			"storages": s.deps.Config.Storages,
 			"workers":  s.deps.Config.Workers,
 			"auth":     s.deps.Config.Auth,
 			"plugins":  s.deps.Config.Plugins,
-		},
+		}
 	}
+	return payload
 }
 
 func (s *Server) pendingSettingsSnapshot() map[string]any {

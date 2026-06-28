@@ -229,6 +229,90 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 	}
 }
 
+func TestMapTrackOverlayPagesBeyondFirstTrackPage(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       cfg,
+		Plugins:      plugins.BuiltIns(),
+		Store:        store,
+		StoreBackend: "memory",
+	})
+	var lastTrackID string
+	for i := 0; i < 650; i++ {
+		name := fmt.Sprintf("track-%03d.gpx", i)
+		result, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+			StorageName:  "fixture",
+			StorageURL:   "fs://fixture/" + name,
+			RelativePath: name,
+			Name:         name,
+			Extension:    "gpx",
+			MIME:         "application/gpx+xml",
+			MediaKind:    "track",
+			SizeBytes:    100,
+			MTime:        time.Date(2026, 1, 1, 12, 0, i%60, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		trackID := result.Asset.ID
+		lastTrackID = trackID
+		lat := 40.0 + float64(i)/10000
+		points := []catalog.TrackPoint{
+			{TrackAssetID: trackID, RecordedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), Lat: lat, Lon: 44.0, Source: "test"},
+			{TrackAssetID: trackID, RecordedAt: time.Date(2026, 1, 1, 12, 1, 0, 0, time.UTC), Lat: lat + 0.001, Lon: 44.001, Source: "test"},
+		}
+		if err := store.UpsertTrackPoints(ctx, trackID, points); err != nil {
+			t.Fatal(err)
+		}
+		distance := 120.0
+		if err := store.UpsertGPSTrackSummary(ctx, catalog.TrackSummary{
+			TrackAssetID: trackID,
+			Name:         name,
+			PointCount:   len(points),
+			StartTime:    &points[0].RecordedAt,
+			EndTime:      &points[1].RecordedAt,
+			MinLat:       &points[0].Lat,
+			MinLon:       &points[0].Lon,
+			MaxLat:       &points[1].Lat,
+			MaxLon:       &points[1].Lon,
+			DistanceM:    distance,
+			SourceFormat: "gpx",
+		}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/map/tracks?limit=650&zoom=8&track_point_budget=20000", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("map tracks status %d body %s", rec.Code, rec.Body.String())
+	}
+	var collection struct {
+		Features     []map[string]any `json:"features"`
+		TrackOverlay struct {
+			Returned float64 `json:"returned"`
+			Matched  float64 `json:"matched"`
+		} `json:"track_overlay"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &collection); err != nil {
+		t.Fatal(err)
+	}
+	if len(collection.Features) != 650 || collection.TrackOverlay.Returned != 650 || collection.TrackOverlay.Matched != 650 {
+		t.Fatalf("expected all 650 tracks, got features=%d overlay=%#v", len(collection.Features), collection.TrackOverlay)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/map?track_id="+url.QueryEscape(lastTrackID)+"&zoom=8", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("map selected track status %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), lastTrackID) || !strings.Contains(rec.Body.String(), `"returned":1`) {
+		t.Fatalf("selected last-page track was not rendered: %s", rec.Body.String())
+	}
+}
+
 func TestComponentManagerAPIsAndSafeOperatorInputs(t *testing.T) {
 	store := catalog.NewMemoryStore()
 	cfg := config.Defaults()

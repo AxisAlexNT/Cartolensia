@@ -35,6 +35,7 @@ type App struct {
 	authn        auth.Authenticator
 	authz        auth.Authorizer
 	authService  *auth.LocalService
+	server       *server.Server
 }
 
 func New(ctx context.Context, configPath string) (*App, error) {
@@ -140,6 +141,7 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		app.authn = auth.DevNoAuth{}
 		app.authz = auth.DevNoAuth{}
 	}
+	app.server = app.buildServer()
 	if cfg.Workers.Enabled {
 		workerCfg, err := workerConfig(cfg.Workers)
 		if err != nil {
@@ -170,6 +172,9 @@ func New(ctx context.Context, configPath string) (*App, error) {
 		manager.Register("preview_generate", func(ctx context.Context, job *jobs.Job) error {
 			runner := preview.Runner{Registry: app.Registry, Store: app.Store, CacheDir: app.Config.Cache.Dir, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
 			return runner.Generate(ctx, job)
+		})
+		manager.Register("ai_backfill", func(ctx context.Context, job *jobs.Job) error {
+			return app.server.RunAIBackfillJob(ctx, job, manager.WorkerID(), manager.LeaseDuration())
 		})
 		manager.Start()
 		app.Workers = manager
@@ -204,6 +209,14 @@ func (a *App) Close() {
 }
 
 func (a *App) Handler() *server.Server {
+	if a.server != nil {
+		return a.server
+	}
+	a.server = a.buildServer()
+	return a.server
+}
+
+func (a *App) buildServer() *server.Server {
 	return server.New(server.Dependencies{
 		Version:       Version,
 		Config:        a.Config,

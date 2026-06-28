@@ -43,6 +43,7 @@ import {
   type KnowledgeChatResponse,
   type KnowledgeExtractionResult,
   type KnowledgeFact,
+  type KnowledgeLLMStatus,
   type KnowledgeRelation,
   type MonthBucket,
   type OCRBlock,
@@ -251,6 +252,7 @@ const knowledgeChatInput = ref("");
 const knowledgeChatConversationID = ref("");
 const knowledgeChat = ref<KnowledgeChatResponse | null>(null);
 const knowledgeChatBusy = ref(false);
+const knowledgeLLMStatus = ref<KnowledgeLLMStatus | null>(null);
 const uiLogs = ref<Array<{ id: number; level: string; message: string; created_at: string; stack?: string }>>([]);
 const consoleFilter = ref("");
 let uiLogSeq = 0;
@@ -298,6 +300,8 @@ const apiTokens = ref<APIToken[]>([]);
 const settings = ref<SettingsPayload | null>(null);
 const settingsTab = ref("general");
 const settingsMessage = ref("");
+const settingsEffectiveLoading = ref(false);
+const rawSettingsText = ref("");
 const readiness = ref<ReadinessPayload | null>(null);
 const pendingConfig = ref<Record<string, unknown>>({});
 const components = ref<ComponentRecord[]>([]);
@@ -435,11 +439,12 @@ const transcodePlannerMessage = ref("Plans write only to the configured Cartolen
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const aiWorkers = ref<Record<string, unknown> | null>(null);
 type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze";
+type AIHistoryKind = AIJobKind | "backfill";
 
 const aiMessage = ref("");
 const aiBusyKind = ref<AIJobKind | "">("");
 const aiLastResult = ref<Record<string, unknown> | null>(null);
-const aiActionHistory = ref<Array<{ id: string; kind: AIJobKind; status: string; summary: string; created_at: string }>>([]);
+const aiActionHistory = ref<Array<{ id: string; kind: AIHistoryKind; status: string; summary: string; created_at: string }>>([]);
 const assetAIActionStatus = ref<Record<string, { status: string; summary: string; job_id?: string }>>({});
 const aiSummary = ref<Record<string, unknown> | null>(null);
 const aiTagPayload = ref<Record<string, unknown> | null>(null);
@@ -453,6 +458,10 @@ const captionsPageQuery = ref("");
 const aiPredictionLimit = ref(500);
 const aiFaceLimit = ref(500);
 const faceClusterLimit = ref(200);
+
+function pushAIHistory(entry: { id: string; kind: AIHistoryKind; status: string; summary: string; created_at: string }) {
+	aiActionHistory.value = [entry, ...aiActionHistory.value].slice(0, 8);
+}
 const transcriptRows = ref<TranscriptRecord[]>([]);
 const transcriptQuery = ref("");
 const transcriptLoading = ref(false);
@@ -649,6 +658,14 @@ function setActive(next: string, updateURL = true) {
   }
   if ((route === "Knowledge Base" || route === "Knowledge Graph") && knowledgeFacts.value.length === 0 && knowledgeRelations.value.length === 0) {
     void loadKnowledgeBase();
+  }
+  if (route === "Knowledge Base") {
+    void refreshKnowledgeLLMStatus();
+  }
+  if (route === "Settings") {
+    void refreshSettingsTabData(settingsTab.value).catch((err) => {
+      settingsMessage.value = err instanceof Error ? err.message : String(err);
+    });
   }
   if (route !== "Asset Detail") {
     localStorage.setItem("cartolensia.route", route);
@@ -2818,6 +2835,10 @@ async function refresh() {
       return;
     }
     publicAssets.value = [];
+    if (active.value === "Settings") {
+      await refreshSettingsPage();
+      return;
+    }
     const [
       jobRows,
       jobStatData,
@@ -2975,10 +2996,154 @@ async function refresh() {
   }
 }
 
+function settingsTabNeedsEffective(tab: string): boolean {
+  return ["server", "storage", "auth", "ai", "raw"].includes(tab);
+}
+
+async function ensureSettingsEffectiveLoaded(force = false) {
+  if (settingsEffectiveLoading.value) return;
+  if (!force && settings.value?.effective && Object.keys(settings.value.effective).length > 0) return;
+  settingsEffectiveLoading.value = true;
+  try {
+    const payload = await api.settingsEffective();
+    const effective = (payload.config && typeof payload.config === "object" ? payload.config : payload) as Record<string, unknown>;
+    if (settings.value) {
+      settings.value.effective = effective;
+      initializePendingConfig(settings.value);
+    }
+    rawSettingsText.value = JSON.stringify({ effective, pending: pendingConfig.value }, null, 2);
+  } finally {
+    settingsEffectiveLoading.value = false;
+  }
+}
+
+async function refreshSelectedPluginSettings() {
+  if (plugins.value.length === 0) {
+    plugins.value = asArray(await api.plugins());
+  }
+  if (!selectedPluginSettingsId.value && plugins.value.length > 0) {
+    selectedPluginSettingsId.value = plugins.value[0].id;
+  }
+  const plugin = selectedPluginSettings.value;
+  if (!plugin || pluginSettingText.value[plugin.id]) return;
+  const payload = await api.pluginSettings(plugin.id).catch(() => ({ settings: {} }));
+  pluginSettingText.value[plugin.id] = JSON.stringify((payload.settings ?? {}) as Record<string, unknown>, null, 2);
+}
+
+async function refreshSettingsTabData(tab = settingsTab.value) {
+  if (settingsTabNeedsEffective(tab)) {
+    await ensureSettingsEffectiveLoaded();
+  }
+  switch (tab) {
+    case "storage":
+      storages.value = asArray(await api.storages());
+      break;
+    case "components": {
+      const componentStatusPayload = await api.componentStatus();
+      components.value = asArray(componentStatusPayload.components);
+      componentRoot.value = componentStatusPayload.root;
+      componentCounts.value = componentStatusPayload.counts ?? {};
+      break;
+    }
+    case "readiness":
+      readiness.value = await api.readiness();
+      break;
+    case "gps": {
+      const trackRows = await api.gpsTracks({ limit: trackPageSize, offset: 0, q: trackSearchQ.value.trim(), sort: "time_desc" });
+      tracks.value = asArray(trackRows);
+      tracksHasMore.value = tracks.value.length >= trackPageSize;
+      break;
+    }
+    case "map":
+      [mapStatus.value, tileSources.value] = await Promise.all([
+        api.mapStatus(),
+        api.tileSources()
+      ]);
+      break;
+    case "preview": {
+      const [previewStatus, previewEntries] = await Promise.all([api.previewStatus(), api.previewCache()]);
+      previewCacheStats.value = previewStatus.stats;
+      previewCache.value = asArray(previewEntries);
+      break;
+    }
+    case "search": {
+      const [placeCachePayload, editablePlacePayload] = await Promise.all([
+        api.searchPlaces(),
+        api.places(placeCacheQuery.value)
+      ]);
+      searchPlaceCache.value = placeCachePayload;
+      editablePlaces.value = asArray(editablePlacePayload.places);
+      break;
+    }
+    case "transcoding": {
+      const [transcodeCaps, presetRows, metricsStatus] = await Promise.all([
+        api.transcodingCapabilities(),
+        api.transcodingPresets(),
+        api.transcodingMetricsStatus()
+      ]);
+      transcodingCapabilities.value = transcodeCaps;
+      transcodePresets.value = asArray(presetRows);
+      transcodeMetricsPayload.value = metricsStatus;
+      break;
+    }
+    case "ai": {
+      const [ai, aiWorkerRows, vector] = await Promise.all([api.aiStatus(), api.aiWorkers(), api.vectorStatus()]);
+      aiStatus.value = ai;
+      aiWorkers.value = aiWorkerRows;
+      vectorStatus.value = vector;
+      break;
+    }
+    case "backups":
+      dbExports.value = asArray(await api.dbExports());
+      break;
+    case "plugins":
+      await refreshSelectedPluginSettings();
+      break;
+    case "raw":
+      if (settings.value?.effective) {
+        rawSettingsText.value = JSON.stringify({ effective: settings.value.effective, pending: pendingConfig.value }, null, 2);
+      }
+      break;
+  }
+}
+
+async function refreshSettingsPage() {
+  const [statData, backendStatus, settingsPayload] = await Promise.all([
+    api.stats(),
+    api.status(),
+    api.settings()
+  ]);
+  stats.value = statData;
+  backend.value = backendStatus;
+  settings.value = settingsPayload;
+  if (dryRunExtensions.value === supportedDiscoveryExtensions) {
+    const configuredExtensions = String(settingsPayload.runtime_settings?.["indexing.supported_extensions"] ?? "");
+    if (configuredExtensions.trim()) dryRunExtensions.value = configuredExtensions;
+  }
+  initializePendingConfig(settingsPayload);
+  await refreshSettingsTabData(settingsTab.value);
+  if (principal.value && backendStatus.auth?.mode === "local") {
+    apiTokens.value = await api.tokens().catch(() => []);
+  }
+}
+
+function selectSettingsTab(tabID: string) {
+  settingsTab.value = tabID;
+  void refreshSettingsTabData(tabID).catch((err) => {
+    settingsMessage.value = err instanceof Error ? err.message : String(err);
+  });
+}
+
 function initializePendingConfig(payload: SettingsPayload) {
   if (Object.keys(pendingConfig.value).length > 0) return;
   const pending = (payload.pending_settings?.pending ?? null) as Record<string, unknown> | null;
-  pendingConfig.value = pending ? JSON.parse(JSON.stringify(pending)) : JSON.parse(JSON.stringify(payload.effective ?? {}));
+  if (pending) {
+    pendingConfig.value = JSON.parse(JSON.stringify(pending));
+    return;
+  }
+  if (payload.effective && Object.keys(payload.effective).length > 0) {
+    pendingConfig.value = JSON.parse(JSON.stringify(payload.effective));
+  }
 }
 
 async function refreshAuth() {
@@ -3234,16 +3399,38 @@ async function requestAIJob(kind: AIJobKind) {
 		aiLastResult.value = result;
 		const summary = `${String(result.status ?? "completed")} · processed ${String(result.processed ?? 0)} / ${String(result.targets ?? 0)} · stored ${String(result.stored ?? 0)}${result.unsafe ? ` · ${String(result.unsafe)} need review` : ""}`;
 		aiMessage.value = summary;
-		aiActionHistory.value = [{ id: actionID, kind, status: String(result.status ?? "completed"), summary, created_at: new Date().toLocaleTimeString() }]
-			.concat(aiActionHistory.value)
-			.slice(0, 8);
+		pushAIHistory({ id: actionID, kind, status: String(result.status ?? "completed"), summary, created_at: new Date().toLocaleTimeString() });
     await refresh();
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		aiMessage.value = message;
-		aiActionHistory.value = [{ id: actionID, kind, status: "failed", summary: message, created_at: new Date().toLocaleTimeString() }]
-			.concat(aiActionHistory.value)
-			.slice(0, 8);
+		pushAIHistory({ id: actionID, kind, status: "failed", summary: message, created_at: new Date().toLocaleTimeString() });
+	} finally {
+		aiBusyKind.value = "";
+	}
+}
+
+async function enqueueAIBackfill() {
+	const actionID = `ai-backfill-${Date.now()}`;
+	aiBusyKind.value = "embed";
+	aiMessage.value = "Queueing durable missing-metadata AI backfill jobs...";
+	try {
+		const result = await api.aiBackfill({
+			limit_per_task: -1,
+			batch_size: 64,
+			production_backfill: true
+		});
+		aiLastResult.value = result;
+		const jobsQueued = Array.isArray(result.jobs) ? result.jobs.length : Number(result.task_count ?? 0);
+		const summary = `queued ${jobsQueued} durable AI backfill job(s); progress is tracked on Jobs`;
+		aiMessage.value = summary;
+		pushAIHistory({ id: actionID, kind: "backfill", status: "queued", summary, created_at: new Date().toLocaleTimeString() });
+		await refresh();
+		setActive("Jobs");
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		aiMessage.value = message;
+		pushAIHistory({ id: actionID, kind: "backfill", status: "failed", summary: message, created_at: new Date().toLocaleTimeString() });
 	} finally {
 		aiBusyKind.value = "";
 	}
@@ -3320,9 +3507,7 @@ async function runAssetAIAction(kind: AIJobKind, label: string, extra: Record<st
     const status = String(result.status ?? "completed");
     const summary = `${status} · processed ${String(result.processed ?? 0)} / ${String(result.targets ?? 1)} · stored ${String(result.stored ?? 0)}`;
     assetAIActionStatus.value[label] = { status, summary, job_id: String(result.job_id ?? "") };
-    aiActionHistory.value = [{ id: `${label}-${Date.now()}`, kind, status, summary, created_at: new Date().toLocaleTimeString() }]
-      .concat(aiActionHistory.value)
-      .slice(0, 8);
+    pushAIHistory({ id: `${label}-${Date.now()}`, kind, status, summary, created_at: new Date().toLocaleTimeString() });
     assetDetail.value = await api.asset(assetDetail.value.asset.id);
     jobs.value = await fetchVisibleJobs();
   } catch (err) {
@@ -3483,13 +3668,31 @@ async function askKnowledgeBase() {
   }
   knowledgeChatBusy.value = true;
   try {
+    await refreshKnowledgeLLMStatus();
     knowledgeChat.value = await api.knowledgeChat(message, knowledgeChatConversationID.value, 25);
     knowledgeChatConversationID.value = knowledgeChat.value.conversation_id ?? knowledgeChatConversationID.value;
-    knowledgeMessage.value = `Knowledge chat used ${knowledgeChat.value.tool_calls.length} local tool calls.`;
+    knowledgeMessage.value = `Knowledge chat used ${knowledgeChat.value.tool_calls.length} local tool calls · ${knowledgeChat.value.media.length} media citations.`;
   } catch (err) {
     knowledgeMessage.value = err instanceof Error ? err.message : String(err);
   } finally {
     knowledgeChatBusy.value = false;
+  }
+}
+
+async function refreshKnowledgeLLMStatus() {
+  try {
+    knowledgeLLMStatus.value = await api.knowledgeLLMStatus();
+  } catch (err) {
+    knowledgeLLMStatus.value = {
+      mode: knowledgeMode.value,
+      provider: runtimeTextSetting("knowledge.llm_provider", "ollama"),
+      endpoint: runtimeTextSetting("knowledge.llm_endpoint", ""),
+      model: runtimeTextSetting("knowledge.llm_model", ""),
+      configured: false,
+      reachable: false,
+      error: err instanceof Error ? err.message : String(err),
+      note: "Unable to load local LLM status."
+    };
   }
 }
 
@@ -4509,6 +4712,9 @@ async function savePendingSettings() {
 async function clearPendingSettings() {
   const result = await api.clearPendingSettings();
   if (settings.value) settings.value.pending_settings = result;
+  if (!settings.value?.effective || Object.keys(settings.value.effective).length === 0) {
+    await ensureSettingsEffectiveLoaded();
+  }
   pendingConfig.value = settings.value ? JSON.parse(JSON.stringify(settings.value.effective ?? {})) : {};
   settingsMessage.value = "Pending YAML changes cleared.";
 }
@@ -4737,7 +4943,11 @@ const mapFeatures = computed(() => {
   return Array.isArray(features) ? (features as Array<Record<string, unknown>>) : [];
 });
 
-const mapWarnings = computed(() => asArray(mapStatus.value?.warnings as string[] | null | undefined));
+const mapTrackOverlay = computed(() => (mapData.value?.track_overlay ?? {}) as Record<string, unknown>);
+const mapWarnings = computed(() => [
+  ...asArray(mapStatus.value?.warnings as string[] | null | undefined),
+  ...asArray(mapData.value?.warnings as string[] | null | undefined)
+]);
 const selectedPipelineStorage = computed(() => {
   const selected = pipelineStorage();
   if (selected === "all") {
@@ -4748,7 +4958,12 @@ const selectedPipelineStorage = computed(() => {
 const mapFeatureSummary = computed(() => {
   const clustering = String(mapData.value?.clustering ?? mapStatus.value?.clustering ?? "none");
   const tiles = String(mapStatus.value?.base_tiles_note ?? "Vector map layers are active.");
-  return `${mapFeatures.value.length} features · ${clustering} clustering · ${tiles}`;
+  const trackReturned = Number(mapTrackOverlay.value.returned ?? 0);
+  const trackMatched = Number(mapTrackOverlay.value.matched ?? trackReturned);
+  const trackNote = trackMatched > 0
+    ? `tracks ${trackReturned}/${trackMatched}${mapTrackOverlay.value.truncated ? " truncated" : ""}`
+    : "tracks 0";
+  return `${mapFeatures.value.length} features · ${trackNote} · ${clustering} clustering · ${tiles}`;
 });
 
 function mapQuery(): Record<string, string | number | boolean> {
@@ -4762,7 +4977,10 @@ function mapQuery(): Record<string, string | number | boolean> {
     width_px: width,
     height_px: height,
     marker_px: markerPx,
-    cluster_distance_px: markerPx * 2
+    cluster_distance_px: markerPx * 2,
+    asset_limit: 1000,
+    track_limit: 20000,
+    track_point_budget: 20000
   };
   if (mapMediaKind.value) query.media_kind = mapMediaKind.value;
   if (mapAlbumId.value) query.album_id = mapAlbumId.value;
@@ -7290,7 +7508,7 @@ onBeforeUnmount(() => {
 	              <div class="section-title">
 	                <div>
 	                  <h3>Models And Scoped Actions</h3>
-	                  <p class="muted">Buttons run on selected assets or the current 54-asset indexed real-peek scope. Nothing scans new files.</p>
+	                  <p class="muted">Quick buttons run on selected assets or a small current indexed scope. Durable backfill queues worker-owned jobs for missing metadata only.</p>
 	                </div>
 	                <span v-if="aiBusyKind" class="status-badge warn">
 	                  <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
@@ -7317,6 +7535,18 @@ onBeforeUnmount(() => {
 	                    Run {{ card.label }}
 	                  </button>
 	                </article>
+	              </div>
+	              <div class="actions mt-2">
+	                <button
+	                  type="button"
+	                  class="btn btn-primary"
+	                  :disabled="Boolean(aiBusyKind)"
+	                  @click="enqueueAIBackfill"
+	                >
+	                  <i class="bi bi-lightning-charge" aria-hidden="true"></i>
+	                  Backfill all missing AI metadata
+	                </button>
+	                <span class="muted">Creates durable queued jobs for classification, safety, captions, embeddings, faces, OCR, ASR, and audio analysis. Originals remain read-only.</span>
 	              </div>
 	              <div v-if="aiMessage" class="ai-result-panel">
 	                <strong>Latest action</strong>
@@ -7954,6 +8184,15 @@ onBeforeUnmount(() => {
               </button>
               <span class="muted">Mode: {{ knowledgeMode }}</span>
             </div>
+            <div v-if="knowledgeLLMStatus" class="llm-status-row">
+              <span :class="['status-badge', knowledgeLLMStatus.configured && knowledgeLLMStatus.reachable ? 'good' : knowledgeLLMStatus.configured ? 'warn' : '']">
+                {{ knowledgeLLMStatus.provider }} · {{ knowledgeLLMStatus.configured && knowledgeLLMStatus.reachable ? 'ready' : knowledgeLLMStatus.configured ? 'not reachable' : 'not configured' }}
+              </span>
+              <span class="muted">{{ knowledgeLLMStatus.model || 'no model selected' }} · {{ knowledgeLLMStatus.endpoint || 'no endpoint' }}</span>
+              <span v-if="knowledgeLLMStatus.models?.length" class="muted">{{ knowledgeLLMStatus.models.slice(0, 4).join(', ') }}</span>
+              <span v-if="knowledgeLLMStatus.error" class="status-badge warn">{{ knowledgeLLMStatus.error }}</span>
+              <button type="button" class="btn btn-sm btn-outline-secondary" @click="refreshKnowledgeLLMStatus">Check LLM</button>
+            </div>
             <div class="inline-form-row">
               <input v-model="knowledgeChatInput" type="search" placeholder="What was recorded near Lake Ladoga? / Что снято рядом с поездом?" @keyup.enter="askKnowledgeBase" />
               <button type="button" class="btn btn-primary" :disabled="knowledgeChatBusy" @click="askKnowledgeBase">Ask</button>
@@ -7962,7 +8201,17 @@ onBeforeUnmount(() => {
             <article v-if="knowledgeChat" class="knowledge-answer">
               <h4>Answer</h4>
               <pre>{{ knowledgeChat.answer }}</pre>
-              <div v-if="knowledgeChat.facts.length || knowledgeChat.relations.length" class="knowledge-citation-list">
+              <div v-if="knowledgeChat.media.length || knowledgeChat.facts.length || knowledgeChat.relations.length" class="knowledge-citation-list">
+                <a
+                  v-for="result in knowledgeChat.media.slice(0, 12)"
+                  :key="`chat-media-${result.asset.id}`"
+                  class="knowledge-citation"
+                  :href="assetHref(result.asset.id)"
+                  @click="openAssetLink($event, result.asset.id)"
+                >
+                  {{ result.asset.display_name }}
+                  <small>{{ result.asset.media_kind }} · {{ result.explanation }}</small>
+                </a>
                 <a
                   v-for="fact in knowledgeChat.facts.filter((item) => item.asset_id).slice(0, 12)"
                   :key="`chat-fact-${fact.id}`"
@@ -8525,7 +8774,7 @@ onBeforeUnmount(() => {
               :key="tab.id"
               type="button"
               :class="{ active: settingsTab === tab.id }"
-              @click="settingsTab = tab.id"
+              @click="selectSettingsTab(tab.id)"
             >
               {{ tab.label }} <span v-if="!tab.runtime" class="status-badge warn">restart</span>
             </button>
@@ -9172,7 +9421,8 @@ onBeforeUnmount(() => {
             <article class="settings-form settings-wide">
               <h3>Raw YAML / Effective Config</h3>
               <p class="muted">Raw view is for audit/debug. Use the tabs for editable controls.</p>
-              <pre class="geojson">{{ JSON.stringify({ effective: settings?.effective ?? {}, pending: pendingConfig }, null, 2) }}</pre>
+              <p v-if="settingsEffectiveLoading" class="muted">Loading effective config...</p>
+              <pre v-else class="geojson">{{ rawSettingsText || "{}" }}</pre>
             </article>
           </div>
 

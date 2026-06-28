@@ -125,8 +125,30 @@ func (s *Server) buildSearchPlan(raw string) searchPlan {
 		plan.Tokens = searchTokens(raw)
 		plan.Clauses = clausesFromTokens(plan.Tokens)
 	}
+	if dateTokens := dateConstraintTokens(raw); len(dateTokens) > 0 {
+		plan.Tokens = mergeSearchDateTokens(plan.Tokens, dateTokens)
+		plan.Clauses = clausesFromTokens(plan.Tokens)
+		plan.Executable = strings.Join(plan.Tokens, " ")
+		plan.Notes = append(plan.Notes, "Natural month/year words were translated to date range tokens.")
+	}
 	plan.Warnings = searchWarnings(plan.Tokens)
 	return plan
+}
+
+func mergeSearchDateTokens(tokens []string, dateTokens []string) []string {
+	if len(dateTokens) == 0 {
+		return tokens
+	}
+	filtered := make([]string, 0, len(tokens)+len(dateTokens))
+	for _, token := range tokens {
+		prefix, plain := splitSearchToken(token)
+		if prefix == "" && isNaturalDateWord(plain) {
+			continue
+		}
+		filtered = append(filtered, token)
+	}
+	filtered = append(filtered, dateTokens...)
+	return uniqueStrings(filtered)
 }
 
 func parseSQLLikeSearch(raw string) (string, []searchPlanClause, bool) {

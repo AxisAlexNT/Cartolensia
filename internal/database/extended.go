@@ -919,6 +919,168 @@ func (db *DB) QueryTrackPoints(ctx context.Context, query catalog.TrackPointQuer
 	return points, nil
 }
 
+func (db *DB) QueryTrackPointsBatch(ctx context.Context, query catalog.TrackPointBatchQuery) (map[string][]catalog.TrackPoint, error) {
+	trackIDs := compactDBStrings(query.TrackAssetIDs)
+	if len(trackIDs) == 0 {
+		return map[string][]catalog.TrackPoint{}, nil
+	}
+	maxPoints := query.MaxPointsPerTrack
+	if maxPoints <= 0 {
+		maxPoints = 500
+	}
+	if maxPoints > 5000 {
+		maxPoints = 5000
+	}
+	placeholders := make([]string, 0, len(trackIDs))
+	args := make([]any, 0, len(trackIDs)+1)
+	for i, trackID := range trackIDs {
+		args = append(args, trackID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d::uuid", i+1))
+	}
+	if maxPoints <= 4 {
+		rows, err := db.pool.Query(ctx, fmt.Sprintf(`
+			select track_asset_id::text, recorded_at, lat, lon, elevation_m, speed_mps, source, ordinal
+			from gps_track_render_points
+			where detail_level = 'overview' and track_asset_id = any(array[%s])
+			order by track_asset_id, ordinal
+		`, strings.Join(placeholders, ",")), args...)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string][]catalog.TrackPoint, len(trackIDs))
+		for rows.Next() {
+			var point catalog.TrackPoint
+			var ordinal int
+			if err := rows.Scan(&point.TrackAssetID, &point.RecordedAt, &point.Lat, &point.Lon, &point.ElevationM, &point.SpeedMPS, &point.Source, &ordinal); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[point.TrackAssetID] = append(out[point.TrackAssetID], point)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		var missing []string
+		for _, trackID := range trackIDs {
+			if len(out[trackID]) == 0 {
+				missing = append(missing, trackID)
+			}
+		}
+		if len(missing) == 0 {
+			return out, nil
+		}
+		fallback, err := db.queryTrackEndpointPoints(ctx, missing)
+		if err != nil {
+			return nil, err
+		}
+		for trackID, points := range fallback {
+			out[trackID] = points
+		}
+		return out, nil
+	}
+	args = append(args, maxPoints)
+	maxPointsArg := len(args)
+	rows, err := db.pool.Query(ctx, fmt.Sprintf(`
+		with ranked as (
+			select id, track_asset_id::text as track_asset_id, recorded_at, lat, lon, elevation_m, speed_mps, source,
+				row_number() over (partition by track_asset_id order by recorded_at nulls last, id) as rn,
+				count(*) over (partition by track_asset_id) as cnt
+			from track_points
+			where track_asset_id = any(array[%s])
+		), sampled as (
+			select *,
+				greatest(1, ceil(cnt::numeric / greatest($%d::int, 1))::int) as stride
+			from ranked
+		)
+		select id, track_asset_id, recorded_at, lat, lon, elevation_m, speed_mps, source
+		from sampled
+		where cnt <= $%d or rn = 1 or rn = cnt or ((rn - 1) %% stride) = 0
+		order by track_asset_id, rn
+	`, strings.Join(placeholders, ","), maxPointsArg, maxPointsArg), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]catalog.TrackPoint, len(trackIDs))
+	for rows.Next() {
+		var point catalog.TrackPoint
+		if err := rows.Scan(&point.ID, &point.TrackAssetID, &point.RecordedAt, &point.Lat, &point.Lon, &point.ElevationM, &point.SpeedMPS, &point.Source); err != nil {
+			return nil, err
+		}
+		out[point.TrackAssetID] = append(out[point.TrackAssetID], point)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) queryTrackEndpointPoints(ctx context.Context, trackIDs []string) (map[string][]catalog.TrackPoint, error) {
+	trackIDs = compactDBStrings(trackIDs)
+	if len(trackIDs) == 0 {
+		return map[string][]catalog.TrackPoint{}, nil
+	}
+	placeholders := make([]string, 0, len(trackIDs))
+	args := make([]any, 0, len(trackIDs))
+	for i, trackID := range trackIDs {
+		args = append(args, trackID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d::uuid", i+1))
+	}
+	rows, err := db.pool.Query(ctx, fmt.Sprintf(`
+			with selected(track_asset_id) as (
+				select unnest(array[%s])
+			), sampled as (
+				select p.*
+				from selected s
+				join lateral (
+					(select id, track_asset_id::text as track_asset_id, recorded_at, lat, lon, elevation_m, speed_mps, source, 1 as ordinal
+					 from track_points
+					 where track_asset_id = s.track_asset_id
+					 order by recorded_at nulls last, id
+					 limit 1)
+					union all
+					(select id, track_asset_id::text as track_asset_id, recorded_at, lat, lon, elevation_m, speed_mps, source, 2 as ordinal
+					 from track_points
+					 where track_asset_id = s.track_asset_id
+					 order by recorded_at desc nulls last, id desc
+					 limit 1)
+				) p on true
+			)
+			select id, track_asset_id, recorded_at, lat, lon, elevation_m, speed_mps, source
+			from sampled
+			order by track_asset_id, ordinal
+		`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]catalog.TrackPoint, len(trackIDs))
+	for rows.Next() {
+		var point catalog.TrackPoint
+		if err := rows.Scan(&point.ID, &point.TrackAssetID, &point.RecordedAt, &point.Lat, &point.Lon, &point.ElevationM, &point.SpeedMPS, &point.Source); err != nil {
+			return nil, err
+		}
+		out[point.TrackAssetID] = append(out[point.TrackAssetID], point)
+	}
+	return out, rows.Err()
+}
+
+func compactDBStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func (db *DB) QueryTrackAssets(ctx context.Context, query catalog.TrackAssetQuery) (catalog.AssetPage, error) {
 	limit, offset := normalizeDBPage(query.Limit, query.Offset)
 	tracks, err := db.ListGPSTracks(ctx, catalog.GPSTrackQuery{Limit: 500})

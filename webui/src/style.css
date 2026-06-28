@@ -493,7 +493,8 @@ td {
   text-overflow: ellipsis;
 }
 
-.status-badge.ok {
+.status-badge.ok,
+.status-badge.good {
   background: #dafbe1;
   border-color: #4ac26b;
   color: #116329;
@@ -2831,6 +2832,14 @@ td {
 
 .knowledge-page .settings-form {
   margin-bottom: 12px;
+}
+
+.llm-status-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
 }
 
 .knowledge-answer pre {

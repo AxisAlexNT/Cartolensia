@@ -700,6 +700,9 @@ func (db *DB) UpsertTrackPoints(ctx context.Context, trackAssetID string, points
 	if _, err := tx.Exec(ctx, `delete from track_points where track_asset_id=$1`, trackAssetID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `delete from gps_track_render_points where track_asset_id=$1`, trackAssetID); err != nil {
+		return err
+	}
 	for _, point := range points {
 		source := point.Source
 		if source == "" {
@@ -710,6 +713,40 @@ func (db *DB) UpsertTrackPoints(ctx context.Context, trackAssetID string, points
 			values($1, $2, $3, $4, $5, $6, $7)
 		`, trackAssetID, point.RecordedAt, point.Lat, point.Lon, point.ElevationM, point.SpeedMPS, source); err != nil {
 			return err
+		}
+	}
+	if len(points) > 0 {
+		overview := []struct {
+			ordinal int
+			point   catalog.TrackPoint
+		}{
+			{ordinal: 1, point: points[0]},
+		}
+		if len(points) > 1 {
+			overview = append(overview, struct {
+				ordinal int
+				point   catalog.TrackPoint
+			}{ordinal: 2, point: points[len(points)-1]})
+		}
+		for _, item := range overview {
+			source := item.point.Source
+			if source == "" {
+				source = "gpx"
+			}
+			if _, err := tx.Exec(ctx, `
+				insert into gps_track_render_points(track_asset_id, detail_level, ordinal, recorded_at, lat, lon, elevation_m, speed_mps, source)
+				values($1, 'overview', $2, $3, $4, $5, $6, $7, $8)
+				on conflict(track_asset_id, detail_level, ordinal) do update set
+					recorded_at=excluded.recorded_at,
+					lat=excluded.lat,
+					lon=excluded.lon,
+					elevation_m=excluded.elevation_m,
+					speed_mps=excluded.speed_mps,
+					source=excluded.source,
+					updated_at=now()
+			`, trackAssetID, item.ordinal, item.point.RecordedAt, item.point.Lat, item.point.Lon, item.point.ElevationM, item.point.SpeedMPS, source); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit(ctx)

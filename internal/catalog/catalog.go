@@ -216,6 +216,26 @@ type AssetPage struct {
 	Page   Page    `json:"page"`
 }
 
+type AIMissingQuery struct {
+	Task               string
+	MediaKind          string
+	Limit              int
+	Offset             int
+	MaxDurationSeconds float64
+}
+
+type AIAssetTaskStatus struct {
+	AssetID     string         `json:"asset_id"`
+	Task        string         `json:"task"`
+	Status      string         `json:"status"`
+	WorkerID    string         `json:"worker_id,omitempty"`
+	ModelName   string         `json:"model_name,omitempty"`
+	StoredCount int            `json:"stored_count"`
+	Error       string         `json:"error,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
 type TimestampCandidate struct {
 	Source     string    `json:"source"`
 	Raw        string    `json:"raw,omitempty"`
@@ -367,6 +387,11 @@ type TrackPointQuery struct {
 	TimeTo       *time.Time
 	Simplify     bool
 	MaxPoints    int
+}
+
+type TrackPointBatchQuery struct {
+	TrackAssetIDs     []string
+	MaxPointsPerTrack int
 }
 
 type TrackAssetQuery struct {
@@ -669,6 +694,8 @@ type Store interface {
 	ListAssets(context.Context) ([]Asset, error)
 	GetAsset(context.Context, string) (Asset, error)
 	QueryAssets(context.Context, AssetQuery) (AssetPage, error)
+	QueryAIMissingAssets(context.Context, AIMissingQuery) (AssetPage, error)
+	UpsertAIAssetTaskStatus(context.Context, AIAssetTaskStatus) (AIAssetTaskStatus, error)
 	UpdateAssetMetadata(context.Context, string, *time.Time, map[string]any) error
 	UpdateLocationHash(context.Context, string, string, int64) error
 	Stats(context.Context) (Stats, error)
@@ -679,6 +706,7 @@ type Store interface {
 	ListGPSTracks(context.Context, GPSTrackQuery) ([]TrackSummary, error)
 	UpdateGPSTrackMetadata(context.Context, string, string, string) error
 	QueryTrackPoints(context.Context, TrackPointQuery) ([]TrackPoint, error)
+	QueryTrackPointsBatch(context.Context, TrackPointBatchQuery) (map[string][]TrackPoint, error)
 	QueryTrackAssets(context.Context, TrackAssetQuery) (AssetPage, error)
 	TrackCandidates(context.Context, string) ([]TrackCandidate, error)
 	SaveTrackLink(context.Context, TrackLink) (TrackLink, error)
@@ -780,6 +808,7 @@ type MemoryStore struct {
 	audioFeatures    map[string]AudioFeatures
 	frameCaptions    map[string][]VideoFrameCaption
 	documentText     map[string]DocumentText
+	aiTaskStatuses   map[string]AIAssetTaskStatus
 	components       map[string]Component
 	componentEvents  map[string][]ComponentEvent
 	jobs             map[string]jobs.Job
@@ -810,6 +839,7 @@ func NewMemoryStore() *MemoryStore {
 		audioFeatures:    make(map[string]AudioFeatures),
 		frameCaptions:    make(map[string][]VideoFrameCaption),
 		documentText:     make(map[string]DocumentText),
+		aiTaskStatuses:   make(map[string]AIAssetTaskStatus),
 		components:       make(map[string]Component),
 		componentEvents:  make(map[string][]ComponentEvent),
 		jobs:             make(map[string]jobs.Job),

@@ -264,6 +264,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/knowledge/relations", s.handleKnowledgeRelations)
 	s.mux.HandleFunc("/api/v1/knowledge/extract", s.handleKnowledgeExtract)
 	s.mux.HandleFunc("/api/v1/knowledge/chat", s.handleKnowledgeChat)
+	s.mux.HandleFunc("/api/v1/knowledge/llm/status", s.handleKnowledgeLLMStatus)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
 	s.mux.HandleFunc("/api/v1/places/reverse", s.handlePlaceReverse)
@@ -305,6 +306,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/tags", s.handleAITags)
 	s.mux.HandleFunc("/api/v1/ai/faces", s.handleAIFaces)
 	s.mux.HandleFunc("/api/v1/ai/safety", s.handleAISafety)
+	s.mux.HandleFunc("/api/v1/ai/backfill/start", s.handleAIBackfillStart)
 	s.mux.HandleFunc("/api/v1/ai/jobs/classify", s.handleAIJobRequest("classify_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/faces", s.handleAIJobRequest("detect_faces"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/safety", s.handleAIJobRequest("safety_nsfw"))
@@ -3379,11 +3381,7 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	if zoom <= 0 {
 		zoom = 10
 	}
-	limit, _ := strconv.Atoi(query.Get("limit"))
-	if limit <= 0 || limit > 5000 {
-		limit = 1000
-	}
-	trackFeatures, err := s.mapTrackFeatures(r)
+	trackResult, err := s.mapTrackFeatures(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -3393,11 +3391,27 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	features := append(trackFeatures, assetFeatures...)
-	if len(features) > limit {
-		features = features[:limit]
+	features := append(trackResult.Features, assetFeatures...)
+	warnings := []string{}
+	if trackResult.Truncated {
+		warnings = append(warnings, fmt.Sprintf("Track overlay truncated at %d tracks; narrow the date/bbox filter or raise track_limit for this request.", trackResult.Limit))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"type": "FeatureCollection", "features": features, "clustering": clustering, "zoom": zoom, "limit": limit})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"type":        "FeatureCollection",
+		"features":    features,
+		"clustering":  clustering,
+		"zoom":        zoom,
+		"asset_count": len(assetFeatures),
+		"track_overlay": map[string]any{
+			"matched":          trackResult.Matched,
+			"returned":         trackResult.Returned,
+			"truncated":        trackResult.Truncated,
+			"limit":            trackResult.Limit,
+			"point_budget":     trackResult.PointBudget,
+			"points_per_track": trackResult.PointsPerTrack,
+		},
+		"warnings": warnings,
+	})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -3726,6 +3740,12 @@ type aiInferencePayload struct {
 }
 
 func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req aiJobRequest, onProgress func(aiJobResult)) (aiJobResult, error) {
+	return s.runAIJobWithMediaURL(ctx, kind, req, func(asset catalog.Asset) string {
+		return s.aiMediaURL(r, asset.ID)
+	}, onProgress)
+}
+
+func (s *Server) runAIJobWithMediaURL(ctx context.Context, kind string, req aiJobRequest, mediaURL func(catalog.Asset) string, onProgress func(aiJobResult)) (aiJobResult, error) {
 	endpoint, workerID, ok := aiConfiguredWorkerEndpoint(ctx)
 	result := aiJobResult{
 		Kind:         kind,
@@ -3755,6 +3775,9 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 	if apiPath == "" {
 		return result, fmt.Errorf("unsupported AI job kind %q", kind)
 	}
+	if mediaURL == nil {
+		mediaURL = func(asset catalog.Asset) string { return s.aiWorkerMediaURL(asset.ID) }
+	}
 	for _, asset := range assets {
 		if !aiSupportsAsset(kind, asset) {
 			result.Skipped++
@@ -3766,7 +3789,7 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		}
 		payload := map[string]any{
 			"asset_id":  asset.ID,
-			"media_url": s.aiMediaURL(r, asset.ID),
+			"media_url": mediaURL(asset),
 			"options": map[string]any{
 				"safety_threshold": req.SafetyThreshold,
 				"language":         req.Language,
@@ -3783,12 +3806,29 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		response, err := callAISidecarWithTimeout(ctx, endpoint+apiPath, payload, timeout)
 		if err != nil {
 			result.Errors = append(result.Errors, asset.ID+": "+err.Error())
+			_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, err.Error(), nil)
+			if onProgress != nil {
+				onProgress(result)
+			}
+			continue
+		}
+		if response.Status != "ok" {
+			reason := strings.TrimSpace(response.Reason)
+			if reason == "" {
+				reason = "AI sidecar returned status " + response.Status
+			}
+			result.Errors = append(result.Errors, asset.ID+": "+reason)
+			_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, reason, summarizeAIMetadata(response.Metadata))
 			if onProgress != nil {
 				onProgress(result)
 			}
 			continue
 		}
 		stored, unsafe := s.persistAIResponse(ctx, workerID, kind, asset.ID, response, req)
+		_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "succeeded", stored, "", map[string]any{
+			"model":  aiModelName(response.Metadata, kind),
+			"reason": response.Reason,
+		})
 		result.Processed++
 		result.Stored += stored
 		if unsafe {
@@ -3811,6 +3851,23 @@ func (s *Server) runAIJob(ctx context.Context, r *http.Request, kind string, req
 		result.Status = "failed"
 	}
 	return result, nil
+}
+
+func (s *Server) markAIAssetTaskStatus(ctx context.Context, assetID, workerID, kind, status string, stored int, errorText string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	_, err := s.deps.Store.UpsertAIAssetTaskStatus(ctx, catalog.AIAssetTaskStatus{
+		AssetID:     assetID,
+		Task:        kind,
+		Status:      status,
+		WorkerID:    workerID,
+		ModelName:   stringFromAny(metadata["model"]),
+		StoredCount: stored,
+		Error:       errorText,
+		Metadata:    metadata,
+	})
+	return err
 }
 
 func (s *Server) resolveAIAssets(ctx context.Context, kind string, req aiJobRequest) ([]catalog.Asset, error) {
@@ -4001,6 +4058,18 @@ func (s *Server) aiMediaURL(r *http.Request, assetID string) string {
 		host = strings.TrimPrefix(s.deps.Config.HTTP.Addr, "http://")
 	}
 	return scheme + "://" + host + "/api/v1/media/" + assetID + "/original"
+}
+
+func (s *Server) aiWorkerMediaURL(assetID string) string {
+	if token := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_MEDIA_TOKEN")); token != "" {
+		base := strings.TrimRight(strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_MEDIA_BASE_URL")), "/")
+		if base == "" {
+			base = "http://127.0.0.1" + listenPortForURL(s.deps.Config.HTTP.Addr, ":18080")
+		}
+		return base + "/api/v1/ai-media/" + url.PathEscape(assetID) + "/original?token=" + url.QueryEscape(token)
+	}
+	base := "http://127.0.0.1" + listenPortForURL(s.deps.Config.HTTP.Addr, ":18080")
+	return base + "/api/v1/media/" + url.PathEscape(assetID) + "/original"
 }
 
 func listenPortForURL(addr, fallback string) string {

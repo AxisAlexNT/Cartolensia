@@ -3311,6 +3311,67 @@ Safety confirmation:
 - no commit
 - no push
 
+## 2026-06-28 Durable Worker-Owned AI Backfill
+
+Implemented:
+
+- Added `ai_asset_task_status` migration so successful zero-output AI runs are recorded without polluting OCR/caption/search rows.
+- Added `QueryAIMissingAssets` to the catalog contract with PostgreSQL-backed missing-target selection for:
+  - classification;
+  - safety/NSFW;
+  - captions;
+  - embeddings;
+  - face detection;
+  - OCR;
+  - audio features;
+  - audio/video transcription.
+- Added durable `ai_backfill` worker jobs:
+  - jobs are claimed by the existing PostgreSQL worker queue;
+  - progress/counters/logs are visible in Jobs;
+  - cancellation uses the existing job cancellation path;
+  - each task repeatedly pulls only assets still missing that output;
+  - old completed outputs and new zero-output task markers prevent endless reprocessing.
+- Added `POST /api/v1/ai/backfill/start`.
+- Added a Base AI button, `Backfill all missing AI metadata`, which queues one durable backfill job per task instead of holding a browser request open.
+- Refactored API AI execution so synchronous asset actions and worker backfills share the same sidecar call and persistence path.
+
+Validation:
+
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Remote deployment:
+
+- Built and deployed a new rjazhenka release: `/opt/cartolensia/releases/local-20260628T-ai-backfill`.
+- Restarted `cartolensia`; PostgreSQL and AI sidecar remained active.
+- Migration applied on startup through embedded migrations.
+- Increased production worker concurrency from `2` to `6` so discovery, metadata, hash, and multiple AI lanes can progress together.
+- Enqueued durable production AI backfill with no per-task limit and conservative batch size `64`.
+
+Remote validation:
+
+- `cartolensia`, `cartolensia-ai`, and `cartolensia-postgres` are active.
+- Authenticated stats after deploy: about `558,898` assets, `443,933` photos, `28,580` videos, `8,781` audio, `133,635` documents, `5,521` tracks, about `12.56 TB`.
+- AI status: enabled, CUDA active, pgvector already active, sidecar reachable.
+- Active durable AI backfill jobs include classification, safety, captions, embeddings, faces, OCR, audio features, and audio transcript tasks.
+- GPU check during backfill: RTX 4060 Ti around `73%` utilization, about `3.1 GB / 16 GB` VRAM used.
+
+Known limitations:
+
+- Sparse per-batch AI errors remain for unreadable/problem assets; jobs continue and count them instead of failing the whole backfill.
+- Existing pre-patch synchronous audit jobs can remain visible as stale `api-ai` history until canceled/expired; new production backfill uses `ai_backfill` worker jobs.
+- Current AI worker parallelism is process/job-level, not a full VRAM-aware scheduler. The new durable jobs unblock production-scale operation, but a future per-device scheduler can improve model residency and batching.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to read-only originals or SMB/NAS sources
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
 ## 2026-06-28 AI Targeting, Knowledge UI, And Remote Production Stabilization
 
 Implemented:
@@ -4222,3 +4283,216 @@ Safety confirmation:
 - no missing marking
 - no commit
 - no push
+
+## 2026-06-28 Durable Worker-Owned AI Backfill
+
+Implemented:
+
+- Added a durable `ai_backfill` job kind handled by the normal persistent worker pool.
+- Added `POST /api/v1/ai/backfill/start`, which expands one operator action into separate missing-work jobs for classification, safety, captions, embeddings, face detection, OCR, audio features, audio transcription, and video-audio transcription.
+- Added PostgreSQL table `ai_asset_task_status` to remember per-asset task outcomes, including successful zero-output runs such as no OCR text or no detected faces.
+- Added catalog/store APIs for querying missing AI work in bounded batches and for upserting per-asset task status.
+- Refactored AI execution so synchronous asset actions and durable worker jobs share the same sidecar call and persistence path.
+- Added the Base AI button `Backfill all missing AI metadata`; it queues durable jobs and sends the user to Jobs.
+- Updated operations and architecture docs for the durable backfill model.
+
+Validation:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/catalog ./internal/database ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Remote deployment:
+
+- Rebuilt the backend binary and WebUI locally.
+- Installed the updated release under `/opt/cartolensia/releases/local-20260628T-ai-backfill` on rjazhenka.
+- Switched `/opt/cartolensia/current` and restarted `cartolensia` only; PostgreSQL and AI sidecar remained active.
+- Increased `workers.max_concurrency` to `6` for the production host so metadata/hash work and multiple AI lanes can progress together.
+- Queued full missing-metadata backfill with `limit_per_task=-1`, `batch_size=64`, `max_audio_seconds=2700`, and `max_video_seconds=900`.
+
+Current remote status at the latest poll:
+
+- Services active: `cartolensia`, `cartolensia-ai`, `cartolensia-postgres`.
+- GPU active: NVIDIA GeForce RTX 4060 Ti, about 62% utilization, about 3.1 GiB VRAM used at poll time.
+- Active jobs include:
+  - `hash`: `189705 / 348589`
+  - `metadata_enrich`: `26203 / 558898`
+  - durable `ai_backfill` lanes for classification, safety, captions, embeddings, faces, OCR, audio features, and transcription.
+- `ai_asset_task_status` already contains task outcomes, including:
+  - `classify_image`: `1607` succeeded, `57` failed
+  - `safety_nsfw`: `1607` succeeded, `57` failed
+  - `describe_image`: `1371` succeeded, `54` failed
+  - `embed_image`: `6543` succeeded, `80` failed
+  - `detect_faces`: `7270` succeeded, `80` failed
+  - `ocr_image`: `989` succeeded, `35` failed
+  - `analyze_audio`: `147` succeeded, `24` failed
+  - `transcribe_audio`: `15` succeeded, `22` failed
+- Current metadata output counts:
+  - AI predictions total: `67068`
+  - OCR predictions: `5469`
+  - captions: `6634`
+  - faces: `5341`
+  - embeddings: `10986`
+  - transcripts: `474`
+  - audio features: `2908`
+
+Known limitations:
+
+- Some older `api-ai` jobs from the previous synchronous path can still appear in Jobs history. New archive-wide work should use `ai_backfill`.
+- Backfill is now durable and parallel by worker lane, but the next performance pass should add a device-aware scheduler that explicitly budgets VRAM and prioritizes interactive LLM/search work over background batches.
+- Individual unreadable/problem assets are counted as task failures; the jobs continue and can be retried later after investigation.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to Samba/originals
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-28 Map Track Overlay Count And Performance Fix
+
+Implemented:
+
+- Fixed the map track overlay endpoint so it pages through parsed `gps_tracks` summaries instead of inheriting the normal 200/500-row list cap.
+- Fixed selected-track rendering so a `track_id` outside the first GPS-track page is fetched directly with `GetTrack`.
+- Split map asset and track limits: `/api/v1/map` now uses `asset_limit` for media points and `track_limit` for track overlays, so media limits no longer truncate track lines.
+- Added `track_overlay` response metadata with matched/returned/truncated counts, point budget, and points-per-track for both `/api/v1/map` and `/api/v1/map/tracks`.
+- Fixed `/api/v1/map/status` to count parsed GPS/KML/KMZ summaries by pages instead of reporting only the first capped page.
+- Added a compact PostgreSQL `gps_track_render_points` table for map overview drawing. New parsed tracks populate two render points automatically, and overview map requests use this cache before falling back to the full `track_points` table.
+- Lowered the default all-track overlay point budget to `20000` so large libraries use the overview path by default while selected tracks still draw with detailed geometry.
+- Added regression coverage for more than one GPS-track page and for selected tracks outside the first page.
+
+Validation:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/catalog ./internal/database ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Remote production validation:
+
+- Deployed the rebuilt backend/WebUI to rjazhenka as `/opt/cartolensia/releases/local-20260628T-map-overlay-v5`.
+- Restarted only the Cartolensia service; PostgreSQL, existing metadata, jobs, and originals were preserved.
+- Backfilled `9468` local DB render points for existing parsed tracks in about `9.0 s`.
+- Authenticated checks after backfill:
+  - `/api/v1/map/status`: `5521` track-like assets, `4736` parsed drawable-track summaries counted in `0.473 s`.
+  - `/api/v1/map/tracks?limit=6000&zoom=8&track_point_budget=20000`: `4734` track features returned from `4736` parsed summaries in `0.117 s`, no truncation.
+  - `/api/v1/map?zoom=8&asset_limit=1000&track_limit=20000&track_point_budget=20000`: `4934` total features, including `4734` track features, in `0.274 s`, no truncation.
+- The two parsed summaries not returned as map features have `point_count=0` (`12.07.2016_12_42_38.gpx` and `12.07.2016_12_42_38_3.kml`), so they cannot draw lines until reparsed with coordinates.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to Samba/originals
+- only local Cartolensia DB metadata was added for the render-point cache
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-28 Settings Page Freeze Fix
+
+Root cause:
+
+- Opening Settings used the generic full-page `refresh()` path, which fetched unrelated production-scale data such as map GeoJSON, GPS tracks, AI prediction pages, place cache data, readiness, preview cache data, and plugin settings.
+- `/api/v1/settings` also included effective YAML-bound config in the default payload, and the frontend deep-copied that into `pendingConfig` even when the Raw/YAML tabs were not open.
+
+Implemented:
+
+- Made `/api/v1/settings` lightweight by default. It now omits effective config unless `include_effective=1` is explicitly requested.
+- Added lazy frontend loading for `/api/v1/settings/effective` only when tabs that edit/review YAML-bound config are opened (`Server`, `Storage`, `Auth`, `AI`, `Raw`).
+- Added a Settings-specific refresh path that initially fetches only stats, backend status, lightweight settings, and local auth tokens.
+- Moved Settings tab data to on-demand fetches:
+  - Components only on Components tab.
+  - Readiness only on Readiness tab.
+  - GPS tracks only on GPS tab.
+  - Map/tile state only on Map tab.
+  - Preview cache only on Preview tab.
+  - Search/place cache only on Search tab.
+  - Transcoding data only on Transcoding tab.
+  - AI/vector status only on AI tab.
+  - Plugin settings only for the selected plugin on Plugins tab.
+- Raw config rendering now uses a precomputed text buffer instead of template-time `JSON.stringify(...)` on every render.
+
+Validation:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/database ./internal/catalog`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Remote production validation:
+
+- Deployed to rjazhenka as `/opt/cartolensia/releases/local-20260628T-settings-fast`.
+- Restarted only the Cartolensia service.
+- Authenticated endpoint timings on rjazhenka:
+  - `/api/v1/settings`: `3193` bytes, `0.002 s`, no `effective` field.
+  - `/api/v1/settings?include_effective=1`: `6048` bytes, `0.002 s`.
+  - `/api/v1/settings/effective`: `4903` bytes, `0.002 s`.
+  - Settings initial API path (`stats`, `backend/status`, lightweight `settings`, `auth/tokens`): `0.571 s` total.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`
+- no writes to Samba/originals
+- no DB reset
+- no missing marking
+- no commit
+- no push
+
+## 2026-06-28 Local LLM Chat/Agent Hardening
+
+Implemented a safer local LLM path for Ask Cartolensia:
+
+- added `/api/v1/knowledge/llm/status` to report configured mode, provider, endpoint, model, reachable state, and known model IDs when the runtime exposes them;
+- extended Knowledge chat responses with clickable media citations and optional read-only SQL tool summaries;
+- added a local LLM tool planner that can request only allowlisted tools: bounded media search, knowledge fact search, knowledge relation search, and guarded read-only SQL over `cartolensia_search_*` views;
+- kept Cartolensia as the policy enforcement point: the model never receives database credentials or write-capable tools, and generated SQL still passes through the existing read-only allowlist, timeout, and row limit;
+- improved vLLM/OpenAI-compatible URL handling so both `http://host:8000` and `http://host:8000/v1` work;
+- added Ollama keep-alive/low-temperature options based on the configured idle unload setting;
+- improved Russian month-range parsing so direct searches like `kind:photo май-август 2025` add a `2025-05..2025-08` date token instead of treating the month range only as free text;
+- updated Knowledge Base UI with local LLM readiness status and media citation cards.
+
+Validation so far:
+
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed locally.
+- `npm --prefix webui run build` passed locally.
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/database` passed locally after adding restart-safe LLM env defaults.
+
+Additional implementation:
+
+- Local LLM defaults can now be supplied at process start:
+  - `CARTOLENSIA_SEARCH_RUNNER_MODE`
+  - `CARTOLENSIA_KNOWLEDGE_RUNNER_MODE`
+  - `CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER`
+  - `CARTOLENSIA_KNOWLEDGE_LLM_ENDPOINT`
+  - `CARTOLENSIA_KNOWLEDGE_LLM_MODEL`
+  - `CARTOLENSIA_KNOWLEDGE_LLM_TIMEOUT_SECONDS`
+  - `CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES`
+  - `CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS`
+- This keeps local LLM mode restart-safe for production systemd/container deployments while preserving in-session Settings overrides.
+
+Remote production work:
+
+- Started a local Ollama runtime in Docker on rjazhenka with data under `/var/lib/cartolensia/ollama`.
+- Pulled `qwen3:8b` successfully (`5.2 GB`, Q4_K_M, reported by Ollama as `8.2B` parameters).
+- Deployed the LLM-enabled backend/WebUI to `/opt/cartolensia/releases/local-20260628T-llm-chat`.
+- Corrected a deployment mistake where an overlay `rsync --delete` removed bundle support files such as `bin/cartolensia-env`; restored the release from `/opt/cartolensia/releases/local-20260628T-settings-fast`, overlaid the new build without deletion, and restarted Cartolensia back on the PostgreSQL store.
+- Verified `/api/v1/knowledge/llm/status` sees the Ollama endpoint and the `qwen3:8b` model when runtime settings are active.
+
+Remaining remote action:
+
+- The last SSH deployment/configuration command was blocked by the platform approval/usage gate before the restart-safe environment file could be installed on rjazhenka. The required next remote action is to set the `CARTOLENSIA_KNOWLEDGE_*` environment variables for the `cartolensia` service, restart the service, and re-run an authenticated `/api/v1/knowledge/chat` probe.
+- No workaround was attempted after the remote command was rejected.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone` or originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.

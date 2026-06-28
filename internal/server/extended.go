@@ -495,22 +495,22 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 		}
 		stats, _ := s.deps.Store.Stats(r.Context())
 		geoAssets, _ := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{Limit: 1})
-		tracks, _ := s.deps.Store.ListGPSTracks(r.Context(), catalog.GPSTrackQuery{Limit: 10000})
+		trackCount, tracksTruncated := s.countGPSTrackSummaries(r.Context(), 100000)
 		geotaggedCount := 0
 		if len(geoAssets) > 0 {
 			geotaggedCount = -1
-		}
-		if allGeo, err := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{Limit: 10000}); err == nil {
-			geotaggedCount = len(allGeo)
 		}
 		warnings := []string{}
 		if stats.Assets > 0 && geotaggedCount == 0 {
 			warnings = append(warnings, "No geotagged assets are indexed yet. Run metadata enrichment or choose media with EXIF/GPS.")
 		}
-		if stats.Tracks == 0 && len(tracks) == 0 {
+		if stats.Tracks == 0 && trackCount == 0 {
 			warnings = append(warnings, "No GPX/GPS tracks are indexed in the current scan.")
-		} else if stats.Tracks > 0 && len(tracks) == 0 {
+		} else if stats.Tracks > 0 && trackCount == 0 {
 			warnings = append(warnings, fmt.Sprintf("%d track-like assets are indexed, but no parsed GPS/KML/KMZ/GPZ summaries exist yet. Run metadata enrichment for track files.", stats.Tracks))
+		}
+		if tracksTruncated {
+			warnings = append(warnings, "Parsed track count is capped in status; use GPS/KML Tracks or map overlay metadata for exact filtered pages.")
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"backend":          "geojson",
@@ -523,7 +523,8 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			"indexed_assets":   stats.Assets,
 			"geotagged_assets": geotaggedCount,
 			"track_assets":     stats.Tracks,
-			"tracks":           len(tracks),
+			"tracks":           trackCount,
+			"tracks_truncated": tracksTruncated,
 			"warnings":         warnings,
 		})
 	case "tile-sources":
@@ -556,15 +557,45 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w)
 			return
 		}
-		features, err := s.mapTrackFeatures(r)
+		result, err := s.mapTrackFeatures(r)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, geoFeatureCollection(features, "none", queryInt(r, "zoom", 10)))
+		collection := geoFeatureCollection(result.Features, "none", queryInt(r, "zoom", 10))
+		collection["track_overlay"] = map[string]any{
+			"matched":          result.Matched,
+			"returned":         result.Returned,
+			"truncated":        result.Truncated,
+			"limit":            result.Limit,
+			"point_budget":     result.PointBudget,
+			"points_per_track": result.PointsPerTrack,
+		}
+		if result.Truncated {
+			collection["warnings"] = []string{fmt.Sprintf("Track overlay truncated at %d tracks; narrow the date/bbox filter or raise track_limit for this request.", result.Limit)}
+		}
+		writeJSON(w, http.StatusOK, collection)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) countGPSTrackSummaries(ctx context.Context, max int) (int, bool) {
+	if max <= 0 {
+		max = 100000
+	}
+	total := 0
+	for total < max {
+		page, err := s.deps.Store.ListGPSTracks(ctx, catalog.GPSTrackQuery{Limit: 500, Offset: total})
+		if err != nil || len(page) == 0 {
+			return total, false
+		}
+		total += len(page)
+		if len(page) < 500 {
+			return total, false
+		}
+	}
+	return total, true
 }
 
 func (s *Server) handleDiscoveryDryRun(w http.ResponseWriter, r *http.Request) {
@@ -936,7 +967,7 @@ func (s *Server) mapAssetFeatures(r *http.Request) ([]map[string]any, string, er
 	if err != nil {
 		return nil, "", err
 	}
-	limit, _ := strconv.Atoi(query.Get("limit"))
+	limit, _ := strconv.Atoi(firstNonEmpty(query.Get("asset_limit"), query.Get("limit")))
 	offset, _ := strconv.Atoi(query.Get("offset"))
 	geoAssets, err := s.deps.Store.QueryAssetGeo(r.Context(), catalog.GeoQuery{
 		BBox:      bboxPtr,
@@ -993,34 +1024,55 @@ func (s *Server) mapAssetFeatures(r *http.Request) ([]map[string]any, string, er
 	return features, clustering, nil
 }
 
-func (s *Server) mapTrackFeatures(r *http.Request) ([]map[string]any, error) {
+type mapTrackFeatureResult struct {
+	Features       []map[string]any
+	Matched        int
+	Returned       int
+	Truncated      bool
+	Limit          int
+	PointBudget    int
+	PointsPerTrack int
+}
+
+func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error) {
 	query, err := gpsTrackQueryFromURL(r)
 	if err != nil {
-		return nil, err
+		return mapTrackFeatureResult{}, err
 	}
 	selected := csvSet(r.URL.Query().Get("track_ids"))
 	if r.URL.Query().Get("track_id") != "" {
 		selected[r.URL.Query().Get("track_id")] = struct{}{}
 	}
-	tracks, err := s.deps.Store.ListGPSTracks(r.Context(), query)
+	trackLimit := mapTrackLimit(r)
+	tracks, truncated, err := s.mapTrackSummaries(r.Context(), query, selected, trackLimit)
 	if err != nil {
-		return nil, err
+		return mapTrackFeatureResult{}, err
 	}
 	zoom := queryInt(r, "zoom", 10)
+	pointBudget := mapTrackPointBudget(r)
+	pointsPerTrack := maxTrackPointsForZoom(zoom)
+	if len(tracks) > 0 && len(selected) == 0 {
+		budgeted := pointBudget / len(tracks)
+		if budgeted < 4 {
+			budgeted = 4
+		}
+		if budgeted < pointsPerTrack {
+			pointsPerTrack = budgeted
+		}
+	}
 	features := make([]map[string]any, 0, len(tracks))
+	trackIDs := make([]string, 0, len(tracks))
 	for _, summary := range tracks {
-		if len(selected) > 0 {
-			if _, ok := selected[summary.TrackAssetID]; !ok {
-				continue
-			}
-		}
-		maxPoints := maxTrackPointsForZoom(zoom)
-		points, err := s.deps.Store.QueryTrackPoints(r.Context(), catalog.TrackPointQuery{TrackAssetID: summary.TrackAssetID, Simplify: true, MaxPoints: maxPoints})
-		if err != nil {
-			continue
-		}
-		if len(points) > maxPoints {
-			points = gpx.Simplify(points, maxPoints)
+		trackIDs = append(trackIDs, summary.TrackAssetID)
+	}
+	pointsByTrack, err := s.deps.Store.QueryTrackPointsBatch(r.Context(), catalog.TrackPointBatchQuery{TrackAssetIDs: trackIDs, MaxPointsPerTrack: pointsPerTrack})
+	if err != nil {
+		return mapTrackFeatureResult{}, err
+	}
+	for _, summary := range tracks {
+		points := pointsByTrack[summary.TrackAssetID]
+		if len(points) > pointsPerTrack {
+			points = gpx.Simplify(points, pointsPerTrack)
 		}
 		coords := make([][]float64, 0, len(points))
 		for _, point := range points {
@@ -1057,7 +1109,114 @@ func (s *Server) mapTrackFeatures(r *http.Request) ([]map[string]any, error) {
 			},
 		})
 	}
-	return features, nil
+	return mapTrackFeatureResult{
+		Features:       features,
+		Matched:        len(tracks),
+		Returned:       len(features),
+		Truncated:      truncated,
+		Limit:          trackLimit,
+		PointBudget:    pointBudget,
+		PointsPerTrack: pointsPerTrack,
+	}, nil
+}
+
+func (s *Server) mapTrackSummaries(ctx context.Context, query catalog.GPSTrackQuery, selected map[string]struct{}, limit int) ([]catalog.TrackSummary, bool, error) {
+	if len(selected) > 0 {
+		tracks := make([]catalog.TrackSummary, 0, len(selected))
+		for trackID := range selected {
+			detail, err := s.deps.Store.GetTrack(ctx, trackID)
+			if err != nil {
+				continue
+			}
+			if query.BBox != nil && !trackIntersectsBBox(detail.Summary, bbox{
+				MinLon: query.BBox.MinLon,
+				MinLat: query.BBox.MinLat,
+				MaxLon: query.BBox.MaxLon,
+				MaxLat: query.BBox.MaxLat,
+			}) {
+				continue
+			}
+			if !trackTimeMatches(detail.Summary, timeValue(query.TimeFrom), timeValue(query.TimeTo)) {
+				continue
+			}
+			tracks = append(tracks, detail.Summary)
+		}
+		sort.Slice(tracks, func(i, j int) bool { return tracks[i].Name < tracks[j].Name })
+		return tracks, false, nil
+	}
+	if limit <= 0 {
+		limit = 20000
+	}
+	pageSize := 500
+	if limit < pageSize {
+		pageSize = limit
+	}
+	startOffset := query.Offset
+	if startOffset < 0 {
+		startOffset = 0
+	}
+	query.Offset = startOffset
+	tracks := make([]catalog.TrackSummary, 0, minInt(limit, 1024))
+	for len(tracks) < limit {
+		remaining := limit - len(tracks)
+		if remaining < pageSize {
+			query.Limit = remaining
+		} else {
+			query.Limit = pageSize
+		}
+		query.Offset = startOffset + len(tracks)
+		page, err := s.deps.Store.ListGPSTracks(ctx, query)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(page) == 0 {
+			return tracks, false, nil
+		}
+		tracks = append(tracks, page...)
+		if len(page) < query.Limit {
+			return tracks, false, nil
+		}
+	}
+	query.Limit = 1
+	query.Offset = startOffset + len(tracks)
+	more, err := s.deps.Store.ListGPSTracks(ctx, query)
+	if err != nil {
+		return tracks, false, nil
+	}
+	return tracks, len(more) > 0, nil
+}
+
+func mapTrackLimit(r *http.Request) int {
+	raw := firstNonEmpty(r.URL.Query().Get("track_limit"), r.URL.Query().Get("max_tracks"))
+	if raw == "" && strings.HasSuffix(r.URL.Path, "/tracks") {
+		raw = r.URL.Query().Get("limit")
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 {
+		limit = 20000
+	}
+	if limit > 50000 {
+		limit = 50000
+	}
+	return limit
+}
+
+func mapTrackPointBudget(r *http.Request) int {
+	value, err := strconv.Atoi(r.URL.Query().Get("track_point_budget"))
+	if err != nil || value <= 0 {
+		value = 20000
+	}
+	if value > 1000000 {
+		value = 1000000
+	}
+	return value
+}
+
+func timeValue(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
 
 func validateDryRunPayload(registry *storage.Registry, payload discovery.DryRunPayload) error {

@@ -977,7 +977,7 @@ The "Ask Cartolensia" planner uses a deterministic local English/Russian fallbac
 - `local_llm` with `knowledge.llm_provider=ollama`: calls a local Ollama `/api/chat` endpoint.
 - `local_llm` with `knowledge.llm_provider=openai_compatible` or `vllm`: calls a local OpenAI-compatible `/v1/chat/completions` endpoint.
 
-Keep LLM endpoints on loopback or a trusted LAN host. The LLM receives only bounded read-only tool results from allowlisted search/knowledge views; it never receives database credentials or write-capable tools. If no model is installed, leave deterministic mode enabled and import/provide an offline LLM runtime later through the component workflow.
+Keep LLM endpoints on loopback or a trusted LAN host. The model may ask Cartolensia to run only allowlisted tools: bounded media search, knowledge fact search, knowledge relation search, and guarded read-only SQL against `cartolensia_search_*` views. The backend validates and executes those tools; the model never receives database credentials or write-capable tools. If no model is installed, leave deterministic mode enabled and import/provide an offline LLM runtime later through the component workflow.
 
 Relevant runtime settings:
 
@@ -987,6 +987,25 @@ Relevant runtime settings:
 - `knowledge.llm_endpoint`: local endpoint URL.
 - `knowledge.llm_model`: model name known by the local runtime.
 - `knowledge.llm_idle_unload_minutes`: operator policy for unloading a local model when the runtime supports it.
+
+For production services, the same defaults can be set at process start so
+local LLM mode survives restarts:
+
+```bash
+CARTOLENSIA_SEARCH_RUNNER_MODE=deterministic
+CARTOLENSIA_KNOWLEDGE_RUNNER_MODE=local_llm
+CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER=ollama
+CARTOLENSIA_KNOWLEDGE_LLM_ENDPOINT=http://127.0.0.1:11434
+CARTOLENSIA_KNOWLEDGE_LLM_MODEL=qwen3:8b
+CARTOLENSIA_KNOWLEDGE_LLM_TIMEOUT_SECONDS=120
+CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES=5
+CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS=24
+```
+
+`qwen3:8b` through Ollama is a practical default for a private GPU host with
+roughly 8 GB or more usable VRAM after quantization. CPU fallback works through
+the same endpoint but is slower. The model cache belongs under Cartolensia's
+component/model data roots, never under originals.
 
 ### Knowledge Base And Knowledge Graph
 
@@ -1006,13 +1025,58 @@ Useful endpoints:
 ```text
 GET  /api/v1/knowledge/facts?q=Pixel&limit=100
 GET  /api/v1/knowledge/relations?relation=linked_to_track&limit=100
+GET  /api/v1/knowledge/llm/status
 POST /api/v1/knowledge/extract
 POST /api/v1/knowledge/chat
 ```
 
-`POST /api/v1/knowledge/chat` stores the conversation and the tool calls it used. Deterministic mode is always available. Local LLM mode uses the same tools and read-only SQL guard; do not connect this feature to remote LLM APIs by default.
+`POST /api/v1/knowledge/chat` stores the conversation and the tool calls it used. Deterministic mode is always available. Local LLM mode can use the same tools plus model-requested read-only SQL, but every request still passes through the same allowlist and timeout. Do not connect this feature to remote LLM APIs by default.
 
 The read-only SQL workbench also accepts:
 
 - `cartolensia_search_knowledge_facts`
 - `cartolensia_search_knowledge_relations`
+
+### Durable AI Backfill
+
+Use Base AI -> `Backfill all missing AI metadata` for production archives. This queues durable worker jobs instead of keeping an HTTP request open.
+
+The endpoint is:
+
+```text
+POST /api/v1/ai/backfill/start
+```
+
+Example payload:
+
+```json
+{
+  "limit_per_task": -1,
+  "batch_size": 64,
+  "production_backfill": true,
+  "max_audio_seconds": 2700,
+  "max_video_seconds": 900
+}
+```
+
+The backfill expands into one `ai_backfill` job per task:
+
+- `classify`
+- `safety`
+- `describe`
+- `embed`
+- `faces`
+- `ocr`
+- `audio_features`
+- `audio_transcript`
+- `video_transcript`
+
+Each job selects only assets still missing that metadata in PostgreSQL. Existing output rows are respected, and the `ai_asset_task_status` table records successful zero-output runs, such as images with no OCR text or no detected faces. This prevents endless reprocessing without creating fake OCR/caption/search rows.
+
+Operational notes:
+
+- Originals are read only through Cartolensia media URLs.
+- AI outputs are stored as PostgreSQL metadata and cache files under configured Cartolensia cache/model/component roots.
+- The worker pool controls concurrency. For large GPU hosts, start with `workers.max_concurrency: 4` to `6`; increase only after watching memory, GPU utilization, and NAS read load.
+- Long-running jobs are cancelable from Jobs. Canceling a job does not delete metadata already stored.
+- Problem assets are counted as job errors and skipped for that run; the whole backfill continues.

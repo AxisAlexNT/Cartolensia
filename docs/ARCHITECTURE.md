@@ -434,7 +434,7 @@ Schema:
 
 Extraction is idempotent and bounded. Stable deterministic fact/relation IDs let repeated extraction update existing records instead of duplicating them. The current extractor mines explicit metadata only: media kind, storage location, device metadata, timestamps, geotags, tags, AI predictions, captions, OCR text, transcripts, document text, audio features, track summaries, and known track links.
 
-The Knowledge chat API is tool-first. In the current release it uses a deterministic local English/Russian planner and runs local fact/relation searches. A future local LLM can transform natural-language questions into the same safe tool calls, including read-only SQL against `cartolensia_search_*` views. Remote LLM APIs are not used by default.
+The Knowledge chat API is tool-first. It always has a deterministic local English/Russian planner and can optionally call a local LLM through Ollama or an OpenAI-compatible/vLLM endpoint. In local LLM mode the model can request only allowlisted tools: bounded media search, knowledge fact search, knowledge relation search, and guarded read-only SQL against `cartolensia_search_*` views. The backend validates and executes every tool call; the model never gets database credentials or write-capable access. Remote LLM APIs are not used by default.
 
 Design boundaries:
 
@@ -442,3 +442,19 @@ Design boundaries:
 - the graph is stored in PostgreSQL, not a separate graph database;
 - no extraction step modifies originals;
 - no model-generated SQL may bypass the existing read-only SQL guard.
+
+## Durable AI Backfill
+
+Production AI processing is now worker-owned instead of browser-session-owned. Operators can enqueue `ai_backfill` jobs that repeatedly select missing metadata in bounded batches, call the configured AI sidecar through Cartolensia read-only media URLs, and persist progress in PostgreSQL.
+
+The selector is metadata-aware. It skips assets that already have durable outputs such as predictions, captions, OCR blocks, face detections, embeddings, transcripts, or audio features. It also records zero-result successes in `ai_asset_task_status`, so assets with no text or no faces are not retried forever. Failed assets are recorded with the task and error and can be retried by a later scoped run.
+
+The PostgreSQL path uses task-specific queries with pagination and media-kind/duration filters. The in-memory store implements the same contract for tests. This keeps large NAS deployments resumable and prevents a single API request from needing to hold a whole archive-wide target list in memory.
+
+Backfill jobs remain non-destructive:
+
+- originals are read only through authenticated local media URLs;
+- outputs are database metadata only;
+- no sidecars are written beside original media;
+- cancellation is checked between assets and batches;
+- concurrency is controlled by the normal persistent worker pool.
