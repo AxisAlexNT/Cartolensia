@@ -3400,6 +3400,9 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	if trackResult.Truncated {
 		warnings = append(warnings, fmt.Sprintf("Track overlay truncated at %d tracks; narrow the date/bbox filter or raise track_limit for this request.", trackResult.Limit))
 	}
+	if trackResult.HiddenJumps > 0 {
+		warnings = append(warnings, fmt.Sprintf("Hidden %d GPS track jump segment(s) over %.0f m. Disable large-jump hiding to inspect raw track geometry.", trackResult.HiddenJumps, trackResult.JumpThresholdM))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"type":        "FeatureCollection",
 		"features":    features,
@@ -3413,6 +3416,9 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 			"limit":            trackResult.Limit,
 			"point_budget":     trackResult.PointBudget,
 			"points_per_track": trackResult.PointsPerTrack,
+			"hide_jumps":       trackResult.HideJumps,
+			"jump_threshold_m": trackResult.JumpThresholdM,
+			"hidden_jumps":     trackResult.HiddenJumps,
 		},
 		"warnings": warnings,
 	})

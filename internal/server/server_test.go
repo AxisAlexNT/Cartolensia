@@ -313,6 +313,30 @@ func TestMapTrackOverlayPagesBeyondFirstTrackPage(t *testing.T) {
 	}
 }
 
+func TestTrackJumpFilterSplitsTeleportSegments(t *testing.T) {
+	points := []catalog.TrackPoint{
+		{Lat: 40.000, Lon: 44.000},
+		{Lat: 40.001, Lon: 44.001},
+		{Lat: 42.000, Lon: 46.000},
+		{Lat: 40.002, Lon: 44.002},
+		{Lat: 40.003, Lon: 44.003},
+	}
+	geometry, segmentCount, hidden := trackGeometryFromPoints(points, true, 10000)
+	if hidden != 2 {
+		t.Fatalf("expected two hidden jumps, got %d", hidden)
+	}
+	if segmentCount != 2 {
+		t.Fatalf("expected two drawable segments, got %d", segmentCount)
+	}
+	if geometry["type"] != "MultiLineString" {
+		t.Fatalf("expected multiline geometry, got %#v", geometry)
+	}
+	coordinates, ok := geometry["coordinates"].([][][]float64)
+	if !ok || len(coordinates) != 2 || len(coordinates[0]) != 2 || len(coordinates[1]) != 2 {
+		t.Fatalf("expected two 2-point line segments, got %#v", geometry["coordinates"])
+	}
+}
+
 func TestComponentManagerAPIsAndSafeOperatorInputs(t *testing.T) {
 	store := catalog.NewMemoryStore()
 	cfg := config.Defaults()

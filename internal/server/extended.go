@@ -574,9 +574,19 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			"limit":            result.Limit,
 			"point_budget":     result.PointBudget,
 			"points_per_track": result.PointsPerTrack,
+			"hide_jumps":       result.HideJumps,
+			"jump_threshold_m": result.JumpThresholdM,
+			"hidden_jumps":     result.HiddenJumps,
 		}
+		warnings := []string{}
 		if result.Truncated {
-			collection["warnings"] = []string{fmt.Sprintf("Track overlay truncated at %d tracks; narrow the date/bbox filter or raise track_limit for this request.", result.Limit)}
+			warnings = append(warnings, fmt.Sprintf("Track overlay truncated at %d tracks; narrow the date/bbox filter or raise track_limit for this request.", result.Limit))
+		}
+		if result.HiddenJumps > 0 {
+			warnings = append(warnings, fmt.Sprintf("Hidden %d GPS track jump segment(s) over %.0f m. Disable large-jump hiding to inspect raw track geometry.", result.HiddenJumps, result.JumpThresholdM))
+		}
+		if len(warnings) > 0 {
+			collection["warnings"] = warnings
 		}
 		writeJSON(w, http.StatusOK, collection)
 	default:
@@ -1036,6 +1046,9 @@ type mapTrackFeatureResult struct {
 	Limit          int
 	PointBudget    int
 	PointsPerTrack int
+	HideJumps      bool
+	JumpThresholdM float64
+	HiddenJumps    int
 }
 
 func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error) {
@@ -1055,6 +1068,8 @@ func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error
 	zoom := queryInt(r, "zoom", 10)
 	pointBudget := mapTrackPointBudget(r)
 	pointsPerTrack := maxTrackPointsForZoom(zoom)
+	hideJumps := mapHideTrackJumps(r)
+	jumpThresholdM := mapTrackJumpThresholdM(r)
 	if len(tracks) > 0 && len(selected) == 0 {
 		budgeted := pointBudget / len(tracks)
 		if budgeted < 4 {
@@ -1076,24 +1091,20 @@ func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error
 	if err != nil {
 		return mapTrackFeatureResult{}, err
 	}
+	hiddenJumps := 0
 	for _, summary := range tracks {
 		points := pointsByTrack[summary.TrackAssetID]
 		if len(points) > pointsPerTrack {
 			points = gpx.Simplify(points, pointsPerTrack)
 		}
-		coords := make([][]float64, 0, len(points))
-		for _, point := range points {
-			coords = append(coords, []float64{point.Lon, point.Lat})
-		}
-		if len(coords) == 0 {
+		geometry, segmentCount, hidden := trackGeometryFromPoints(points, hideJumps, jumpThresholdM)
+		hiddenJumps += hidden
+		if geometry == nil {
 			continue
 		}
 		features = append(features, map[string]any{
-			"type": "Feature",
-			"geometry": map[string]any{
-				"type":        "LineString",
-				"coordinates": coords,
-			},
+			"type":     "Feature",
+			"geometry": geometry,
 			"properties": map[string]any{
 				"id":               summary.TrackAssetID,
 				"name":             summary.Name,
@@ -1112,7 +1123,11 @@ func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error
 					"max_lat": summary.MaxLat,
 					"max_lon": summary.MaxLon,
 				},
-				"simplified": len(points) < summary.PointCount,
+				"simplified":           len(points) < summary.PointCount,
+				"segment_count":        segmentCount,
+				"jump_filter_enabled":  hideJumps,
+				"jump_threshold_m":     jumpThresholdM,
+				"hidden_jump_segments": hidden,
 			},
 		})
 	}
@@ -1124,7 +1139,109 @@ func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error
 		Limit:          trackLimit,
 		PointBudget:    pointBudget,
 		PointsPerTrack: pointsPerTrack,
+		HideJumps:      hideJumps,
+		JumpThresholdM: jumpThresholdM,
+		HiddenJumps:    hiddenJumps,
 	}, nil
+}
+
+func mapHideTrackJumps(r *http.Request) bool {
+	raw := firstNonEmpty(r.URL.Query().Get("hide_track_jumps"), r.URL.Query().Get("track_jump_filter"))
+	if strings.TrimSpace(raw) != "" {
+		return boolQuery(raw)
+	}
+	return runtimeBoolSetting("gps.hide_large_track_jumps", true)
+}
+
+func mapTrackJumpThresholdM(r *http.Request) float64 {
+	value, err := strconv.ParseFloat(r.URL.Query().Get("track_jump_threshold_m"), 64)
+	if err == nil && value > 0 {
+		return math.Min(value, 1000000)
+	}
+	configured := runtimeIntSetting("gps.track_jump_threshold_m", 10000)
+	if configured <= 0 {
+		configured = 10000
+	}
+	if configured > 1000000 {
+		configured = 1000000
+	}
+	return float64(configured)
+}
+
+func trackGeometryFromPoints(points []catalog.TrackPoint, hideJumps bool, jumpThresholdM float64) (map[string]any, int, int) {
+	segments, hidden := splitTrackPointsByJump(points, hideJumps, jumpThresholdM)
+	lines := make([][][]float64, 0, len(segments))
+	for _, segment := range segments {
+		if len(segment) < 2 {
+			continue
+		}
+		line := make([][]float64, 0, len(segment))
+		for _, point := range segment {
+			line = append(line, []float64{point.Lon, point.Lat})
+		}
+		if len(line) >= 2 {
+			lines = append(lines, line)
+		}
+	}
+	switch len(lines) {
+	case 0:
+		return nil, 0, hidden
+	case 1:
+		return map[string]any{"type": "LineString", "coordinates": lines[0]}, 1, hidden
+	default:
+		return map[string]any{"type": "MultiLineString", "coordinates": lines}, len(lines), hidden
+	}
+}
+
+func splitTrackPointsByJump(points []catalog.TrackPoint, hideJumps bool, jumpThresholdM float64) ([][]catalog.TrackPoint, int) {
+	if len(points) == 0 {
+		return nil, 0
+	}
+	if !hideJumps || jumpThresholdM <= 0 {
+		valid := make([]catalog.TrackPoint, 0, len(points))
+		for _, point := range points {
+			if validTrackPoint(point) {
+				valid = append(valid, point)
+			}
+		}
+		if len(valid) == 0 {
+			return nil, 0
+		}
+		return [][]catalog.TrackPoint{valid}, 0
+	}
+	var segments [][]catalog.TrackPoint
+	current := make([]catalog.TrackPoint, 0, len(points))
+	hidden := 0
+	var previous catalog.TrackPoint
+	havePrevious := false
+	flush := func() {
+		if len(current) > 0 {
+			segments = append(segments, current)
+			current = nil
+		}
+	}
+	for _, point := range points {
+		if !validTrackPoint(point) {
+			flush()
+			havePrevious = false
+			continue
+		}
+		if havePrevious && haversineMeters(previous.Lat, previous.Lon, point.Lat, point.Lon) > jumpThresholdM {
+			hidden++
+			flush()
+		}
+		current = append(current, point)
+		previous = point
+		havePrevious = true
+	}
+	flush()
+	return segments, hidden
+}
+
+func validTrackPoint(point catalog.TrackPoint) bool {
+	return !math.IsNaN(point.Lat) && !math.IsInf(point.Lat, 0) &&
+		!math.IsNaN(point.Lon) && !math.IsInf(point.Lon, 0) &&
+		point.Lat >= -90 && point.Lat <= 90 && point.Lon >= -180 && point.Lon <= 180
 }
 
 func (s *Server) mapTrackSummaries(ctx context.Context, query catalog.GPSTrackQuery, selected map[string]struct{}, limit int) ([]catalog.TrackSummary, bool, error) {

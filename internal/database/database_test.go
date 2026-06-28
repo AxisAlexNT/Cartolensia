@@ -70,3 +70,20 @@ func TestApplyTrackMetadata(t *testing.T) {
 		t.Fatalf("elevation not applied: %#v", summary)
 	}
 }
+
+func TestNormalizeGeoPageAllowsMapScaleQueries(t *testing.T) {
+	limit, offset := normalizeGeoPage(0, -10)
+	if limit != 10000 || offset != 0 {
+		t.Fatalf("unexpected geo defaults: limit=%d offset=%d", limit, offset)
+	}
+
+	limit, offset = normalizeGeoPage(50000, 25)
+	if limit != 50000 || offset != 25 {
+		t.Fatalf("geo query should keep large map limits: limit=%d offset=%d", limit, offset)
+	}
+
+	limit, _ = normalizeGeoPage(500000, 0)
+	if limit != 100000 {
+		t.Fatalf("geo query should still cap extreme requests, got %d", limit)
+	}
+}

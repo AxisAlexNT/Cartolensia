@@ -638,7 +638,7 @@ func (db *DB) GetAssetGeo(ctx context.Context, assetID string) (catalog.AssetGeo
 }
 
 func (db *DB) QueryAssetGeo(ctx context.Context, query catalog.GeoQuery) ([]catalog.GeoAsset, error) {
-	limit, offset := normalizeDBPage(query.Limit, query.Offset)
+	limit, offset := normalizeGeoPage(query.Limit, query.Offset)
 	where, args := geoQueryWhere(query)
 	args = append(args, limit, offset)
 	sql := `select g.asset_id::text, g.lat, g.lon, g.source, g.confidence, g.taken_at, coalesce(g.track_asset_id::text, ''),
@@ -669,6 +669,19 @@ func (db *DB) QueryAssetGeo(ctx context.Context, query catalog.GeoQuery) ([]cata
 		out = append(out, catalog.GeoAsset{Asset: asset, Geo: geo})
 	}
 	return out, nil
+}
+
+func normalizeGeoPage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = 10000
+	}
+	if limit > 100000 {
+		limit = 100000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
 }
 
 func geoQueryWhere(query catalog.GeoQuery) (string, []any) {

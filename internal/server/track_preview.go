@@ -31,26 +31,35 @@ func (s *Server) handleTrackPreview(w http.ResponseWriter, r *http.Request, asse
 		writeStoreError(w, err)
 		return
 	}
-	coords := make([][]float64, 0, len(points))
-	for _, point := range points {
-		coords = append(coords, []float64{point.Lon, point.Lat})
+	hideJumps := mapHideTrackJumps(r)
+	jumpThresholdM := mapTrackJumpThresholdM(r)
+	geometry, segmentCount, hiddenJumps := trackGeometryFromPoints(points, hideJumps, jumpThresholdM)
+	if geometry == nil {
+		geometry = map[string]any{"type": "LineString", "coordinates": [][]float64{}}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"type":    "FeatureCollection",
 		"summary": detail.Summary,
+		"track_filter": map[string]any{
+			"hide_jumps":       hideJumps,
+			"jump_threshold_m": jumpThresholdM,
+			"hidden_jumps":     hiddenJumps,
+			"segment_count":    segmentCount,
+		},
 		"features": []map[string]any{{
-			"type": "Feature",
-			"geometry": map[string]any{
-				"type":        "LineString",
-				"coordinates": coords,
-			},
+			"type":     "Feature",
+			"geometry": geometry,
 			"properties": map[string]any{
-				"id":            detail.Summary.TrackAssetID,
-				"name":          detail.Summary.Name,
-				"kind":          "track",
-				"source_format": detail.Summary.SourceFormat,
-				"point_count":   detail.Summary.PointCount,
-				"preview":       true,
+				"id":                   detail.Summary.TrackAssetID,
+				"name":                 detail.Summary.Name,
+				"kind":                 "track",
+				"source_format":        detail.Summary.SourceFormat,
+				"point_count":          detail.Summary.PointCount,
+				"preview":              true,
+				"segment_count":        segmentCount,
+				"jump_filter_enabled":  hideJumps,
+				"jump_threshold_m":     jumpThresholdM,
+				"hidden_jump_segments": hiddenJumps,
 			},
 		}},
 	})
@@ -70,7 +79,13 @@ func (s *Server) handleTrackThumbnail(w http.ResponseWriter, r *http.Request, as
 		height = 220
 	}
 	cacheRoot := filepath.Join(s.deps.Config.Cache.Dir, "track-thumbnails")
-	target := filepath.Join(cacheRoot, assetID+"-"+strconv.Itoa(width)+"x"+strconv.Itoa(height)+".png")
+	hideJumps := mapHideTrackJumps(r)
+	jumpThresholdM := mapTrackJumpThresholdM(r)
+	filterKey := "raw"
+	if hideJumps {
+		filterKey = "nojumps" + strconv.Itoa(int(jumpThresholdM+0.5))
+	}
+	target := filepath.Join(cacheRoot, assetID+"-"+strconv.Itoa(width)+"x"+strconv.Itoa(height)+"-"+filterKey+".png")
 	if err := ensurePathInside(cacheRoot, target); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -98,7 +113,7 @@ func (s *Server) handleTrackThumbnail(w http.ResponseWriter, r *http.Request, as
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	img := renderTrackThumbnail(points, width, height)
+	img := renderTrackThumbnail(points, width, height, hideJumps, jumpThresholdM)
 	encodeErr := png.Encode(file, img)
 	closeErr := file.Close()
 	if encodeErr != nil {
@@ -113,7 +128,7 @@ func (s *Server) handleTrackThumbnail(w http.ResponseWriter, r *http.Request, as
 	http.ServeFile(w, r, target)
 }
 
-func renderTrackThumbnail(points []catalog.TrackPoint, width, height int) image.Image {
+func renderTrackThumbnail(points []catalog.TrackPoint, width, height int, hideJumps bool, jumpThresholdM float64) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	bg := color.RGBA{R: 16, G: 24, B: 39, A: 255}
 	grid := color.RGBA{R: 31, G: 42, B: 61, A: 255}
@@ -131,9 +146,19 @@ func renderTrackThumbnail(points []catalog.TrackPoint, width, height int) image.
 	for y := 0; y < height; y += 36 {
 		drawLine(img, 0, y, width-1, y, grid)
 	}
-	minLon, maxLon := points[0].Lon, points[0].Lon
-	minLat, maxLat := points[0].Lat, points[0].Lat
-	for _, point := range points[1:] {
+	segments, _ := splitTrackPointsByJump(points, hideJumps, jumpThresholdM)
+	var drawable []catalog.TrackPoint
+	for _, segment := range segments {
+		if len(segment) >= 2 {
+			drawable = append(drawable, segment...)
+		}
+	}
+	if len(drawable) == 0 {
+		drawable = points
+	}
+	minLon, maxLon := drawable[0].Lon, drawable[0].Lon
+	minLat, maxLat := drawable[0].Lat, drawable[0].Lat
+	for _, point := range drawable[1:] {
 		minLon = minFloat(minLon, point.Lon)
 		maxLon = maxFloat(maxLon, point.Lon)
 		minLat = minFloat(minLat, point.Lat)
@@ -153,15 +178,20 @@ func renderTrackThumbnail(points []catalog.TrackPoint, width, height int) image.
 		y := pad + (maxLat-point.Lat)/(maxLat-minLat)*(float64(height)-2*pad)
 		return int(x + 0.5), int(y + 0.5)
 	}
-	prevX, prevY := project(points[0])
-	for _, point := range points[1:] {
-		x, y := project(point)
-		drawLine(img, prevX, prevY, x, y, line)
-		prevX, prevY = x, y
+	for _, segment := range segments {
+		if len(segment) < 2 {
+			continue
+		}
+		prevX, prevY := project(segment[0])
+		for _, point := range segment[1:] {
+			x, y := project(point)
+			drawLine(img, prevX, prevY, x, y, line)
+			prevX, prevY = x, y
+		}
 	}
-	x, y := project(points[0])
+	x, y := project(drawable[0])
 	drawDot(img, x, y, 4, start)
-	x, y = project(points[len(points)-1])
+	x, y = project(drawable[len(drawable)-1])
 	drawDot(img, x, y, 4, end)
 	return img
 }

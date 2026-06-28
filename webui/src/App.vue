@@ -377,6 +377,8 @@ const showGeoAlignLayerMenu = ref(false);
 const mapTilesVisible = ref(localStorage.getItem("cartolensia.map.tilesVisible") !== "false");
 const mapTracksVisible = ref(localStorage.getItem("cartolensia.map.tracksVisible") !== "false");
 const mapAssetsVisible = ref(localStorage.getItem("cartolensia.map.assetsVisible") !== "false");
+const mapHideTrackJumps = ref(localStorage.getItem("cartolensia.map.hideTrackJumps") !== "false");
+const mapTrackJumpThresholdM = ref(Number(localStorage.getItem("cartolensia.map.trackJumpThresholdM") || "10000"));
 const trackPreviewTilesEnabled = ref(true);
 const selectedTrackLayerVisible = ref(true);
 const galleryTrackLayerVisible = ref(true);
@@ -2158,12 +2160,15 @@ async function refreshGeoAlignMap() {
 
 function trackPreviewStatus(preview: Record<string, unknown>, renderedFeatures: number): string {
   const summary = (preview.summary ?? {}) as Record<string, unknown>;
+  const filter = (preview.track_filter ?? {}) as Record<string, unknown>;
   const points = Number(summary.point_count ?? 0);
   const format = String(summary.source_format ?? "track");
   if (renderedFeatures === 0) {
     return "No geometry returned for this track preview.";
   }
-  return `${renderedFeatures} layer feature${renderedFeatures === 1 ? "" : "s"} · ${points.toLocaleString()} points · ${format.toUpperCase()}`;
+  const hidden = Number(filter.hidden_jumps ?? 0);
+  const jumpNote = hidden > 0 ? ` · ${hidden} large jump${hidden === 1 ? "" : "s"} hidden` : "";
+  return `${renderedFeatures} layer feature${renderedFeatures === 1 ? "" : "s"} · ${points.toLocaleString()} points · ${format.toUpperCase()}${jumpNote}`;
 }
 
 function trackProfilePath(profile: TrackProfile | null): string {
@@ -5029,6 +5034,12 @@ function scheduleMapViewportRefresh() {
   }, 300);
 }
 
+function mapTrackJumpThreshold(): number {
+  const value = Number(mapTrackJumpThresholdM.value);
+  if (!Number.isFinite(value) || value <= 0) return 10000;
+  return Math.min(1000000, Math.max(10, Math.round(value)));
+}
+
 function mapQuery(): Record<string, string | number | boolean> {
   const zoom = Math.round(olMap?.getView().getZoom() ?? 10);
   const width = mapElement.value?.clientWidth ?? 1024;
@@ -5042,9 +5053,11 @@ function mapQuery(): Record<string, string | number | boolean> {
     height_px: height,
     marker_px: markerPx,
     cluster_distance_px: markerPx * 2,
-    asset_limit: 1000,
+    asset_limit: 10000,
     track_limit: 20000,
-    track_point_budget: mapTrackId.value ? 100000 : bbox ? 12000 : 20000
+    track_point_budget: mapTrackId.value ? 100000 : bbox ? 12000 : 20000,
+    hide_track_jumps: mapHideTrackJumps.value,
+    track_jump_threshold_m: mapTrackJumpThreshold()
   };
   if (bbox) query.bbox = bbox;
   if (mapMediaKind.value) query.media_kind = mapMediaKind.value;
@@ -5620,6 +5633,12 @@ watch([mapTilesVisible, mapTracksVisible, mapAssetsVisible], () => {
   persistLayerPreference("cartolensia.map.tilesVisible", mapTilesVisible.value);
   persistLayerPreference("cartolensia.map.tracksVisible", mapTracksVisible.value);
   persistLayerPreference("cartolensia.map.assetsVisible", mapAssetsVisible.value);
+});
+
+watch([mapHideTrackJumps, mapTrackJumpThresholdM], () => {
+  persistLayerPreference("cartolensia.map.hideTrackJumps", mapHideTrackJumps.value);
+  localStorage.setItem("cartolensia.map.trackJumpThresholdM", String(mapTrackJumpThreshold()));
+  void refreshMap();
 });
 
 watch([trackPreviewTilesEnabled, selectedTrackLayerVisible, galleryTrackLayerVisible], () => {
@@ -7356,6 +7375,21 @@ onBeforeUnmount(() => {
                 <label class="form-check form-switch">
                   <input v-model="mapAssetsVisible" class="form-check-input" type="checkbox" />
                   <span>Photos/videos</span>
+                </label>
+                <label class="form-check form-switch">
+                  <input v-model="mapHideTrackJumps" class="form-check-input" type="checkbox" />
+                  <span>Hide large GPS jumps</span>
+                </label>
+                <label class="compact-field">
+                  Jump threshold
+                  <input
+                    v-model.number="mapTrackJumpThresholdM"
+                    type="number"
+                    min="10"
+                    step="100"
+                    inputmode="numeric"
+                  />
+                  <small>Default 10,000 m; original track files are unchanged.</small>
                 </label>
                 <button type="button" class="btn btn-sm btn-outline-primary" @click="fitMainMap">
                   <i class="bi bi-aspect-ratio" aria-hidden="true"></i>

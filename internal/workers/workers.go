@@ -96,12 +96,24 @@ func (m *Manager) loop() {
 	ticker := time.NewTicker(m.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
+		m.releaseExpiredLeases()
 		m.dispatchAvailable()
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+func (m *Manager) releaseExpiredLeases() {
+	released, err := m.store.ReleaseExpiredLeases(m.ctx, time.Now().UTC())
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("cartolensia worker lease cleanup failed: %v", err)
+		return
+	}
+	if released > 0 {
+		log.Printf("cartolensia worker returned %d expired job lease(s) to the queue", released)
 	}
 }
 

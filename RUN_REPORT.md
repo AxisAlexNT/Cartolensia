@@ -4576,6 +4576,71 @@ Safety confirmation:
 - no commit;
 - no push.
 
+## 2026-06-28 GPS Track Jump Filter
+
+Implemented and deployed a default-on visualization filter for GPS tracks with large discontinuities, targeting spoofed GPS samples and aircraft/jump artifacts that drew long misleading lines across the map.
+
+What changed:
+
+- Added runtime settings:
+  - `gps.hide_large_track_jumps`, default `true`;
+  - `gps.track_jump_threshold_m`, default `10000`.
+- Added Map page controls under the Layers panel:
+  - a Bootstrap switch for hiding large GPS jumps;
+  - a configurable threshold in meters.
+- Applied the same filter to:
+  - `/api/v1/map`;
+  - `/api/v1/map/tracks`;
+  - track previews and track thumbnails.
+- Track geometry is split into multiple line segments when consecutive points exceed the threshold. The original parsed points and original files are not modified.
+- API responses now expose filter metadata:
+  - whether jump hiding was enabled;
+  - the threshold;
+  - how many jump segments were hidden.
+- Map and track-preview warnings explain when large jumps were hidden and how to inspect raw geometry by disabling the filter.
+
+Tests run:
+
+- `gofmt -w internal/server/extended.go internal/server/track_preview.go internal/server/settings.go internal/server/server.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/database ./internal/workers`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+
+Remote deployment:
+
+- Rebuilt the backend binary with `CGO_ENABLED=0`.
+- Deployed the backend to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka.
+- Deployed the rebuilt WebUI bundle to `/opt/cartolensia/current/webui/dist`.
+- Restarted only the `cartolensia` service.
+
+Remote validation:
+
+- `/api/v1/map/status` reports `9368 / 9563` track-like assets parsed.
+- Filtered request:
+  - `/api/v1/map/tracks?track_limit=20000&track_point_budget=20000&zoom=8&hide_track_jumps=true&track_jump_threshold_m=10000`
+  - returned `8214` drawable features from `9368` matched tracks;
+  - reported `hidden_jumps: 1152`;
+  - returned the warning: hidden GPS track jump segments over `10000 m`.
+- Raw request:
+  - `/api/v1/map/tracks?track_limit=20000&track_point_budget=20000&zoom=8&hide_track_jumps=false&track_jump_threshold_m=10000`
+  - returned `9366` drawable features from `9368` matched tracks;
+  - reported `hidden_jumps: 0`.
+
+Known limitations:
+
+- This is a visualization/cache filter, not data deletion. Spoofed points remain available by disabling the filter.
+- The heuristic is distance-based. A future refinement could add speed-based, return-to-track, altitude, and aircraft-mode classification.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
 ## 2026-06-28 Continuation: Production Queue Supervision And Settings Latency Fix
 
 Live remote state captured before the platform blocked further SSH escalation:
@@ -4624,6 +4689,90 @@ Blocked item:
 
 - Further remote SSH monitoring/deployment was blocked by the platform approval/usage gate after the first successful status check. No indirect workaround was attempted.
 - Next remote action when SSH is available: re-check the active queue, verify the track metadata job completed under the fixed track-summary ordering code, retry only remaining unparsed track assets if needed, and deploy the Settings lazy-usage WebUI change.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-28 Continuation: Map Coverage And Production Job Recovery
+
+Scope:
+
+- Focused on the reported gap where many indexed GPS tracks and geotagged media were visible in list/stat pages but not fully represented in the Map page.
+- Kept the remote originals/Samba mounts strict read-only.
+- Did not reset PostgreSQL, run missing-file marking, commit, or push.
+
+Root causes found:
+
+- Map asset geotag queries reused the generic list-page normalizer, so high-limit map requests were silently capped at the normal UI list cap. This meant the map could show a small subset even while Stats/Explorer/GPS pages had far more indexed records.
+- Several long-running production jobs had expired leases after restarts or long task stalls. When all worker slots were occupied, expired running leases were not released promptly before normal dispatch, so some queued AI/metadata work could appear stuck.
+- Track-map coverage was also genuinely incomplete for some assets: many track-like files were indexed, but not all had parsed track geometry yet. Metadata enrichment is required to reduce that remaining gap.
+
+Fixes implemented locally and deployed to rjazhenka:
+
+- Added a map-specific geotag page normalizer:
+  - default map geotag limit: `10000`;
+  - hard cap: `100000`;
+  - negative offsets clamp to `0`.
+- Wired `/api/v1/map/assets` through the map-specific normalizer so map rendering can request production-scale point batches without being capped at the generic list size.
+- Added worker-manager stale lease recovery on every poll before dispatch:
+  - expired `running` and `cancel_requested` jobs are released/requeued through the existing persistent job lease API;
+  - recovery is logged and does not delete job state.
+- Raised the frontend Map page asset request from `1000` to `10000` so the live UI uses the backend's production map batch size instead of continuing to under-request geotagged photos/videos.
+- Deployed the rebuilt backend binary to `/opt/cartolensia/current/bin/cartolensia`.
+- Deployed the current verified WebUI bundle to `/opt/cartolensia/current/webui/dist`.
+- Restarted `cartolensia` only; PostgreSQL and the AI sidecar were not reset.
+
+Tests run:
+
+- `gofmt -w internal/workers/workers.go internal/workers/workers_test.go internal/database/extended.go internal/database/database_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/workers ./internal/database`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- Re-ran `npm --prefix webui run build` after the frontend map asset-limit change and deployed the resulting WebUI bundle.
+
+Remote validation:
+
+- `/api/v1/map/status` improved from the earlier continuation baseline of `5328 / 9563` parsed track-like assets to `7866 / 9563`.
+- Final post-verification poll improved further to `8187 / 9563` parsed track-like assets while metadata enrichment continued running.
+- Current map status at validation:
+  - indexed assets: `609359`;
+  - track-like assets: `9563`;
+  - parsed tracks: `8187`;
+  - unparsed track-like assets: `1376`;
+  - `tracks_truncated: false`.
+- `/api/v1/map/assets?asset_limit=10000&zoom=4&clusters=false` returned `10000` raw geotag features, confirming the generic `200`-row cap is no longer applied to map asset queries.
+- `/api/v1/map/tracks?track_limit=20000&track_point_budget=20000&zoom=4` returned `7865` drawable track features with `matched: 7868` and `truncated: false`.
+- A prior track overlay check returned `7865` drawable track features with no truncation. The final status poll confirmed additional parsed tracks were added after that overlay check; the next map overlay refresh will include the newly parsed summaries.
+- Active production jobs at validation included:
+  - running discovery;
+  - running hash;
+  - running broad metadata enrichment;
+  - running targeted track metadata enrichment;
+  - running AI backfills for classification, safety, captions/descriptions, audio transcription, and video transcription;
+  - queued AI backfills for embeddings, faces, and OCR after lease recovery.
+- AI status at validation:
+  - enabled: `true`;
+  - worker: `ok`;
+  - device: `cuda`;
+  - vector store: `pgvector_ivfflat`;
+  - embedded assets: `97595`;
+  - predictions: `894054`;
+  - face detections: `60243`;
+  - asset tags: `255871`.
+
+Known limitations / next work:
+
+- The entire production library is not fully processed yet. The correct safe state is to leave discovery, metadata, hashing, and AI backfill jobs running and resumable.
+- `1376` track-like assets still need metadata enrichment or have unavailable/unparseable read-only sources. The Map page now reports this as a real processing gap, not a UI cap.
+- `old_p770` remained unavailable in the latest storage health checks because its configured source path was not mounted or not available from the NAS.
+- GPU utilization remains bursty because the workload alternates between SMB I/O, decode/ffprobe, OCR/ASR, and model inference; the CUDA sidecar is active and jobs are advancing.
 
 Safety confirmation:
 
