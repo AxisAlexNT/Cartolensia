@@ -528,6 +528,28 @@ export type Stats = {
   total_bytes: number;
 };
 
+export type EnvironmentUsage = {
+  generated_at: string;
+  scope: string;
+  database?: {
+    database_name?: string;
+    size_bytes?: number;
+    relations?: Array<{ name: string; size_bytes: number; rows: number }>;
+  } | Record<string, unknown>;
+  database_error?: string;
+  directories: Array<{
+    key: string;
+    label: string;
+    path: string;
+    status: string;
+    bytes: number;
+    files: number;
+    dirs: number;
+    errors?: string[];
+    truncated?: boolean;
+  }>;
+};
+
 export type DuplicateGroup = {
   content_id?: string;
   sha512_hex: string;
@@ -764,11 +786,24 @@ export type KnowledgeMessage = {
   created_at: string;
 };
 
+export type KnowledgeAction = {
+  action: string;
+  label: string;
+  asset_id?: string;
+  query?: string;
+  method?: string;
+  url?: string;
+  payload?: Record<string, unknown>;
+  note?: string;
+  details?: Record<string, unknown>;
+};
+
 export type KnowledgeChatResponse = {
   conversation_id?: string;
   answer: string;
   planner: SearchPlan;
   tool_calls: Array<Record<string, unknown>>;
+  actions?: KnowledgeAction[];
   media: SearchResult[];
   facts: KnowledgeFact[];
   relations: KnowledgeRelation[];
@@ -1220,6 +1255,18 @@ export const api = {
   },
   tileSources: async () => asArray(await request<TileSource[] | null>("/api/v1/map/tile-sources")),
   stats: () => request<Stats>("/api/v1/stats"),
+  environmentUsage: (refresh = false) =>
+    request<EnvironmentUsage>(`/api/v1/environment/usage${refresh ? "?refresh=1" : ""}`).then((usage) => ({
+      ...usage,
+      directories: asArray(usage.directories),
+      database:
+        usage.database && typeof usage.database === "object"
+          ? {
+              ...usage.database,
+              relations: asArray((usage.database as { relations?: Array<{ name: string; size_bytes: number; rows: number }> }).relations)
+            }
+          : usage.database
+    })),
   startDiscovery: (payload: {
     storage: string;
     prefixes: string[];
@@ -1509,6 +1556,7 @@ export const api = {
       facts: asArray(response.facts),
       relations: asArray(response.relations),
       tool_calls: asArray(response.tool_calls),
+      actions: asArray(response.actions),
       sql_results: asArray(response.sql_results),
       messages: asArray(response.messages)
     })),

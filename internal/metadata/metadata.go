@@ -503,9 +503,6 @@ func (r Runner) enrichTrack(ctx context.Context, asset catalog.Asset, loc catalo
 	}
 	var syntheticTimes bool
 	points, syntheticTimes = ensureTrackPointTimes(points, loc.MTime)
-	if err := r.Store.UpsertTrackPoints(ctx, asset.ID, points); err != nil {
-		return err
-	}
 	analysis := gpx.Analyze(points)
 	metadata := map[string]any{
 		"track_point_count":          analysis.PointCount,
@@ -533,7 +530,7 @@ func (r Runner) enrichTrack(ctx context.Context, asset catalog.Asset, loc catalo
 		metadata["elevation_min_m"] = *analysis.ElevationMinM
 		metadata["elevation_max_m"] = *analysis.ElevationMaxM
 	}
-	_ = r.Store.UpsertGPSTrackSummary(ctx, catalog.TrackSummary{
+	if err := r.Store.UpsertGPSTrackSummary(ctx, catalog.TrackSummary{
 		TrackAssetID: asset.ID,
 		Name:         asset.DisplayName,
 		PointCount:   analysis.PointCount,
@@ -547,7 +544,12 @@ func (r Runner) enrichTrack(ctx context.Context, asset catalog.Asset, loc catalo
 		DurationSec:  analysis.DurationSeconds,
 		ElevationMin: analysis.ElevationMinM,
 		ElevationMax: analysis.ElevationMaxM,
-	}, map[string]any{"source": format})
+	}, map[string]any{"source": format}); err != nil {
+		return err
+	}
+	if err := r.Store.UpsertTrackPoints(ctx, asset.ID, points); err != nil {
+		return err
+	}
 	var takenAt *time.Time
 	if analysis.StartTime != nil {
 		t := analysis.StartTime.UTC()

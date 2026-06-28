@@ -14,7 +14,12 @@ DIST_DIR="$(cd "${ROOT_DIR}" && mkdir -p "${CARTOLENSIA_RELEASE_DIST_DIR:-dist/r
 WORK_DIR="$(cd "${ROOT_DIR}" && mkdir -p "${CARTOLENSIA_LOCAL_FULL_WORK_DIR:-dist/local-full-work}" && cd "${CARTOLENSIA_LOCAL_FULL_WORK_DIR:-dist/local-full-work}" && pwd)"
 CACHE_DIR="$(cd "${ROOT_DIR}" && mkdir -p "${CARTOLENSIA_LOCAL_FULL_CACHE_DIR:-dist/local-full-cache}" && cd "${CARTOLENSIA_LOCAL_FULL_CACHE_DIR:-dist/local-full-cache}" && pwd)"
 STAGE="${WORK_DIR}/${PACKAGE_NAME}"
-ARCHIVE="${DIST_DIR}/${PACKAGE_NAME}.tar.zst"
+ARCHIVE_FORMAT="${CARTOLENSIA_LOCAL_FULL_ARCHIVE_FORMAT:-tar.zst}"
+case "${ARCHIVE_FORMAT}" in
+  tar.zst) ARCHIVE="${DIST_DIR}/${PACKAGE_NAME}.tar.zst" ;;
+  7z) ARCHIVE="${DIST_DIR}/${PACKAGE_NAME}.7z" ;;
+  *) printf '[cartolensia-full] error: unsupported CARTOLENSIA_LOCAL_FULL_ARCHIVE_FORMAT=%s\n' "${ARCHIVE_FORMAT}" >&2; exit 1 ;;
+esac
 CHECKSUM="${ARCHIVE}.sha256"
 
 INCLUDE_FFMPEG="${CARTOLENSIA_LOCAL_FULL_INCLUDE_FFMPEG:-1}"
@@ -176,6 +181,19 @@ CARTOLENSIA_AI_SAFETY_MODEL=Falconsai/nsfw_image_detection
 CARTOLENSIA_AI_CAPTION_MODEL=Salesforce/blip-image-captioning-base
 CARTOLENSIA_AI_OPENCLIP_MODEL=ViT-B-32
 CARTOLENSIA_AI_WHISPER_MODEL=small
+ENV
+  cat >"${STAGE}/config/llm-executor.env" <<'ENV'
+# Optional local LLM endpoint for Ask Cartolensia.
+# Recommended air-gapped setup: import/provide a reviewed Ollama or vLLM
+# runtime and model cache, then point Cartolensia at localhost or another LAN
+# executor. No remote LLM APIs are used by default.
+CARTOLENSIA_KNOWLEDGE_RUNNER_MODE=local_llm
+CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER=ollama
+CARTOLENSIA_KNOWLEDGE_LLM_ENDPOINT=http://127.0.0.1:11434
+CARTOLENSIA_KNOWLEDGE_LLM_MODEL=qwen3:8b
+CARTOLENSIA_KNOWLEDGE_LLM_TIMEOUT_SECONDS=90
+CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES=5
+CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS=24
 ENV
 }
 
@@ -407,6 +425,13 @@ export CARTOLENSIA_HTTP_TLS_AUTO_SELF_SIGNED="${CARTOLENSIA_HTTP_TLS_AUTO_SELF_S
 export CARTOLENSIA_HTTP_TLS_HOSTS="${CARTOLENSIA_HTTP_TLS_HOSTS:-127.0.0.1,localhost}"
 export CARTOLENSIA_AUTH_COOKIE_SECURE="${CARTOLENSIA_AUTH_COOKIE_SECURE:-true}"
 export CARTOLENSIA_AI_WORKER_ENDPOINT="${CARTOLENSIA_AI_WORKER_ENDPOINT:-http://127.0.0.1:19090}"
+export CARTOLENSIA_KNOWLEDGE_RUNNER_MODE="${CARTOLENSIA_KNOWLEDGE_RUNNER_MODE:-deterministic}"
+export CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER="${CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER:-ollama}"
+export CARTOLENSIA_KNOWLEDGE_LLM_ENDPOINT="${CARTOLENSIA_KNOWLEDGE_LLM_ENDPOINT:-http://127.0.0.1:11434}"
+export CARTOLENSIA_KNOWLEDGE_LLM_MODEL="${CARTOLENSIA_KNOWLEDGE_LLM_MODEL:-qwen3:8b}"
+export CARTOLENSIA_KNOWLEDGE_LLM_TIMEOUT_SECONDS="${CARTOLENSIA_KNOWLEDGE_LLM_TIMEOUT_SECONDS:-90}"
+export CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES="${CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES:-5}"
+export CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS="${CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS:-24}"
 export CARTOLENSIA_LIBVA_DRIVER_NAME="${CARTOLENSIA_LIBVA_DRIVER_NAME:-radeonsi}"
 export CARTOLENSIA_VDPAU_DRIVER="${CARTOLENSIA_VDPAU_DRIVER:-radeonsi}"
 export CARTOLENSIA_TRANSCODE_PREFERRED_ACCELERATORS="${CARTOLENSIA_TRANSCODE_PREFERRED_ACCELERATORS:-nvidia,vaapi,cpu}"
@@ -616,6 +641,47 @@ case "${FLAVOR}" in
 esac
 exec "${PY}" -m cartolensia_ai.server --host "${HOST}" --port "${PORT}"
 SH
+  cat >"${STAGE}/bin/start-llm-executor" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "${ROOT}/bin/cartolensia-env"
+PROVIDER="${1:-${CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER:-ollama}}"
+MODEL="${2:-${CARTOLENSIA_KNOWLEDGE_LLM_MODEL:-qwen3:8b}}"
+case "${PROVIDER}" in
+  ollama)
+    if ! command -v ollama >/dev/null 2>&1; then
+      echo "Ollama is not bundled by default. Install/provide it offline, then rerun this command." >&2
+      exit 1
+    fi
+    export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
+    export OLLAMA_MODELS="${OLLAMA_MODELS:-${ROOT}/models/ollama}"
+    mkdir -p "${OLLAMA_MODELS}"
+    echo "Starting Ollama on ${OLLAMA_HOST}; model=${MODEL}; models=${OLLAMA_MODELS}" >&2
+    exec ollama serve
+    ;;
+  vllm)
+    PY="${CARTOLENSIA_VLLM_PYTHON:-}"
+    if [ -z "${PY}" ]; then
+      for candidate in "${ROOT}/ai-envs/nvidia-cu128/venv/bin/python" "${ROOT}/ai-envs/cpu-avx2/venv/bin/python" python3; do
+        if command -v "${candidate}" >/dev/null 2>&1 || [ -x "${candidate}" ]; then
+          PY="${candidate}"
+          break
+        fi
+      done
+    fi
+    HOST="${CARTOLENSIA_VLLM_HOST:-0.0.0.0}"
+    PORT="${CARTOLENSIA_VLLM_PORT:-8000}"
+    echo "Starting vLLM OpenAI-compatible server on ${HOST}:${PORT}; model=${MODEL}" >&2
+    exec "${PY}" -m vllm.entrypoints.openai.api_server --host "${HOST}" --port "${PORT}" --model "${MODEL}" --trust-remote-code false
+    ;;
+  *)
+    echo "Unsupported LLM provider ${PROVIDER}; expected ollama or vllm." >&2
+    exit 1
+    ;;
+esac
+SH
   cat >"${STAGE}/bin/start-transcode-node" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -743,11 +809,20 @@ PY
 }
 
 create_archive() {
-  require_command tar
-  require_command zstd
-  note "creating ${ARCHIVE}"
   rm -f "${ARCHIVE}" "${CHECKSUM}"
-  (cd "${WORK_DIR}" && tar --sort=name --owner=0 --group=0 --numeric-owner -I "zstd -T0 -19" -cf "${ARCHIVE}" "${PACKAGE_NAME}")
+  case "${ARCHIVE_FORMAT}" in
+    tar.zst)
+      require_command tar
+      require_command zstd
+      note "creating ${ARCHIVE}"
+      (cd "${WORK_DIR}" && tar --sort=name --owner=0 --group=0 --numeric-owner -I "zstd -T0 -19" -cf "${ARCHIVE}" "${PACKAGE_NAME}")
+      ;;
+    7z)
+      require_command 7z
+      note "creating ${ARCHIVE}"
+      (cd "${WORK_DIR}" && 7z a -t7z -m0=lzma2 -mx=7 "${ARCHIVE}" "${PACKAGE_NAME}" >/dev/null)
+      ;;
+  esac
   sha256sum "${ARCHIVE}" >"${CHECKSUM}"
   note "archive: ${ARCHIVE}"
   note "checksum: ${CHECKSUM}"

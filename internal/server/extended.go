@@ -508,6 +508,8 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			warnings = append(warnings, "No GPX/GPS tracks are indexed in the current scan.")
 		} else if stats.Tracks > 0 && trackCount == 0 {
 			warnings = append(warnings, fmt.Sprintf("%d track-like assets are indexed, but no parsed GPS/KML/KMZ/GPZ summaries exist yet. Run metadata enrichment for track files.", stats.Tracks))
+		} else if stats.Tracks > trackCount {
+			warnings = append(warnings, fmt.Sprintf("%d of %d track-like assets have parsed map geometry. The remaining %d need metadata enrichment or their read-only storage is currently unavailable.", trackCount, stats.Tracks, stats.Tracks-trackCount))
 		}
 		if tracksTruncated {
 			warnings = append(warnings, "Parsed track count is capped in status; use GPS/KML Tracks or map overlay metadata for exact filtered pages.")
@@ -523,7 +525,9 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			"indexed_assets":   stats.Assets,
 			"geotagged_assets": geotaggedCount,
 			"track_assets":     stats.Tracks,
+			"parsed_tracks":    trackCount,
 			"tracks":           trackCount,
+			"unparsed_tracks":  maxInt(stats.Tracks-trackCount, 0),
 			"tracks_truncated": tracksTruncated,
 			"warnings":         warnings,
 		})
@@ -1058,6 +1062,9 @@ func (s *Server) mapTrackFeatures(r *http.Request) (mapTrackFeatureResult, error
 		}
 		if budgeted < pointsPerTrack {
 			pointsPerTrack = budgeted
+		}
+		if len(tracks) > 500 && pointsPerTrack > 4 {
+			pointsPerTrack = 4
 		}
 	}
 	features := make([]map[string]any, 0, len(tracks))

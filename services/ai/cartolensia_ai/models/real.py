@@ -532,10 +532,30 @@ class RealBackend:
             np = _import_optional("numpy")
             suffix = str((request.options or {}).get("suffix") or ".media")
             temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
-            y, sr = librosa.load(str(temp_path), sr=None, mono=True)
+            max_seconds = _float_option_with_env(
+                request.options,
+                "max_analysis_seconds",
+                "CARTOLENSIA_AI_AUDIO_ANALYSIS_SECONDS",
+                180.0,
+            )
+            target_sr = int(_float_option_with_env(
+                request.options,
+                "analysis_sample_rate_hz",
+                "CARTOLENSIA_AI_AUDIO_ANALYSIS_SAMPLE_RATE",
+                22050.0,
+            ))
+            target_sr = max(8000, min(target_sr, 48000))
+            max_seconds = max(10.0, min(max_seconds, 30.0 * 60.0))
+            source_duration = None
+            try:
+                source_duration = float(librosa.get_duration(path=str(temp_path)))
+            except Exception:
+                source_duration = None
+            y, sr = librosa.load(str(temp_path), sr=target_sr, mono=True, duration=max_seconds)
             if y is None or len(y) == 0:
                 raise ValueError("audio decode produced no samples")
             duration = float(librosa.get_duration(y=y, sr=sr))
+            reported_duration = source_duration if source_duration and source_duration > 0 else duration
             tempo_values = librosa.beat.tempo(y=y, sr=sr, aggregate=None)
             tempo = _median_float(tempo_values, np)
             rms = librosa.feature.rms(y=y)
@@ -560,8 +580,11 @@ class RealBackend:
                     "asset_id": request.asset_id,
                     "engine": "librosa",
                     "model": "librosa_audio_features",
-                    "duration_seconds": duration,
+                    "duration_seconds": reported_duration,
+                    "analysis_duration_seconds": duration,
+                    "analysis_limited": bool(source_duration and source_duration > duration + 1.0),
                     "sample_rate_hz": int(sr),
+                    "analysis_sample_rate_hz": int(sr),
                     "tempo_bpm": tempo,
                     "key": key,
                     "mode": mode,
@@ -980,6 +1003,18 @@ def _float_option(options: dict[str, Any] | None, key: str, default: float) -> f
         return default
     try:
         return float(options[key])
+    except Exception:
+        return default
+
+
+def _float_option_with_env(options: dict[str, Any] | None, key: str, env_name: str, default: float) -> float:
+    if options and key in options and options[key] not in {None, ""}:
+        try:
+            return float(options[key])
+        except Exception:
+            return default
+    try:
+        return float(os.environ.get(env_name, ""))
     except Exception:
         return default
 

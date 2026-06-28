@@ -1281,22 +1281,20 @@ func (db *DB) ReleaseExpiredLeases(ctx context.Context, now time.Time) (int64, e
 		update jobs
 		set status=case
 				when status='cancel_requested' then 'canceled'
-				when attempts >= max_attempts then 'failed'
 				else 'queued'
 			end,
 			worker_id=null,
 			lease_expires_at=null,
 			finished_at=case
-				when status='cancel_requested' or attempts >= max_attempts then $1
+				when status='cancel_requested' then $1
 				else finished_at
 			end,
 			next_run_at=case
-				when status='cancel_requested' or attempts >= max_attempts then next_run_at
+				when status='cancel_requested' then next_run_at
 				else $1
 			end,
 			error=case
 				when status='cancel_requested' then error
-				when attempts >= max_attempts then coalesce(error, 'job lease expired')
 				else coalesce(error, 'job lease expired; retry queued')
 			end
 		where status in ('running', 'cancel_requested') and lease_expires_at < $1

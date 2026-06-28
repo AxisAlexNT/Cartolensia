@@ -398,3 +398,28 @@ Run the package with media mounted read-only and configure storage mode as `stri
 `scripts/remote/create-essential-export.sh` creates a single `.7z` archive intended for operator backup/restore, not application redistribution. It includes a PostgreSQL custom-format dump, redacted production config, storage manifest, and restore notes. It intentionally excludes originals, preview/cache thumbnails, component caches, model caches, local secret files, and packaged binaries.
 
 Treat this archive as sensitive because the database dump may contain private metadata, password hashes, sessions, public/private flags, OCR text, transcripts, captions, and storage paths. Transfer it only over authenticated channels such as SSH. For full disaster recovery, separately back up local secrets and any externally mounted original media according to the deployment's access-control policy.
+
+## Private Local Full 7z Bundle
+
+For a private, non-public, operator-reviewed bundle, use:
+
+```bash
+bash scripts/release/build-local-full-7z.sh
+```
+
+This is a convenience wrapper around the local full bundle builder with
+`CARTOLENSIA_LOCAL_FULL_ARCHIVE_FORMAT=7z`. The same license checks and manifest
+generation are used. Keep these defaults unless you have reviewed every payload:
+
+- no writes to originals;
+- no nonfree FFmpeg unless explicitly allowed after review;
+- AI models only from reviewed local caches;
+- Python runtime and LLM executor settings recorded in package config;
+- local LLM endpoints configured through `config/llm-executor.env` and
+  `bin/start-llm-executor`.
+
+The full bundle is intended for private transfer to air-gapped or low-connectivity
+hosts. It is not a GitHub release artifact by default and should not be published
+without a separate redistribution review of FFmpeg, CUDA/PyTorch, Tesseract,
+model weights, PostgreSQL runtime files, Python wheels, and all generated
+license notices.

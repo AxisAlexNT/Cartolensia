@@ -31,17 +31,22 @@ func TestParseKnowledgeToolRequestsRejectsUnknownTools(t *testing.T) {
 		"tools": [
 			{"tool":"search_media","query":"kind:photo 2025-05..2025-08 train","limit": 12},
 			{"tool":"delete_assets","query":"all"},
-			{"tool":"readonly_sql","sql":"select asset_id from cartolensia_search_assets","limit": 2000}
+			{"tool":"readonly_sql","sql":"select asset_id from cartolensia_search_assets","limit": 2000},
+			{"tool":"transcode_recommendations","query":"kind:video hevc","limit": 8},
+			{"tool":"find_segmented_video_series","query":"thm mp4 series","limit": 8}
 		]
 	}`)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if len(requests) != 2 {
-		t.Fatalf("expected two safe requests, got %#v", requests)
+	if len(requests) != 4 {
+		t.Fatalf("expected four safe requests, got %#v", requests)
 	}
 	if requests[1].Tool != "readonly_sql" || requests[1].Limit != 50 {
 		t.Fatalf("readonly SQL request was not capped: %#v", requests[1])
+	}
+	if requests[2].Tool != "transcode_recommendations" || requests[3].Tool != "find_segmented_video_series" {
+		t.Fatalf("expected safe action tools to pass allowlist: %#v", requests)
 	}
 }
 
@@ -97,5 +102,24 @@ func TestSearchPlanRussianMonthRange(t *testing.T) {
 	}
 	if strings.Contains(joined, "май-август") {
 		t.Fatalf("month words should not remain as ordinary tokens: %#v", plan.Tokens)
+	}
+}
+
+func TestSegmentedSeriesCandidatesGroupsSequentialVideoParts(t *testing.T) {
+	rows := []map[string]any{
+		{"asset_id": "thumb-a", "display_name": "CAM_0001.thm", "storage_name": "originals", "relative_path": "DCIM/CAM_0001.thm", "file_name": "CAM_0001.thm", "extension": "thm"},
+		{"asset_id": "video-a", "display_name": "CAM_0001.mp4", "storage_name": "originals", "relative_path": "DCIM/CAM_0001.mp4", "file_name": "CAM_0001.mp4", "extension": "mp4", "size_bytes": int64(10)},
+		{"asset_id": "video-b", "display_name": "CAM_0002.mp4", "storage_name": "originals", "relative_path": "DCIM/CAM_0002.mp4", "file_name": "CAM_0002.mp4", "extension": "mp4", "size_bytes": int64(20)},
+		{"asset_id": "other", "display_name": "IMG_0001.jpg", "storage_name": "originals", "relative_path": "DCIM/IMG_0001.jpg", "file_name": "IMG_0001.jpg", "extension": "jpg"},
+	}
+	candidates := segmentedSeriesCandidates(rows)
+	if len(candidates) != 1 {
+		t.Fatalf("expected one segmented candidate, got %#v", candidates)
+	}
+	if candidates[0].Prefix != "CAM" || len(candidates[0].Segments) != 2 || len(candidates[0].Delimiters) != 1 {
+		t.Fatalf("unexpected segmented candidate: %#v", candidates[0])
+	}
+	if candidates[0].Segments[0].AssetID != "video-a" || candidates[0].Segments[1].AssetID != "video-b" {
+		t.Fatalf("segments are not sorted by numeric part: %#v", candidates[0].Segments)
 	}
 }

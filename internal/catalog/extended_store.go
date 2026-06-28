@@ -51,8 +51,17 @@ func (s *MemoryStore) QueryAIMissingAssets(_ context.Context, query AIMissingQue
 	limit, offset := normalizePage(query.Limit, query.Offset)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	excluded := map[string]struct{}{}
+	for _, id := range query.ExcludeAssetIDs {
+		if strings.TrimSpace(id) != "" {
+			excluded[id] = struct{}{}
+		}
+	}
 	out := make([]Asset, 0)
 	for _, asset := range s.assets {
+		if _, ok := excluded[asset.ID]; ok {
+			continue
+		}
 		if query.MediaKind != "" && asset.MediaKind != query.MediaKind {
 			continue
 		}

@@ -39,6 +39,24 @@ func TestMemoryJobLeaseOwnershipAndExpiry(t *testing.T) {
 	if released.Status != jobs.StatusQueued {
 		t.Fatalf("expected queued after expired lease, got %#v", released)
 	}
+	released.Attempts = released.MaxAttempts
+	released.Status = jobs.StatusRunning
+	released.WorkerID = "worker-a"
+	expiredAgain := time.Now().UTC().Add(-time.Second)
+	released.LeaseExpiresAt = &expiredAgain
+	if err := store.UpdateJob(ctx, released); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReleaseExpiredLeases(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	released, err = store.GetJob(ctx, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.Status != jobs.StatusQueued {
+		t.Fatalf("expected max-attempt lease expiry to requeue, got %#v", released)
+	}
 	released.NextRunAt = nil
 	if err := store.UpdateJob(ctx, released); err != nil {
 		t.Fatal(err)

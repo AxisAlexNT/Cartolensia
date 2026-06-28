@@ -222,6 +222,7 @@ type AIMissingQuery struct {
 	Limit              int
 	Offset             int
 	MaxDurationSeconds float64
+	ExcludeAssetIDs    []string
 }
 
 type AIAssetTaskStatus struct {
@@ -687,6 +688,15 @@ type ComponentQuery struct {
 	Q        string
 	Limit    int
 	Offset   int
+}
+
+type AIDataCounts struct {
+	AssetTags        int `json:"asset_tags"`
+	Predictions      int `json:"predictions"`
+	FaceDetections   int `json:"face_detections"`
+	AssetEmbeddings  int `json:"asset_embeddings"`
+	EmbeddedAssets   int `json:"embedded_assets"`
+	SafetyCandidates int `json:"safety_candidates"`
 }
 
 type Store interface {
@@ -1390,7 +1400,16 @@ func (s *MemoryStore) releaseExpiredLeasesLocked(now time.Time) (int64, error) {
 			s.jobs[id] = cloneJob(job)
 			continue
 		}
-		_ = s.failLeasedLocked(job, fmt.Errorf("job lease expired"))
+		job.Status = jobs.StatusQueued
+		job.WorkerID = ""
+		job.LeaseExpiresAt = nil
+		next := now
+		job.NextRunAt = &next
+		if job.Error == "" {
+			job.Error = "job lease expired; retry queued"
+		}
+		jobs.AddLog(&job, "warn", "expired lease returned to queue")
+		s.jobs[id] = cloneJob(job)
 	}
 	return released, nil
 }

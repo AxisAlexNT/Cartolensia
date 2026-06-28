@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"path"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -1699,6 +1700,12 @@ func sanitizeJSONValue(value any) any {
 			out[i] = sanitizeJSONValue(item)
 		}
 		return out
+	case []map[string]any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeJSONMap(item)
+		}
+		return out
 	case map[string]string:
 		out := make(map[string]any, len(v))
 		for key, item := range v {
@@ -1706,6 +1713,28 @@ func sanitizeJSONValue(value any) any {
 		}
 		return out
 	default:
+		rv := reflect.ValueOf(v)
+		switch rv.Kind() {
+		case reflect.Map:
+			if rv.IsNil() {
+				return nil
+			}
+			out := make(map[string]any, rv.Len())
+			iter := rv.MapRange()
+			for iter.Next() {
+				out[fmt.Sprint(iter.Key().Interface())] = sanitizeJSONValue(iter.Value().Interface())
+			}
+			return out
+		case reflect.Slice, reflect.Array:
+			if rv.Kind() == reflect.Slice && rv.IsNil() {
+				return nil
+			}
+			out := make([]any, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				out[i] = sanitizeJSONValue(rv.Index(i).Interface())
+			}
+			return out
+		}
 		return v
 	}
 }
@@ -2266,6 +2295,40 @@ func (db *DB) ListAssetEmbeddings(ctx context.Context, assetID string) ([]catalo
 		out = append(out, embedding)
 	}
 	return out, rows.Err()
+}
+
+func (db *DB) AIDataCounts(ctx context.Context) (catalog.AIDataCounts, error) {
+	var counts catalog.AIDataCounts
+	err := db.pool.QueryRow(ctx, `
+		select
+			(select count(*) from asset_tags),
+			(select count(*) from (
+				select distinct on (asset_id, task, label, model_name, model_version)
+					id
+				from ai_predictions
+				order by asset_id, task, label, model_name, model_version, created_at desc
+			) latest_predictions),
+			(select count(*) from face_detections),
+			(select count(*) from asset_embeddings),
+			(select count(distinct asset_id) from asset_embeddings),
+			(select count(*) from (
+				select distinct on (asset_id, task, label, model_name, model_version)
+					task, label, confidence
+				from ai_predictions
+				order by asset_id, task, label, model_name, model_version, created_at desc
+			) safety
+			where (lower(task) like '%safety%' or lower(task) like '%nsfw%')
+			  and (lower(label) like '%unsafe%' or lower(label) like '%nsfw%')
+			  and (confidence is null or confidence >= 0.75))
+	`).Scan(
+		&counts.AssetTags,
+		&counts.Predictions,
+		&counts.FaceDetections,
+		&counts.AssetEmbeddings,
+		&counts.EmbeddedAssets,
+		&counts.SafetyCandidates,
+	)
+	return counts, err
 }
 
 func (db *DB) VectorSearch(ctx context.Context, modelID string, vector []float64, limit int) ([]catalog.VectorSearchResult, error) {

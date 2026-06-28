@@ -87,8 +87,18 @@ func aiMissingWhere(query catalog.AIMissingQuery) (string, []any, error) {
 	args := []any{mediaKind, task}
 	clauses := []string{
 		`a.media_kind=$1`,
-		`not exists(select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task=$2 and ats.status='succeeded')`,
+		`not exists(select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task=$2 and (` +
+			`ats.status in ('succeeded', 'skipped') or (` +
+			`ats.status='failed' and not (` + aiRetryableTaskFailureSQL("ats") + `)` +
+			`)))`,
 		completionClause,
+	}
+	if extensions := aiSupportedTaskExtensions(task, mediaKind); len(extensions) > 0 {
+		args = append(args, extensions)
+		clauses = append(clauses, fmt.Sprintf(`exists(
+			select 1 from asset_locations al
+			where al.asset_id=a.id and lower(trim(leading '.' from al.extension)) = any($%d)
+		)`, len(args)))
 	}
 	if query.MaxDurationSeconds > 0 {
 		args = append(args, query.MaxDurationSeconds)
@@ -98,7 +108,46 @@ func aiMissingWhere(query catalog.AIMissingQuery) (string, []any, error) {
 			0
 		) <= $%d`, len(args)))
 	}
+	if len(query.ExcludeAssetIDs) > 0 {
+		args = append(args, query.ExcludeAssetIDs)
+		clauses = append(clauses, fmt.Sprintf(`not (a.id::text = any($%d))`, len(args)))
+	}
 	return strings.Join(clauses, " and "), args, nil
+}
+
+func aiRetryableTaskFailureSQL(alias string) string {
+	errorExpr := "lower(coalesce(" + alias + ".error, ''))"
+	return strings.Join([]string{
+		errorExpr + ` like '%connection refused%'`,
+		errorExpr + ` like '%no ai sidecar is reachable%'`,
+		errorExpr + ` like '%ai sidecar is not reachable%'`,
+		errorExpr + ` like '%client.timeout exceeded%'`,
+		errorExpr + ` like '%context deadline exceeded%'`,
+		errorExpr + ` like '%temporary failure%'`,
+		errorExpr + ` like '%connection reset by peer%'`,
+		errorExpr + ` like '%unexpected eof%'`,
+		errorExpr + ` = 'ai sidecar returned status error'`,
+	}, " or ")
+}
+
+func aiSupportedTaskExtensions(task, mediaKind string) []string {
+	switch task {
+	case "classify_image", "safety_nsfw", "embed_image", "describe_image":
+		return []string{"jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"}
+	case "ocr_image":
+		return []string{"jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"}
+	case "detect_faces":
+		return []string{"jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"}
+	case "transcribe_audio":
+		if mediaKind == "video" {
+			return []string{"mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp", "3gpp"}
+		}
+		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
+	case "analyze_audio":
+		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
+	default:
+		return nil
+	}
 }
 
 func (db *DB) UpsertAIAssetTaskStatus(ctx context.Context, status catalog.AIAssetTaskStatus) (catalog.AIAssetTaskStatus, error) {

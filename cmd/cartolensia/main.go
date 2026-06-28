@@ -66,15 +66,19 @@ func main() {
 				return tlsServer.ListenAndServeTLS(cartolensia.Config.HTTP.TLSCertFile, cartolensia.Config.HTTP.TLSKeyFile)
 			})
 		} else {
-			cert, err := tlsutil.SelfSignedCertificate(tlsHosts([]string{cartolensia.Config.HTTP.Addr, tlsAddr}, cartolensia.Config.HTTP.TLSHosts))
+			cert, certPath, err := tlsutil.LoadOrCreateSelfSignedCertificate(cartolensia.Config.Cache.Dir, tlsHosts([]string{cartolensia.Config.HTTP.Addr, tlsAddr}, cartolensia.Config.HTTP.TLSHosts))
 			if err != nil {
-				log.Fatalf("generate self-signed certificate: %v", err)
+				log.Fatalf("load or generate self-signed certificate: %v", err)
 			}
 			tlsServer.TLSConfig = &tls.Config{
 				MinVersion:   tls.VersionTLS12,
 				Certificates: []tls.Certificate{cert},
 			}
-			log.Printf("cartolensia listening with generated self-signed TLS on %s using %s store", tlsAddr, cartolensia.StoreBackend)
+			if certPath != "" {
+				log.Printf("cartolensia listening with cached self-signed TLS on %s using %s store (cert %s)", tlsAddr, cartolensia.StoreBackend, certPath)
+			} else {
+				log.Printf("cartolensia listening with in-memory self-signed TLS on %s using %s store", tlsAddr, cartolensia.StoreBackend)
+			}
 			startServer(tlsServer, func() error {
 				return tlsServer.ListenAndServeTLS("", "")
 			})

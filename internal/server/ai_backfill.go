@@ -160,6 +160,9 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 	if err != nil {
 		return jobs.Permanent(err)
 	}
+	if leaseDuration <= 0 {
+		leaseDuration = 30 * time.Second
+	}
 	if payload.BatchSize <= 0 {
 		payload.BatchSize = 32
 	}
@@ -183,6 +186,8 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 		jobs.AddLog(job, "error", "AI sidecar is not reachable at "+endpoint)
 		return jobs.Transient(fmt.Errorf("AI sidecar is not reachable at %s", endpoint))
 	}
+	ctx, stopHeartbeat, heartbeatErrs := s.startAIBackfillHeartbeat(ctx, job.ID, workerID, leaseDuration)
+	defer stopHeartbeat()
 	total, err := s.countAIMissing(ctx, payload)
 	if err != nil {
 		return err
@@ -219,24 +224,21 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 			Task:               payload.Kind,
 			MediaKind:          payload.MediaKind,
 			Limit:              remaining,
-			Offset:             len(failedIDs),
 			MaxDurationSeconds: payload.MaxDurationSeconds,
+			ExcludeAssetIDs:    aiBackfillFailedIDList(failedIDs),
 		})
 		if err != nil {
 			return err
 		}
-		if len(page.Assets) == 0 {
-			break
-		}
 		ids := make([]string, 0, len(page.Assets))
 		for _, asset := range page.Assets {
-			if _, skip := failedIDs[asset.ID]; skip {
-				continue
-			}
 			ids = append(ids, asset.ID)
 		}
 		if len(ids) == 0 {
 			break
+		}
+		if err := aiBackfillHeartbeatError(heartbeatErrs); err != nil {
+			return err
 		}
 		req := aiJobRequest{
 			AssetIDs:        ids,
@@ -247,21 +249,46 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 			Model:           payload.Model,
 		}
 		var latest aiJobResult
+		var progressErr error
+		lastProgressFlush := time.Now().Add(-time.Minute)
 		result, err := s.runAIJobWithMediaURL(ctx, payload.Kind, req, func(asset catalog.Asset) string {
 			return s.aiWorkerMediaURL(asset.ID)
 		}, func(result aiJobResult) {
 			latest = result
+			job.ProgressCurrent = int64(processed + result.Processed + result.Skipped + len(result.Errors))
+			job.Counters.Updated = int64(stored + result.Stored)
+			job.Counters.Errors = int64(failed + len(result.Errors))
+			if progressErr == nil && time.Since(lastProgressFlush) >= 5*time.Second {
+				lastProgressFlush = time.Now()
+				progressErr = s.deps.Store.UpdateLeasedJob(ctx, *job, workerID)
+			}
 		})
 		if err != nil {
+			if heartbeatErr := aiBackfillHeartbeatError(heartbeatErrs); heartbeatErr != nil {
+				return heartbeatErr
+			}
+			return err
+		}
+		if progressErr != nil {
+			return progressErr
+		}
+		if err := aiBackfillHeartbeatError(heartbeatErrs); err != nil {
 			return err
 		}
 		if latest.Targets > 0 {
 			result = latest
 		}
+		failedBeforeBatch := failed
 		for _, msg := range result.Errors {
 			if id := strings.TrimSpace(strings.SplitN(msg, ":", 2)[0]); id != "" {
 				failedIDs[id] = struct{}{}
 			}
+		}
+		if result.Processed == 0 && result.Skipped == 0 && len(result.Errors) > 0 && len(failedIDs) == failedBeforeBatch {
+			for _, id := range ids {
+				failedIDs[id] = struct{}{}
+			}
+			jobs.AddLog(job, "warn", fmt.Sprintf("%s batch errors did not identify asset IDs; excluding %d batch assets for this run", payload.Task, len(ids)))
 		}
 		processed += result.Processed + result.Skipped
 		failed = len(failedIDs)
@@ -282,9 +309,6 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 		if err := s.deps.Store.UpdateLeasedJob(ctx, *job, workerID); err != nil {
 			return err
 		}
-		if result.Processed == 0 && result.Skipped == 0 && len(result.Errors) > 0 {
-			break
-		}
 	}
 	if err := s.cancelAIBackfillIfRequested(ctx, job, workerID); err != nil {
 		return err
@@ -295,6 +319,68 @@ func (s *Server) RunAIBackfillJob(ctx context.Context, job *jobs.Job, workerID s
 	job.Counters.Updated = int64(stored)
 	job.Counters.Errors = int64(failed)
 	return s.deps.Store.CompleteLeasedJob(ctx, *job, workerID)
+}
+
+func (s *Server) startAIBackfillHeartbeat(ctx context.Context, jobID, workerID string, leaseDuration time.Duration) (context.Context, context.CancelFunc, <-chan error) {
+	jobCtx, cancel := context.WithCancel(ctx)
+	errs := make(chan error, 1)
+	interval := leaseDuration / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	go func() {
+		if err := s.deps.Store.HeartbeatJob(jobCtx, jobID, workerID, leaseDuration); err != nil {
+			select {
+			case errs <- err:
+			default:
+			}
+			cancel()
+			return
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-jobCtx.Done():
+				return
+			case <-ticker.C:
+				if err := s.deps.Store.HeartbeatJob(jobCtx, jobID, workerID, leaseDuration); err != nil {
+					select {
+					case errs <- err:
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return jobCtx, cancel, errs
+}
+
+func aiBackfillHeartbeatError(errs <-chan error) error {
+	select {
+	case err := <-errs:
+		if err != nil {
+			return err
+		}
+	default:
+	}
+	return nil
+}
+
+func aiBackfillFailedIDList(ids map[string]struct{}) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	return out
 }
 
 func (s *Server) countAIMissing(ctx context.Context, payload aiBackfillJobPayload) (int, error) {

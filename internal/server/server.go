@@ -56,11 +56,14 @@ type Dependencies struct {
 }
 
 type Server struct {
-	deps               Dependencies
-	mux                *http.ServeMux
-	sessionMu          sync.RWMutex
-	geoAlignSessions   map[string]*geoAlignSession
-	videoTrackSessions map[string]*videoTrackPlayerSession
+	deps                     Dependencies
+	mux                      *http.ServeMux
+	sessionMu                sync.RWMutex
+	geoAlignSessions         map[string]*geoAlignSession
+	videoTrackSessions       map[string]*videoTrackPlayerSession
+	environmentUsageMu       sync.Mutex
+	environmentUsageCache    map[string]any
+	environmentUsageCachedAt time.Time
 }
 
 type explorerRow struct {
@@ -324,6 +327,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/vector/status", s.handleVectorStatus)
 	s.mux.HandleFunc("/api/v1/search/vector", s.handleVectorSearch)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
+	s.mux.HandleFunc("/api/v1/environment/usage", s.handleEnvironmentUsage)
 	s.mux.HandleFunc("/api/v1/backend/status", s.handleBackendStatus)
 	s.mux.HandleFunc("/api/v1/tiles/", s.handleTiles)
 	s.mux.HandleFunc("/api/v1/media/", s.handleMedia)
@@ -4019,13 +4023,49 @@ func aiSupportedMediaKinds(kind string) []string {
 func aiSupportsAsset(kind string, asset catalog.Asset) bool {
 	switch kind {
 	case "classify_image", "detect_faces", "safety_nsfw", "embed_image", "describe_image", "ocr_image":
-		return asset.MediaKind == "photo"
+		return asset.MediaKind == "photo" && assetHasAISupportedExtension(kind, asset)
 	case "transcribe_audio":
-		return asset.MediaKind == "audio" || asset.MediaKind == "video"
+		return (asset.MediaKind == "audio" || asset.MediaKind == "video") && assetHasAISupportedExtension(kind, asset)
 	case "analyze_audio":
-		return asset.MediaKind == "audio"
+		return asset.MediaKind == "audio" && assetHasAISupportedExtension(kind, asset)
 	default:
 		return false
+	}
+}
+
+func assetHasAISupportedExtension(kind string, asset catalog.Asset) bool {
+	allowed := aiSupportedAssetExtensions(kind, asset.MediaKind)
+	if len(allowed) == 0 {
+		return true
+	}
+	allowedSet := map[string]struct{}{}
+	for _, ext := range allowed {
+		allowedSet[ext] = struct{}{}
+	}
+	for _, loc := range asset.Locations {
+		ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(loc.Extension)), ".")
+		if _, ok := allowedSet[ext]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func aiSupportedAssetExtensions(kind, mediaKind string) []string {
+	switch kind {
+	case "classify_image", "safety_nsfw", "embed_image", "describe_image":
+		return []string{"jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"}
+	case "ocr_image", "detect_faces":
+		return []string{"jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"}
+	case "transcribe_audio":
+		if mediaKind == "video" {
+			return []string{"mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp", "3gpp"}
+		}
+		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
+	case "analyze_audio":
+		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
+	default:
+		return nil
 	}
 }
 
@@ -6046,6 +6086,19 @@ func (s *Server) aiDataCounts(ctx context.Context) map[string]any {
 		"asset_embeddings":  0,
 		"embedded_assets":   0,
 		"safety_candidates": 0,
+	}
+	if counter, ok := s.deps.Store.(interface {
+		AIDataCounts(context.Context) (catalog.AIDataCounts, error)
+	}); ok {
+		if aggregate, err := counter.AIDataCounts(ctx); err == nil {
+			counts["asset_tags"] = aggregate.AssetTags
+			counts["predictions"] = aggregate.Predictions
+			counts["face_detections"] = aggregate.FaceDetections
+			counts["asset_embeddings"] = aggregate.AssetEmbeddings
+			counts["embedded_assets"] = aggregate.EmbeddedAssets
+			counts["safety_candidates"] = aggregate.SafetyCandidates
+			return counts
+		}
 	}
 	if tags, err := s.deps.Store.ListAssetTags(ctx, ""); err == nil {
 		counts["asset_tags"] = len(tags)

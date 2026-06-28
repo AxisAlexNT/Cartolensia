@@ -1633,6 +1633,36 @@ td {
   margin-bottom: 4px;
 }
 
+.subpanel {
+  margin-top: 1rem;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.compact-head {
+  margin-bottom: 0.75rem;
+}
+
+.compact-table {
+  width: 100%;
+  margin-top: 0.75rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.compact-table th,
+.compact-table td {
+  border-bottom: 1px solid #30363d;
+  padding: 0.45rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.compact-table code {
+  overflow-wrap: anywhere;
+}
+
 .preview-tile {
   align-items: center;
   display: flex;
@@ -2882,6 +2912,25 @@ td {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.knowledge-action-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.knowledge-action {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.knowledge-action small {
+  color: #8b949e;
 }
 
 .knowledge-fact-grid {

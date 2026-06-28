@@ -30,6 +30,7 @@ import {
   type ComponentEvent,
   type ComponentRecord,
   type DuplicatePage,
+  type EnvironmentUsage,
   type ExplorerRow,
   type ExplorerView,
   type FileBrowseResponse,
@@ -40,6 +41,7 @@ import {
   type Job,
   type JobStats,
   type IndexingStatus,
+  type KnowledgeAction,
   type KnowledgeChatResponse,
   type KnowledgeExtractionResult,
   type KnowledgeFact,
@@ -284,6 +286,7 @@ const storageDraft = ref<StorageConfig>({ name: "", kind: "fs", root: "", mode: 
 const storageMessage = ref("");
 const plugins = ref<PluginManifest[]>([]);
 const stats = ref<Stats | null>(null);
+const environmentUsage = ref<EnvironmentUsage | null>(null);
 const duplicatePage = ref<DuplicatePage | null>(null);
 const backendMonthBuckets = ref<MonthBucket[]>([]);
 const backend = ref<BackendStatus | null>(null);
@@ -417,6 +420,8 @@ const mapTrackSource = new VectorSource();
 let mapTileLayer: TileLayer<XYZ> | null = null;
 let mapAssetLayer: VectorLayer<VectorSource> | null = null;
 let mapTrackLayer: VectorLayer<VectorSource> | null = null;
+let mapViewportRefreshTimer: number | undefined;
+let mapRefreshInFlight = false;
 let videoTrackMap: OLMap | null = null;
 let videoTrackTileLayer: TileLayer<XYZ> | null = null;
 let videoTrackTrackLayer: VectorLayer<VectorSource> | null = null;
@@ -2407,6 +2412,8 @@ const settingsTabs = computed(() => asArray(settings.value?.tabs));
 const yamlBoundFields = computed(() => asArray(settings.value?.yaml_bound_fields));
 const ffmpegAvailable = computed(() => Boolean((transcodingCapabilities.value?.ffmpeg as Record<string, unknown> | undefined)?.available));
 const ffprobeAvailable = computed(() => Boolean((transcodingCapabilities.value?.ffprobe as Record<string, unknown> | undefined)?.available));
+const environmentDatabase = computed(() => (environmentUsage.value?.database && typeof environmentUsage.value.database === "object" ? environmentUsage.value.database as { database_name?: string; size_bytes?: number; relations?: Array<{ name: string; size_bytes: number; rows: number }> } : null));
+const environmentDirectoryTotalBytes = computed(() => environmentUsage.value?.directories.reduce((sum, item) => sum + Number(item.bytes ?? 0), 0) ?? 0);
 const knowledgeMode = computed(() => runtimeTextSetting("knowledge.runner_mode", "deterministic"));
 const searchPlannerMode = computed(() => runtimeTextSetting("search.runner_mode", "deterministic"));
 
@@ -2931,6 +2938,9 @@ async function refresh() {
       pluginSettingText.value[plugin.id] = JSON.stringify((payload.settings ?? {}) as Record<string, unknown>, null, 2);
     }));
     stats.value = statData;
+    if (active.value === "Stats") {
+      environmentUsage.value = await api.environmentUsage().catch(() => null);
+    }
     duplicatePage.value = duplicateData;
     backendMonthBuckets.value = asArray(monthData);
     backend.value = backendStatus;
@@ -3030,11 +3040,18 @@ async function refreshSelectedPluginSettings() {
   pluginSettingText.value[plugin.id] = JSON.stringify((payload.settings ?? {}) as Record<string, unknown>, null, 2);
 }
 
+async function refreshEnvironmentUsage(force: boolean | Event = false) {
+  const forceRefresh = force === true || force instanceof Event;
+  environmentUsage.value = await api.environmentUsage(forceRefresh).catch(() => null);
+}
+
 async function refreshSettingsTabData(tab = settingsTab.value) {
   if (settingsTabNeedsEffective(tab)) {
     await ensureSettingsEffectiveLoaded();
   }
   switch (tab) {
+    case "general":
+      break;
     case "storage":
       storages.value = asArray(await api.storages());
       break;
@@ -3677,6 +3694,27 @@ async function askKnowledgeBase() {
   } finally {
     knowledgeChatBusy.value = false;
   }
+}
+
+async function runKnowledgeAction(action: KnowledgeAction) {
+  if (action.action === "start_transcode_session" && action.asset_id) {
+    const profile = typeof action.payload?.profile === "string" ? action.payload.profile : "h264_720p_lan";
+    knowledgeMessage.value = `Starting cache-only transcode session for ${action.asset_id}...`;
+    try {
+      transcodeSession.value = await api.startTranscodeSession(action.asset_id, profile);
+      transcodeSession.value = await waitForTranscodeReady(transcodeSession.value.id);
+      transcodeMessage.value = "Knowledge action started a Cartolensia-cache transcode session. Originals remain read-only.";
+      knowledgeMessage.value = "Transcode session is ready in the Cartolensia cache.";
+    } catch (err) {
+      knowledgeMessage.value = err instanceof Error ? err.message : String(err);
+    }
+    return;
+  }
+  if (action.action === "plan_segmented_video_merge") {
+    knowledgeMessage.value = "Segmented video merge is currently a review-only plan. A durable merge job must write to Cartolensia exports/cache before any manual copy.";
+    return;
+  }
+  knowledgeMessage.value = action.note || `Action ${action.action} is informational in this build.`;
 }
 
 async function refreshKnowledgeLLMStatus() {
@@ -4966,11 +5004,37 @@ const mapFeatureSummary = computed(() => {
   return `${mapFeatures.value.length} features · ${trackNote} · ${clustering} clustering · ${tiles}`;
 });
 
+function currentMapBBox(): string {
+  if (!olMap) return "";
+  const size = olMap.getSize();
+  if (!size || size[0] <= 0 || size[1] <= 0) return "";
+  const extent = olMap.getView().calculateExtent(size);
+  const min = toLonLat([extent[0], extent[1]]);
+  const max = toLonLat([extent[2], extent[3]]);
+  const minLon = Math.max(-180, Math.min(min[0], max[0]));
+  const maxLon = Math.min(180, Math.max(min[0], max[0]));
+  const minLat = Math.max(-90, Math.min(min[1], max[1]));
+  const maxLat = Math.min(90, Math.max(min[1], max[1]));
+  if (![minLon, minLat, maxLon, maxLat].every(Number.isFinite)) return "";
+  if (Math.abs(maxLon - minLon) < 0.000001 || Math.abs(maxLat - minLat) < 0.000001) return "";
+  return [minLon, minLat, maxLon, maxLat].map((value) => value.toFixed(6)).join(",");
+}
+
+function scheduleMapViewportRefresh() {
+  if (active.value !== "Map" || !mapData.value) return;
+  if (mapViewportRefreshTimer !== undefined) window.clearTimeout(mapViewportRefreshTimer);
+  mapViewportRefreshTimer = window.setTimeout(() => {
+    mapViewportRefreshTimer = undefined;
+    void refreshMap();
+  }, 300);
+}
+
 function mapQuery(): Record<string, string | number | boolean> {
   const zoom = Math.round(olMap?.getView().getZoom() ?? 10);
   const width = mapElement.value?.clientWidth ?? 1024;
   const height = mapElement.value?.clientHeight ?? 768;
   const markerPx = 24;
+  const bbox = currentMapBBox();
   const query: Record<string, string | number | boolean> = {
     cluster: mapCluster.value,
     zoom,
@@ -4980,8 +5044,9 @@ function mapQuery(): Record<string, string | number | boolean> {
     cluster_distance_px: markerPx * 2,
     asset_limit: 1000,
     track_limit: 20000,
-    track_point_budget: 20000
+    track_point_budget: mapTrackId.value ? 100000 : bbox ? 12000 : 20000
   };
+  if (bbox) query.bbox = bbox;
   if (mapMediaKind.value) query.media_kind = mapMediaKind.value;
   if (mapAlbumId.value) query.album_id = mapAlbumId.value;
   if (mapTrackId.value) query.track_id = mapTrackId.value;
@@ -4989,10 +5054,16 @@ function mapQuery(): Record<string, string | number | boolean> {
 }
 
 async function refreshMap() {
-  mapData.value = await api.map(mapQuery());
-  mapStatus.value = await api.mapStatus().catch(() => mapStatus.value);
-  await nextTick();
-  renderOpenLayers();
+  if (mapRefreshInFlight) return;
+  mapRefreshInFlight = true;
+  try {
+    mapData.value = await api.map(mapQuery());
+    mapStatus.value = await api.mapStatus().catch(() => mapStatus.value);
+    await nextTick();
+    renderOpenLayers();
+  } finally {
+    mapRefreshInFlight = false;
+  }
 }
 
 function mapFeatureAsset(feature: { get: (name: string) => unknown }) {
@@ -5467,6 +5538,9 @@ function ensureOpenLayersMap() {
         },
         { layerFilter: (layer) => layer === mapTrackLayer }
       );
+    });
+    olMap.on("moveend", () => {
+      scheduleMapViewportRefresh();
     });
   } else {
     olMap.setTarget(mapElement.value);
@@ -6837,6 +6911,42 @@ onBeforeUnmount(() => {
             <article><strong>{{ stats.duplicate_locations ?? 0 }}</strong><span>Duplicate locations</span></article>
             <article><strong>{{ formatBytes(stats.total_bytes) }}</strong><span>Total</span></article>
           </div>
+          <section class="subpanel">
+            <header class="panel-head compact-head">
+              <h3>Cartolensia Environment</h3>
+              <button type="button" class="btn btn-sm btn-outline-primary" @click="refreshEnvironmentUsage">
+                Refresh usage
+              </button>
+            </header>
+            <div class="metrics">
+              <article><strong>{{ formatBytes(environmentDatabase?.size_bytes ?? 0) }}</strong><span>PostgreSQL DB</span></article>
+              <article><strong>{{ environmentDatabase?.relations?.length ?? 0 }}</strong><span>Top DB relations</span></article>
+              <article><strong>{{ formatBytes(environmentDirectoryTotalBytes) }}</strong><span>Sidecar/cache dirs</span></article>
+              <article><strong>{{ environmentUsage?.directories.length ?? 0 }}</strong><span>Tracked dirs</span></article>
+            </div>
+            <table v-if="environmentUsage" class="compact-table">
+              <thead><tr><th>Area</th><th>Size</th><th>Files</th><th>Status</th><th>Path</th></tr></thead>
+              <tbody>
+                <tr v-for="item in environmentUsage.directories" :key="item.key">
+                  <td>{{ item.label }}</td>
+                  <td>{{ formatBytes(item.bytes ?? 0) }}</td>
+                  <td>{{ item.files }}</td>
+                  <td><span :class="['status-badge', item.status === 'ok' ? 'ok' : 'warn']">{{ item.status }}{{ item.truncated ? ' · bounded' : '' }}</span></td>
+                  <td><code>{{ item.path }}</code></td>
+                </tr>
+              </tbody>
+            </table>
+            <table v-if="environmentDatabase?.relations?.length" class="compact-table">
+              <thead><tr><th>DB relation</th><th>Rows</th><th>Size</th></tr></thead>
+              <tbody>
+                <tr v-for="relation in environmentDatabase.relations" :key="relation.name">
+                  <td><code>{{ relation.name }}</code></td>
+                  <td>{{ relation.rows }}</td>
+                  <td>{{ formatBytes(relation.size_bytes) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
         </section>
 
         <section v-else-if="active === 'Duplicates'" class="panel">
@@ -8233,6 +8343,31 @@ onBeforeUnmount(() => {
                   <small>{{ relation.relation }} {{ relation.to_entity || relation.to_asset_id || 'entity' }}</small>
                 </a>
               </div>
+              <div v-if="knowledgeChat.actions?.length" class="knowledge-action-list">
+                <article v-for="(action, idx) in knowledgeChat.actions" :key="`knowledge-action-${idx}-${action.action}`" class="knowledge-action">
+                  <div>
+                    <strong>{{ action.label || action.action }}</strong>
+                    <small v-if="action.note">{{ action.note }}</small>
+                  </div>
+                  <div class="inline-actions">
+                    <a
+                      v-if="action.asset_id"
+                      class="btn btn-sm btn-outline-secondary"
+                      :href="assetHref(action.asset_id)"
+                      @click="openAssetLink($event, action.asset_id)"
+                    >
+                      Open asset
+                    </a>
+                    <button type="button" class="btn btn-sm btn-outline-primary" @click="runKnowledgeAction(action)">
+                      {{ action.action === 'start_transcode_session' ? 'Start' : 'Review' }}
+                    </button>
+                  </div>
+                  <details v-if="action.details">
+                    <summary>Details</summary>
+                    <pre class="compact-json">{{ JSON.stringify(action.details, null, 2) }}</pre>
+                  </details>
+                </article>
+              </div>
               <details>
                 <summary>Tool calls and parsed plan</summary>
                 <div class="chip-row">
@@ -8792,6 +8927,35 @@ onBeforeUnmount(() => {
               <h3>Restart Required</h3>
               <p>{{ settings?.restart_required.note }}</p>
               <code>{{ yamlBoundFields.join(", ") }}</code>
+            </article>
+            <article class="settings-form settings-wide">
+              <div class="section-title">
+                <div>
+                  <h3>Environment Usage</h3>
+                  <p class="muted">Cartolensia-owned PostgreSQL/cache/model/component/export usage. Original storage is not scanned here.</p>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-primary" @click="refreshEnvironmentUsage">Refresh usage</button>
+              </div>
+              <div class="detail-grid compact-detail">
+                <article><strong>{{ formatBytes(environmentDatabase?.size_bytes ?? 0) }}</strong><span>Database</span></article>
+                <article><strong>{{ formatBytes(environmentDirectoryTotalBytes) }}</strong><span>Sidecar files</span></article>
+                <article><strong>{{ environmentUsage?.directories.length ?? 0 }}</strong><span>Tracked dirs</span></article>
+              </div>
+              <p v-if="!environmentUsage" class="empty-state compact-empty">
+                Usage scan is loaded on demand to keep Settings responsive on large installations.
+              </p>
+              <table v-if="environmentUsage" class="compact-table">
+                <thead><tr><th>Area</th><th>Size</th><th>Files</th><th>Status</th><th>Path</th></tr></thead>
+                <tbody>
+                  <tr v-for="item in environmentUsage.directories" :key="item.key">
+                    <td>{{ item.label }}</td>
+                    <td>{{ formatBytes(item.bytes ?? 0) }}</td>
+                    <td>{{ item.files }}</td>
+                    <td><span :class="['status-badge', item.status === 'ok' ? 'ok' : 'warn']">{{ item.status }}{{ item.truncated ? ' · bounded' : '' }}</span></td>
+                    <td><code>{{ item.path }}</code></td>
+                  </tr>
+                </tbody>
+              </table>
             </article>
           </div>
 

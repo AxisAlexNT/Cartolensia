@@ -34,6 +34,14 @@ func TestQueryAIMissingAssetsUsesOutputsAndTaskStatus(t *testing.T) {
 		t.Fatalf("expected only unprocessed photo, got total=%d assets=%v", page.Page.Total, page.Assets)
 	}
 
+	excludedPage, err := store.QueryAIMissingAssets(ctx, AIMissingQuery{Task: "ocr_image", MediaKind: "photo", Limit: 10, ExcludeAssetIDs: []string{photo3.Asset.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excludedPage.Page.Total != 0 || len(excludedPage.Assets) != 0 {
+		t.Fatalf("expected excluded missing photo to be skipped, got total=%d assets=%v", excludedPage.Page.Total, excludedPage.Assets)
+	}
+
 	audioPage, err := store.QueryAIMissingAssets(ctx, AIMissingQuery{Task: "analyze_audio", MediaKind: "audio", Limit: 10})
 	if err != nil {
 		t.Fatal(err)

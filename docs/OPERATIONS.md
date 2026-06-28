@@ -1080,3 +1080,48 @@ Operational notes:
 - The worker pool controls concurrency. For large GPU hosts, start with `workers.max_concurrency: 4` to `6`; increase only after watching memory, GPU utilization, and NAS read load.
 - Long-running jobs are cancelable from Jobs. Canceling a job does not delete metadata already stored.
 - Problem assets are counted as job errors and skipped for that run; the whole backfill continues.
+
+### Environment Usage And Cleanup Planning
+
+Use `GET /api/v1/environment/usage` or the Stats/Settings UI to inspect local
+Cartolensia storage use. The endpoint reports:
+
+- PostgreSQL database size and largest user relations;
+- cache directory size;
+- component directory size;
+- model cache size;
+- AI Python environment size;
+- export directory size.
+
+The scan is intentionally limited to Cartolensia-owned directories. Original
+storages and Samba/NFS mounts are not walked by this endpoint, so checking usage
+cannot accidentally stress or write to the archive.
+
+Large deployments should watch `track_points`, `asset_locations`,
+`asset_embeddings`, `job_logs`, `knowledge_facts`, and `knowledge_relations`.
+If `job_logs` grows too quickly, reduce log verbosity for long backfills or prune
+old succeeded job logs after exporting an essential backup.
+
+### Cached Self-Signed TLS
+
+When `http.tls_auto_self_signed` is enabled, Cartolensia writes generated
+certificate material under the configured cache directory and reuses it until it
+is near expiry. This avoids a new browser warning on every service restart while
+still keeping the certificate outside original storage.
+
+For production, prefer a reverse proxy or an operator-provided certificate. The
+self-signed mode is intended for private LAN deployments and air-gapped review.
+
+### Knowledge Agent Actions
+
+The Knowledge Base chat can return guarded action cards in addition to text:
+
+- `start_transcode_session`: creates a cache/export-only transcode session from
+  an asset and profile suggestion. It never writes into originals.
+- `plan_segmented_video_merge`: identifies likely sequential video part series
+  and returns a review plan. It does not run a merge automatically.
+
+The agent may use deterministic tools or a local LLM endpoint, but Cartolensia
+keeps policy enforcement server-side. Tool calls are bounded, read-only for
+PostgreSQL search/knowledge views, and write only to Cartolensia metadata,
+cache, or export areas when an explicit action button is pressed.

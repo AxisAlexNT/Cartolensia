@@ -9,6 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +52,7 @@ type knowledgeChatResponse struct {
 	Answer         string                         `json:"answer"`
 	Planner        searchPlan                     `json:"planner"`
 	ToolCalls      []map[string]any               `json:"tool_calls"`
+	Actions        []knowledgeAction              `json:"actions,omitempty"`
 	Media          []knowledgeMediaResult         `json:"media"`
 	Facts          []catalog.KnowledgeFact        `json:"facts"`
 	Relations      []catalog.KnowledgeRelation    `json:"relations"`
@@ -57,6 +61,18 @@ type knowledgeChatResponse struct {
 	Limit          int                            `json:"limit"`
 	LLMStatus      string                         `json:"llm_status"`
 	Note           string                         `json:"note"`
+}
+
+type knowledgeAction struct {
+	Action  string         `json:"action"`
+	Label   string         `json:"label"`
+	AssetID string         `json:"asset_id,omitempty"`
+	Query   string         `json:"query,omitempty"`
+	Method  string         `json:"method,omitempty"`
+	URL     string         `json:"url,omitempty"`
+	Payload map[string]any `json:"payload,omitempty"`
+	Note    string         `json:"note,omitempty"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 type knowledgeToolRequest struct {
@@ -237,6 +253,7 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 	relations := []catalog.KnowledgeRelation{}
 	media := []knowledgeMediaResult{}
 	sqlResults := []database.ReadOnlyQueryResult{}
+	actions := []knowledgeAction{}
 	seenFacts := map[string]struct{}{}
 	seenRelations := map[string]struct{}{}
 	seenMedia := map[string]struct{}{}
@@ -279,6 +296,14 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 			}
 		}
 	}
+	addActions := func(items []knowledgeAction) {
+		for _, item := range items {
+			actions = append(actions, item)
+			if len(actions) >= limit {
+				break
+			}
+		}
+	}
 	perTermLimit := limit
 	if len(terms) > 1 {
 		perTermLimit = max(5, limit/len(terms))
@@ -290,6 +315,25 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 		} else {
 			addMedia(mediaResults)
 			toolCalls = append(toolCalls, map[string]any{"tool": "search_media", "query": plan.Executable, "returned": len(mediaResults), "total": total})
+		}
+	}
+	if knowledgeMessageLooksLikeTranscode(message) {
+		results, transcodeActions, err := s.knowledgeTranscodeRecommendations(ctx, firstNonEmpty(plan.Executable, message), min(limit, 8))
+		if err != nil {
+			toolCalls = append(toolCalls, map[string]any{"tool": "transcode_recommendations", "query": message, "error": err.Error()})
+		} else {
+			addMedia(results)
+			addActions(transcodeActions)
+			toolCalls = append(toolCalls, map[string]any{"tool": "transcode_recommendations", "query": message, "returned": len(transcodeActions)})
+		}
+	}
+	if knowledgeMessageLooksLikeSegmentMerge(message) {
+		segmentActions, err := s.knowledgeSegmentedSeriesPlans(ctx, message, min(limit, 12))
+		if err != nil {
+			toolCalls = append(toolCalls, map[string]any{"tool": "find_segmented_video_series", "query": message, "error": err.Error()})
+		} else {
+			addActions(segmentActions)
+			toolCalls = append(toolCalls, map[string]any{"tool": "find_segmented_video_series", "query": message, "returned": len(segmentActions)})
 		}
 	}
 	for _, term := range terms {
@@ -354,11 +398,28 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 					}
 					sqlResults = append(sqlResults, result)
 					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "sql_sha256": sqlDigest(result.SQL), "views": result.Views, "returned": result.Count})
+				case "transcode_recommendations":
+					results, transcodeActions, err := s.knowledgeTranscodeRecommendations(ctx, firstNonEmpty(request.Query, message), clampKnowledgeLimit(request.Limit, min(limit, 8)))
+					if err != nil {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "error": err.Error()})
+						continue
+					}
+					addMedia(results)
+					addActions(transcodeActions)
+					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "returned": len(transcodeActions)})
+				case "find_segmented_video_series":
+					segmentActions, err := s.knowledgeSegmentedSeriesPlans(ctx, firstNonEmpty(request.Query, message), clampKnowledgeLimit(request.Limit, min(limit, 12)))
+					if err != nil {
+						toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "error": err.Error()})
+						continue
+					}
+					addActions(segmentActions)
+					toolCalls = append(toolCalls, map[string]any{"tool": request.Tool, "query": request.Query, "returned": len(segmentActions)})
 				}
 			}
 		}
 	}
-	answer := buildKnowledgeAnswer(message, media, facts, relations, sqlResults)
+	answer := buildKnowledgeAnswer(message, media, facts, relations, sqlResults, actions)
 	llmStatus := "not_used"
 	note := "Local deterministic tool runner. Configure a local LLM endpoint to synthesize richer answers; remote LLM APIs are not used by default."
 	if runtimeStringSetting("knowledge.runner_mode", "deterministic") == "local_llm" {
@@ -379,6 +440,7 @@ func (s *Server) runKnowledgeChatTools(ctx context.Context, message string, limi
 		Answer:     answer,
 		Planner:    plan,
 		ToolCalls:  toolCalls,
+		Actions:    actions,
 		Media:      media,
 		Facts:      facts,
 		Relations:  relations,
@@ -538,10 +600,10 @@ func knowledgeLLMPrompt(message string, plan searchPlan, media []knowledgeMediaR
 func knowledgeToolPlanPrompt(message string, plan searchPlan) string {
 	var builder strings.Builder
 	builder.WriteString("You are a local Cartolensia archive query planner. Return only compact JSON, no markdown. ")
-	builder.WriteString("Allowed tools: search_media, search_facts, search_relations, readonly_sql. ")
+	builder.WriteString("Allowed tools: search_media, search_facts, search_relations, readonly_sql, transcode_recommendations, find_segmented_video_series. ")
 	builder.WriteString("Every tool is read-only and bounded. Do not request writes or raw tables. ")
 	builder.WriteString("readonly_sql may SELECT only from cartolensia_search_* views.\n")
-	builder.WriteString(`JSON shape: {"tools":[{"tool":"search_media","query":"kind:photo 2025-05..2025-08 поезд","limit":12},{"tool":"search_facts","query":"поезд","limit":12},{"tool":"search_relations","query":"поезд","limit":12},{"tool":"readonly_sql","sql":"select asset_id, display_name, media_kind from cartolensia_search_assets where media_kind='photo' limit 20","limit":20}]}`)
+	builder.WriteString(`JSON shape: {"tools":[{"tool":"search_media","query":"kind:photo 2025-05..2025-08 поезд","limit":12},{"tool":"search_facts","query":"поезд","limit":12},{"tool":"search_relations","query":"поезд","limit":12},{"tool":"readonly_sql","sql":"select asset_id, display_name, media_kind from cartolensia_search_assets where media_kind='photo' limit 20","limit":20},{"tool":"transcode_recommendations","query":"kind:video hevc 4k","limit":8},{"tool":"find_segmented_video_series","query":"camera segmented mp4 thm","limit":8}]}`)
 	builder.WriteString("\nUser request:\n")
 	builder.WriteString(message)
 	builder.WriteString("\nDeterministic parsed query:\n")
@@ -584,6 +646,10 @@ func parseKnowledgeToolRequests(raw string) ([]knowledgeToolRequest, error) {
 			if request.SQL == "" {
 				continue
 			}
+		case "transcode_recommendations", "find_segmented_video_series":
+			if request.Query == "" {
+				request.Query = request.Tool
+			}
 		default:
 			continue
 		}
@@ -593,6 +659,247 @@ func parseKnowledgeToolRequests(raw string) ([]knowledgeToolRequest, error) {
 		}
 	}
 	return out, nil
+}
+
+func knowledgeMessageLooksLikeTranscode(message string) bool {
+	lower := strings.ToLower(message)
+	needles := []string{
+		"transcode", "transcoding", "encode", "encoder", "convert", "compress", "h264", "h.264", "h265", "h.265", "hevc", "av1",
+		"транскод", "перекод", "кодиров", "сжать", "сжима", "конверт", "пережат",
+	}
+	return containsAnySubstring(lower, needles)
+}
+
+func knowledgeMessageLooksLikeSegmentMerge(message string) bool {
+	lower := strings.ToLower(message)
+	needles := []string{
+		"merge", "join", "concat", "segment", "sequential", "series", ".thm", "thm",
+		"скле", "объедин", "сегмент", "част", "серии", "серия", "последовательн",
+	}
+	return containsAnySubstring(lower, needles)
+}
+
+func containsAnySubstring(value string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) knowledgeTranscodeRecommendations(ctx context.Context, query string, limit int) ([]knowledgeMediaResult, []knowledgeAction, error) {
+	limit = clampKnowledgeLimit(limit, 8)
+	query = strings.TrimSpace(query)
+	if !strings.Contains(strings.ToLower(query), "kind:") && !strings.Contains(strings.ToLower(query), "media_kind:") {
+		query = strings.TrimSpace("kind:video " + query)
+	}
+	plan := s.buildNaturalLanguageSearchPlan(query)
+	results, _, err := s.searchKnowledgeMedia(ctx, plan, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !knowledgeHasVideoResults(results) {
+		fallbackPlan := s.buildNaturalLanguageSearchPlan("kind:video")
+		results, _, err = s.searchKnowledgeMedia(ctx, fallbackPlan, limit)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	actions := make([]knowledgeAction, 0, len(results))
+	for _, result := range results {
+		if result.Asset.MediaKind != "video" {
+			continue
+		}
+		profile, details := transcodeRecommendationForAsset(result.Asset)
+		actions = append(actions, knowledgeAction{
+			Action:  "start_transcode_session",
+			Label:   "Start cache-only transcode",
+			AssetID: result.Asset.ID,
+			Method:  http.MethodPost,
+			URL:     "/api/v1/media/" + url.PathEscape(result.Asset.ID) + "/transcode-session",
+			Payload: map[string]any{"profile": profile},
+			Note:    "Starts an on-demand transcode session under the Cartolensia cache. Originals remain read-only and are never overwritten.",
+			Details: details,
+		})
+		if len(actions) >= limit {
+			break
+		}
+	}
+	return results, actions, nil
+}
+
+func knowledgeHasVideoResults(results []knowledgeMediaResult) bool {
+	for _, result := range results {
+		if result.Asset.MediaKind == "video" {
+			return true
+		}
+	}
+	return false
+}
+
+func transcodeRecommendationForAsset(asset catalog.Asset) (string, map[string]any) {
+	metadata := asset.Metadata
+	codec := strings.ToLower(stringFromAny(metadata["codec"]))
+	container := strings.ToLower(stringFromAny(metadata["container"]))
+	width := int(floatFromAny(metadata["width"]))
+	height := int(floatFromAny(metadata["height"]))
+	duration := floatFromAny(metadata["duration_seconds"])
+	bitrate := int64(floatFromAny(metadata["bitrate_bps"]))
+	profile := "h264_720p_lan"
+	reasons := []string{"browser-compatible H.264 preview is the safest default"}
+	if width >= 3840 || height >= 2160 {
+		profile = "h264_1080p_lan"
+		reasons = append(reasons, "source is 4K or larger; 1080p preview balances LAN playback and storage")
+	}
+	if codec == "av1" || strings.Contains(codec, "hevc") || strings.Contains(codec, "h265") {
+		reasons = append(reasons, "source codec may not play everywhere without transcoding")
+	}
+	if bitrate > 60_000_000 {
+		reasons = append(reasons, "high source bitrate can stall browser playback over slower clients")
+	}
+	return profile, map[string]any{
+		"asset_name":       asset.DisplayName,
+		"profile":          profile,
+		"codec":            codec,
+		"container":        container,
+		"width":            width,
+		"height":           height,
+		"duration_seconds": duration,
+		"bitrate_bps":      bitrate,
+		"reasons":          reasons,
+		"output_policy":    "Cartolensia cache/export only; never write to originals",
+	}
+}
+
+type segmentedSeriesCandidate struct {
+	Directory  string
+	Prefix     string
+	Segments   []segmentedSeriesItem
+	Delimiters []segmentedSeriesItem
+}
+
+type segmentedSeriesItem struct {
+	AssetID      string `json:"asset_id,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	FileName     string `json:"file_name"`
+	RelativePath string `json:"relative_path"`
+	StorageName  string `json:"storage_name,omitempty"`
+	Extension    string `json:"extension"`
+	Number       int    `json:"number"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+}
+
+func (s *Server) knowledgeSegmentedSeriesPlans(ctx context.Context, message string, limit int) ([]knowledgeAction, error) {
+	sqlStore, ok := s.deps.Store.(knowledgeReadOnlySQLStore)
+	if !ok {
+		return nil, fmt.Errorf("segmented video series detection requires PostgreSQL search views")
+	}
+	limit = clampKnowledgeLimit(limit, 8)
+	rowLimit := max(500, limit*300)
+	if rowLimit > 1000 {
+		rowLimit = 1000
+	}
+	result, err := sqlStore.ReadOnlySearchQuery(ctx, `
+		select asset_id, display_name, media_kind, storage_name, relative_path, file_name, extension, size_bytes
+		from cartolensia_search_assets
+		where lower(extension) in ('mp4','mov','m4v','thm')
+		order by storage_name, relative_path, file_name
+	`, rowLimit)
+	if err != nil {
+		return nil, err
+	}
+	candidates := segmentedSeriesCandidates(result.Rows)
+	sort.Slice(candidates, func(i, j int) bool {
+		if len(candidates[i].Segments) == len(candidates[j].Segments) {
+			return candidates[i].Directory < candidates[j].Directory
+		}
+		return len(candidates[i].Segments) > len(candidates[j].Segments)
+	})
+	actions := make([]knowledgeAction, 0, min(limit, len(candidates)))
+	for _, candidate := range candidates {
+		if len(candidate.Segments) < 2 {
+			continue
+		}
+		segments := make([]map[string]any, 0, len(candidate.Segments))
+		for _, segment := range candidate.Segments {
+			segments = append(segments, map[string]any{
+				"asset_id":      segment.AssetID,
+				"display_name":  segment.DisplayName,
+				"relative_path": segment.RelativePath,
+				"file_name":     segment.FileName,
+				"number":        segment.Number,
+				"size_bytes":    segment.SizeBytes,
+				"storage_name":  segment.StorageName,
+				"extension":     segment.Extension,
+			})
+		}
+		actions = append(actions, knowledgeAction{
+			Action: "plan_segmented_video_merge",
+			Label:  fmt.Sprintf("Review merge plan: %s (%d segments)", candidate.Prefix, len(candidate.Segments)),
+			Query:  message,
+			Note:   "Review-only plan. A future merge job must write output under Cartolensia exports/cache first; originals remain read-only and manual cleanup is separate.",
+			Details: map[string]any{
+				"directory":        candidate.Directory,
+				"prefix":           candidate.Prefix,
+				"segments":         segments,
+				"delimiter_count":  len(candidate.Delimiters),
+				"output_policy":    "Cartolensia export/cache only; non-overwriting; originals are never removed",
+				"ffmpeg_strategy":  "concat demuxer with stream-copy when compatible, otherwise cache-scoped transcode after validation",
+				"source_row_limit": result.Count,
+			},
+		})
+		if len(actions) >= limit {
+			break
+		}
+	}
+	return actions, nil
+}
+
+var segmentedSeriesNameRE = regexp.MustCompile(`(?i)^(.+?)[_-](\d{1,8})\.(mp4|mov|m4v|thm)$`)
+
+func segmentedSeriesCandidates(rows []map[string]any) []segmentedSeriesCandidate {
+	groups := map[string]*segmentedSeriesCandidate{}
+	for _, row := range rows {
+		fileName := strings.TrimSpace(stringFromAny(row["file_name"]))
+		match := segmentedSeriesNameRE.FindStringSubmatch(fileName)
+		if len(match) != 4 {
+			continue
+		}
+		extension := strings.ToLower(match[3])
+		item := segmentedSeriesItem{
+			AssetID:      stringFromAny(row["asset_id"]),
+			DisplayName:  stringFromAny(row["display_name"]),
+			FileName:     fileName,
+			RelativePath: stringFromAny(row["relative_path"]),
+			StorageName:  stringFromAny(row["storage_name"]),
+			Extension:    extension,
+			Number:       int(floatFromAny(match[2])),
+			SizeBytes:    int64(floatFromAny(row["size_bytes"])),
+		}
+		directory := item.StorageName + ":" + filepath.ToSlash(filepath.Dir(item.RelativePath))
+		prefix := strings.ToLower(match[1])
+		key := directory + ":" + prefix
+		group := groups[key]
+		if group == nil {
+			group = &segmentedSeriesCandidate{Directory: directory, Prefix: match[1]}
+			groups[key] = group
+		}
+		if extension == "thm" {
+			group.Delimiters = append(group.Delimiters, item)
+		} else {
+			group.Segments = append(group.Segments, item)
+		}
+	}
+	candidates := make([]segmentedSeriesCandidate, 0, len(groups))
+	for _, group := range groups {
+		sort.Slice(group.Segments, func(i, j int) bool { return group.Segments[i].Number < group.Segments[j].Number })
+		sort.Slice(group.Delimiters, func(i, j int) bool { return group.Delimiters[i].Number < group.Delimiters[j].Number })
+		if len(group.Segments) >= 2 {
+			candidates = append(candidates, *group)
+		}
+	}
+	return candidates
 }
 
 func (s *Server) searchKnowledgeMedia(ctx context.Context, plan searchPlan, limit int) ([]knowledgeMediaResult, int, error) {
@@ -941,12 +1248,12 @@ func knowledgeChatTerms(message string, plan searchPlan) []string {
 	return terms
 }
 
-func buildKnowledgeAnswer(message string, media []knowledgeMediaResult, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation, sqlResults []database.ReadOnlyQueryResult) string {
+func buildKnowledgeAnswer(message string, media []knowledgeMediaResult, facts []catalog.KnowledgeFact, relations []catalog.KnowledgeRelation, sqlResults []database.ReadOnlyQueryResult, actions []knowledgeAction) string {
 	var builder strings.Builder
 	builder.WriteString("I searched the local Knowledge Base and Knowledge Graph for: ")
 	builder.WriteString(message)
 	builder.WriteString("\n\n")
-	if len(media) == 0 && len(facts) == 0 && len(relations) == 0 && len(sqlResults) == 0 {
+	if len(media) == 0 && len(facts) == 0 && len(relations) == 0 && len(sqlResults) == 0 && len(actions) == 0 {
 		builder.WriteString("No mined facts or relations matched yet. Run knowledge extraction after OCR, transcripts, captions, and metadata jobs have produced more local metadata.")
 		return builder.String()
 	}
@@ -998,6 +1305,16 @@ func buildKnowledgeAnswer(message string, media []knowledgeMediaResult, facts []
 		builder.WriteString("\nRead-only query summaries:\n")
 		for _, result := range sqlResults {
 			builder.WriteString(fmt.Sprintf("- %d rows from %s\n", result.Count, strings.Join(result.Views, ",")))
+		}
+	}
+	if len(actions) > 0 {
+		builder.WriteString("\nAvailable safe actions:\n")
+		for i, action := range actions {
+			if i >= 8 {
+				builder.WriteString(fmt.Sprintf("- plus %d more actions\n", len(actions)-i))
+				break
+			}
+			builder.WriteString(fmt.Sprintf("- %s: %s\n", firstNonEmpty(action.Label, action.Action), compactFactObject(action.Note)))
 		}
 	}
 	builder.WriteString("\nThis answer is tool-grounded only; extracted facts can contain OCR/AI errors and should remain reviewable.")

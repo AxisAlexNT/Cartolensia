@@ -4496,3 +4496,140 @@ Safety confirmation:
 - no missing-file marking;
 - no commit;
 - no push.
+
+## 2026-06-28 Remote Production Stabilization, Usage, LLM Actions, And AI Backfill
+
+Implemented and deployed:
+
+- Added cached self-signed TLS certificate generation. Cartolensia now reuses an existing non-expired generated certificate under the configured cache directory instead of regenerating a new certificate on every restart.
+- Added `GET /api/v1/environment/usage`, reporting PostgreSQL database size, largest application relations, and Cartolensia-owned cache/model/component/export/runtime directory sizes. Originals are intentionally excluded from this scan.
+- Added Settings/Stats UI cards for database and environment space usage.
+- Extended the local Knowledge/LLM agent action model with guarded action cards:
+  - transcode recommendations based on asset metadata/ffprobe-derived metadata;
+  - cache-only transcode session creation from chat actions;
+  - segmented video-series detection for camera files such as numbered `mp4` parts delimited by `thm` files;
+  - all actions remain non-destructive and write only to Cartolensia cache/export areas.
+- Hardened AI backfill jobs:
+  - long-running AI backfills now heartbeat and refresh progress/lease state;
+  - failed/skipped/succeeded asset task statuses are excluded from future missing-work scans so one bad asset does not permanently block a full backfill;
+  - batch failures advance past the failed asset IDs when possible instead of repeatedly retrying the same first batch.
+- Added local full `.7z` package wrapper: `scripts/release/build-local-full-7z.sh`.
+- Extended the local full package builder with LLM executor env/script support for Ollama/vLLM-style local endpoints.
+
+Remote production status:
+
+- Active remote release: `/opt/cartolensia/releases/local-20260628T-env-llm-actions2`.
+- Public LAN URL remains `https://192.168.237.126:18443/`.
+- `cartolensia`, `cartolensia-ai`, and `cartolensia-postgres` are active.
+- TLS startup log confirms cached certificate reuse from `/var/lib/cartolensia/cache/tls/`.
+- Local LLM status is configured and reachable through Ollama:
+  - provider: `ollama`;
+  - endpoint: `http://127.0.0.1:11434`;
+  - model: `qwen3:8b`.
+- AI sidecar is CUDA-backed and reachable on `http://127.0.0.1:19090`.
+- pgvector remains active as `pgvector_ivfflat`.
+- Current indexed production scale at validation:
+  - assets: `553896`;
+  - locations: `620450`;
+  - photos: `443933`;
+  - videos: `28580`;
+  - audio: `8781`;
+  - documents: `133635`;
+  - tracks: `5521`;
+  - total indexed bytes: about `12.56 TB`.
+- Environment usage at validation:
+  - PostgreSQL database: about `14.30 GB`;
+  - largest relation: `track_points`, about `11.82 GB`, `61102323` rows;
+  - cache directory: about `329 MB`;
+  - model cache: about `3.44 GB`;
+  - AI venv: about `123 MB`.
+- Essential backup export completed:
+  - `/var/lib/cartolensia/exports/cartolensia-essential-20260628T024819Z.7z`;
+  - size: about `1009 MB`;
+  - includes DB/config metadata, excludes originals and thumbnail/model/cache payloads.
+
+AI processing status at validation:
+
+- Verification backfill succeeded for a bounded 24-photo sample:
+  - OCR: `24/24`, stored `6`;
+  - face detection: `24/24`, stored `142`.
+- Full missing-work backfill is running/queued:
+  - running: OCR, face detection, embeddings, descriptions/captions, safety, and classification;
+  - queued: audio feature extraction, audio transcripts, and video audio transcripts;
+  - leases and counters are updating, so the earlier “stuck at 0” behavior is fixed for the current deployment.
+- A small number of pre-fix one-batch failures remain in job history as historical rows; new backfill jobs are advancing.
+
+Validation:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `bash -n scripts/release/build-local-full-tarzst.sh scripts/release/build-local-full-7z.sh scripts/remote/create-essential-export.sh`
+- Authenticated remote checks for stats, jobs, environment usage, AI status, LLM status, and GPU state.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-28 Continuation: Production Queue Supervision And Settings Latency Fix
+
+Live remote state captured before the platform blocked further SSH escalation:
+
+- Public LAN URL remained `https://192.168.237.126:18443/`.
+- AI sidecar was reachable and CUDA-backed:
+  - worker status: `ok`;
+  - device: `cuda`;
+  - vector store: `pgvector_ivfflat`.
+- Indexed production scale at the check:
+  - assets: `511867`;
+  - photos: `444033`;
+  - videos: `28580`;
+  - audio: `9506`;
+  - documents: `133672`;
+  - tracks: `5521`;
+  - hashed: `369607`;
+  - unhashed: `251705`;
+  - total indexed bytes: about `12.57 TB`.
+- AI metadata counts were increasing:
+  - embedded assets: `47617`;
+  - predictions: `383601`;
+  - face detections: `20369`;
+  - asset tags: `108951`.
+- Active/queued remote work included:
+  - running full AI backfills for classification, safety, descriptions/captions, embeddings, faces, OCR, audio transcription, and video transcription;
+  - running discovery with folder worker counters updating;
+  - running targeted track metadata enrichment for `ZE554KL/GPSLogger`;
+  - queued hashing of unhashed assets;
+  - queued metadata-only missing enrichment pass.
+- GPU telemetry at the sample: about `30%` utilization, `3615/16380 MB` VRAM, `52 W`, `53 C`.
+
+Local fixes in this continuation:
+
+- Made Settings -> General stop auto-loading `GET /api/v1/environment/usage`.
+- The environment usage card now loads only on explicit “Refresh usage” or through the Stats page, keeping Settings responsive on large installations where cache/model/component directories can contain many files.
+- Added a UI note explaining that usage scanning is intentionally on-demand and excludes original storage.
+
+Validation:
+
+- `npm --prefix webui run build`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/database ./internal/catalog ./internal/metadata ./internal/tlsutil`
+- `git diff --check && GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+
+Blocked item:
+
+- Further remote SSH monitoring/deployment was blocked by the platform approval/usage gate after the first successful status check. No indirect workaround was attempted.
+- Next remote action when SSH is available: re-check the active queue, verify the track metadata job completed under the fixed track-summary ordering code, retry only remaining unparsed track assets if needed, and deploy the Settings lazy-usage WebUI change.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
