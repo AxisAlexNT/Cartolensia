@@ -4576,6 +4576,166 @@ Safety confirmation:
 - no commit;
 - no push.
 
+## 2026-06-28 Heatmap Page
+
+Scope:
+
+- Added a Google Photos-style density view for geotagged media and GPS track points.
+- Kept the regular Map page behavior unchanged: Map still shows track polylines and media clusters, while Heatmap hides track polylines and renders track/media coordinates as a smoothed density layer.
+
+Implemented:
+
+- Added backend heatmap endpoint:
+  - `GET /api/v1/map/heatmap`;
+  - returns GeoJSON point features for heat rendering;
+  - media geotags contribute weight `1.0`;
+  - GPS track render samples contribute weight `0.45`;
+  - uses existing bbox/date/filter parameters and the precomputed GPS track render cache;
+  - supports `include_assets`, `include_tracks`, `asset_limit`, `track_limit`, `track_point_budget`, and GPS jump filtering.
+- Added WebUI `Heatmap` page:
+  - OpenLayers `HeatmapLayer`;
+  - OSM tiles via the existing local tile proxy;
+  - media clusters/asset popups remain visible and clickable like the regular Map page;
+  - track polylines are hidden on the Heatmap page;
+  - controls for media-kind, album, track scope, media clusters, heat radius, blur, opacity, and track point budget.
+- Added direct route support:
+  - `?page=heatmap`;
+  - sidebar navigation entry with icon.
+- Added endpoint coverage:
+  - synthetic geotagged photo plus GPS track points must produce both asset and track heat points.
+
+Tests run:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/database`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go build -o /tmp/cartolensia-heatmap ./cmd/cartolensia`
+
+Remote validation after deployment:
+
+- Services active: `cartolensia`, `cartolensia-ai`, `cartolensia-postgres`.
+- `/api/v1/map/heatmap?zoom=8&asset_limit=20000&track_limit=20000&track_point_budget=60000` returned:
+  - `30324` heat features;
+  - `20000` media geotag points;
+  - `10324` GPS track sample points;
+  - matched `5839` parsed track summaries;
+  - returned `5162` drawable track-derived sample groups;
+  - hidden large jump segments: `673`;
+  - truncated: `false`.
+- `/api/v1/map/assets?zoom=8&cluster=true&asset_limit=10000` returned `49` media cluster features for the same style of overlay.
+- Background production jobs remained active after deploy:
+  - discovery;
+  - hash;
+  - metadata enrichment;
+  - four AI backfill workers.
+
+Known limitations:
+
+- Heatmap density is intentionally viewport/budget bounded. Raising the track point budget gives a denser map at the cost of browser rendering work.
+- The heatmap uses cached track render samples, not raw full-resolution tracks, so it stays responsive for thousands of indexed tracks.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-28 GPS Render Cache And Places Hierarchy
+
+Scope:
+
+- Continued the remote production run on rjazhenka without touching originals or Samba mounts.
+- Focused on the Map page freeze/coverage issue for thousands of parsed tracks and added a Places browsing surface backed by local reverse-geocode cache data.
+
+Implemented:
+
+- Added a PostgreSQL-backed multi-zoom GPS track render cache:
+  - levels: `overview`, `z0`, `z6`, `z10`, `z13`, `z16`;
+  - points are downsampled per track/level and reused by map track batch APIs;
+  - new parsed tracks now precompute render rows during `UpsertTrackPoints`;
+  - old parsed tracks can be refreshed through `/api/v1/map/tracks/render-cache/refresh`.
+- Added render cache status endpoint:
+  - `GET /api/v1/map/tracks/render-cache/status`;
+  - reports total renderable tracks, cached tracks, missing tracks, and point counts per level.
+- Added cache refresh endpoint:
+  - `POST /api/v1/map/tracks/render-cache/refresh`;
+  - writes only local PostgreSQL cache rows and skips zero-point parsed summaries.
+- Changed map track batch loading to use the cached render level matching the requested point budget, with fallback for any track that does not have cached rows yet.
+- Added a Places hierarchy API and page:
+  - `GET /api/v1/places/hierarchy`;
+  - groups cached place data by hierarchy such as country, region, city, road/street/local place;
+  - reports bounded asset and track counts for each place bbox;
+  - uses local `place_cache` only and does not call online geocoders automatically.
+- Added frontend navigation for `Places`, local query filtering, hierarchy cards, and quick `place:<name>` search links.
+
+Tests run:
+
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/database ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go build -o /tmp/cartolensia-track-places ./cmd/cartolensia`
+
+Remote validation after deployment:
+
+- Services active: `cartolensia`, `cartolensia-ai`, `cartolensia-postgres`.
+- Render cache status:
+  - renderable parsed tracks: `5835`;
+  - cached tracks: `5835`;
+  - missing cache: `0`;
+  - cached points by level:
+    - `overview`: `11670`;
+    - `z0`: `23336`;
+    - `z6`: `93261`;
+    - `z10`: `372573`;
+    - `z13`: `1482182`;
+    - `z16`: `5802893`.
+- Map track batch check:
+  - `/api/v1/map/tracks?track_limit=20000&track_point_budget=20000&zoom=8`;
+  - returned `5162` drawable features;
+  - matched `5839` parsed summaries;
+  - hidden GPS jump segments: `673`;
+  - truncated: `false`.
+- Places hierarchy check:
+  - `4` cached place hierarchy entries available;
+  - first entry: `Vanadzor, Lori Province, Armenia`;
+  - local counts for that cached place: `60` assets, `28` tracks.
+- Current production jobs still active:
+  - discovery;
+  - hash;
+  - metadata enrichment;
+  - four AI backfill workers.
+- AI status:
+  - enabled: `true`;
+  - worker: `ai-local` `ok`;
+  - device: `cuda`;
+  - vector store: `pgvector_ivfflat`;
+  - embedded assets: `102730`;
+  - predictions: `916114`;
+  - face detections: `62096`;
+  - asset tags: `259475`.
+
+Known limitations:
+
+- The Places page currently reflects the durable local place cache. It is intentionally cache-only unless an operator explicitly runs online reverse-geocoding/enrichment.
+- Four parsed track summaries had zero points and are excluded from render-cache completeness because they cannot produce drawable geometry.
+- Full library discovery and AI enrichment remain long-running production jobs; this run did not reset or requeue them unnecessarily.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
 ## 2026-06-28 GPS Track Jump Filter
 
 Implemented and deployed a default-on visualization filter for GPS tracks with large discontinuities, targeting spoofed GPS samples and aircraft/jump artifacts that drew long misleading lines across the map.

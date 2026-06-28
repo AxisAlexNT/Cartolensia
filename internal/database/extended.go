@@ -945,23 +945,25 @@ func (db *DB) QueryTrackPointsBatch(ctx context.Context, query catalog.TrackPoin
 	if maxPoints > 5000 {
 		maxPoints = 5000
 	}
-	placeholders := make([]string, 0, len(trackIDs))
-	args := make([]any, 0, len(trackIDs)+1)
-	for i, trackID := range trackIDs {
-		args = append(args, trackID)
-		placeholders = append(placeholders, fmt.Sprintf("$%d::uuid", i+1))
-	}
-	if maxPoints <= 4 {
+	cachedOut := map[string][]catalog.TrackPoint{}
+	if detailLevel := trackRenderDetailLevelForMaxPoints(maxPoints); detailLevel != "" {
+		placeholders := make([]string, 0, len(trackIDs))
+		args := make([]any, 0, len(trackIDs)+1)
+		for i, trackID := range trackIDs {
+			args = append(args, trackID)
+			placeholders = append(placeholders, fmt.Sprintf("$%d::uuid", i+1))
+		}
+		args = append(args, detailLevel)
+		detailArg := len(args)
 		rows, err := db.pool.Query(ctx, fmt.Sprintf(`
 			select track_asset_id::text, recorded_at, lat, lon, elevation_m, speed_mps, source, ordinal
 			from gps_track_render_points
-			where detail_level = 'overview' and track_asset_id = any(array[%s])
+			where detail_level = $%d and track_asset_id = any(array[%s])
 			order by track_asset_id, ordinal
-		`, strings.Join(placeholders, ",")), args...)
+		`, detailArg, strings.Join(placeholders, ",")), args...)
 		if err != nil {
 			return nil, err
 		}
-		out := make(map[string][]catalog.TrackPoint, len(trackIDs))
 		for rows.Next() {
 			var point catalog.TrackPoint
 			var ordinal int
@@ -969,30 +971,39 @@ func (db *DB) QueryTrackPointsBatch(ctx context.Context, query catalog.TrackPoin
 				rows.Close()
 				return nil, err
 			}
-			out[point.TrackAssetID] = append(out[point.TrackAssetID], point)
+			cachedOut[point.TrackAssetID] = append(cachedOut[point.TrackAssetID], point)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		rows.Close()
-		var missing []string
+		missing := make([]string, 0)
 		for _, trackID := range trackIDs {
-			if len(out[trackID]) == 0 {
+			if len(cachedOut[trackID]) == 0 {
 				missing = append(missing, trackID)
 			}
 		}
 		if len(missing) == 0 {
-			return out, nil
+			return cachedOut, nil
 		}
-		fallback, err := db.queryTrackEndpointPoints(ctx, missing)
+		trackIDs = missing
+	}
+	placeholders := make([]string, 0, len(trackIDs))
+	args := make([]any, 0, len(trackIDs)+1)
+	for i, trackID := range trackIDs {
+		args = append(args, trackID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d::uuid", i+1))
+	}
+	if maxPoints <= 4 {
+		fallback, err := db.queryTrackEndpointPoints(ctx, trackIDs)
 		if err != nil {
 			return nil, err
 		}
 		for trackID, points := range fallback {
-			out[trackID] = points
+			cachedOut[trackID] = points
 		}
-		return out, nil
+		return cachedOut, nil
 	}
 	args = append(args, maxPoints)
 	maxPointsArg := len(args)
@@ -1017,7 +1028,10 @@ func (db *DB) QueryTrackPointsBatch(ctx context.Context, query catalog.TrackPoin
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string][]catalog.TrackPoint, len(trackIDs))
+	out := cachedOut
+	if out == nil {
+		out = make(map[string][]catalog.TrackPoint, len(trackIDs))
+	}
 	for rows.Next() {
 		var point catalog.TrackPoint
 		if err := rows.Scan(&point.ID, &point.TrackAssetID, &point.RecordedAt, &point.Lat, &point.Lon, &point.ElevationM, &point.SpeedMPS, &point.Source); err != nil {
@@ -1076,6 +1090,127 @@ func (db *DB) queryTrackEndpointPoints(ctx context.Context, trackIDs []string) (
 		out[point.TrackAssetID] = append(out[point.TrackAssetID], point)
 	}
 	return out, rows.Err()
+}
+
+func (db *DB) TrackRenderCacheStatus(ctx context.Context) (catalog.TrackRenderCacheStatus, error) {
+	status := catalog.TrackRenderCacheStatus{
+		RequiredLevel:    "z16",
+		RefreshBatchHint: 200,
+		PointsByLevel:    map[string]int{},
+	}
+	if err := db.pool.QueryRow(ctx, `select count(*)::int from gps_tracks where point_count > 0`).Scan(&status.TracksTotal); err != nil {
+		return status, err
+	}
+	if err := db.pool.QueryRow(ctx, `
+		select count(distinct rp.track_asset_id)::int
+		from gps_track_render_points rp
+		join gps_tracks g on g.track_asset_id=rp.track_asset_id
+		where rp.detail_level=$1 and g.point_count > 0`, status.RequiredLevel).Scan(&status.TracksWithCache); err != nil {
+		return status, err
+	}
+	status.MissingCache = status.TracksTotal - status.TracksWithCache
+	if status.MissingCache < 0 {
+		status.MissingCache = 0
+	}
+	rows, err := db.pool.Query(ctx, `
+		select detail_level, count(*)::int
+		from gps_track_render_points
+		group by detail_level
+		order by detail_level`)
+	if err != nil {
+		return status, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var level string
+		var count int
+		if err := rows.Scan(&level, &count); err != nil {
+			return status, err
+		}
+		status.PointsByLevel[level] = count
+	}
+	return status, rows.Err()
+}
+
+func (db *DB) RefreshTrackRenderCache(ctx context.Context, limit int) (catalog.TrackRenderCacheRefreshResult, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	requiredLevel := "z16"
+	result := catalog.TrackRenderCacheRefreshResult{
+		RequiredLevel: requiredLevel,
+		Levels:        []string{"overview", "z0", "z6", "z10", "z13", "z16"},
+		SafeNote:      "Track render cache refresh writes only compact Cartolensia DB rows; original track files are never modified.",
+	}
+	rows, err := db.pool.Query(ctx, `
+		select g.track_asset_id::text
+		from gps_tracks g
+		where g.point_count > 0
+		  and not exists (
+			select 1 from gps_track_render_points rp
+			where rp.track_asset_id = g.track_asset_id and rp.detail_level = $1
+		)
+		order by g.start_at desc nulls last, g.title, g.track_asset_id
+		limit $2`, requiredLevel, limit)
+	if err != nil {
+		return result, err
+	}
+	var ids []string
+	for rows.Next() {
+		var trackID string
+		if err := rows.Scan(&trackID); err != nil {
+			rows.Close()
+			return result, err
+		}
+		ids = append(ids, trackID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, err
+	}
+	rows.Close()
+	for _, trackID := range ids {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		result.Processed++
+		points, err := db.QueryTrackPoints(ctx, catalog.TrackPointQuery{TrackAssetID: trackID})
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", trackID, err))
+			continue
+		}
+		tx, err := db.pool.Begin(ctx)
+		if err != nil {
+			return result, err
+		}
+		if _, err := tx.Exec(ctx, `delete from gps_track_render_points where track_asset_id=$1`, trackID); err != nil {
+			_ = tx.Rollback(ctx)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", trackID, err))
+			continue
+		}
+		if err := insertTrackRenderPoints(ctx, tx, trackID, points); err != nil {
+			_ = tx.Rollback(ctx)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", trackID, err))
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", trackID, err))
+			continue
+		}
+		result.Refreshed++
+	}
+	var remaining int
+	if err := db.pool.QueryRow(ctx, `
+		select count(*)::int
+		from gps_tracks g
+		where g.point_count > 0
+		  and not exists (
+			select 1 from gps_track_render_points rp
+			where rp.track_asset_id = g.track_asset_id and rp.detail_level = $1
+		)`, requiredLevel).Scan(&remaining); err == nil {
+		result.Remaining = remaining
+	}
+	return result, nil
 }
 
 func compactDBStrings(values []string) []string {
@@ -2063,6 +2198,86 @@ func (db *DB) ListPlaces(ctx context.Context, query catalog.PlaceQuery) ([]catal
 		out = append(out, place)
 	}
 	return out, rows.Err()
+}
+
+func (db *DB) QueryPlaceHierarchy(ctx context.Context, query catalog.PlaceHierarchyQuery) (catalog.PlaceHierarchyPage, error) {
+	limit, offset := normalizeDBPage(query.Limit, query.Offset)
+	q := normalizeDBPlaceName(query.Q)
+	countSQL := `
+		select count(*)::int
+		from place_cache
+		where $1='' or normalized_name like '%' || $1 || '%' or lower(display_name) like '%' || $1 || '%' or lower(country) like '%' || $1 || '%' or lower(region) like '%' || $1 || '%' or lower(city) like '%' || $1 || '%' or lower(road) like '%' || $1 || '%' or lower(aliases_json::text) like '%' || $1 || '%'`
+	var total int
+	if err := db.pool.QueryRow(ctx, countSQL, q).Scan(&total); err != nil {
+		return catalog.PlaceHierarchyPage{}, err
+	}
+	rows, err := db.pool.Query(ctx, `
+		select id, name, normalized_name, aliases_json, provider, display_name, country, region, city, road, lat, lon, min_lon, min_lat, max_lon, max_lat, source, metadata_json, created_at, updated_at, last_used_at,
+			(select count(*)::int from asset_geo ag where ag.lat between p.min_lat and p.max_lat and ag.lon between p.min_lon and p.max_lon) as asset_count,
+			(select count(*)::int from gps_tracks gt where gt.max_lon >= p.min_lon and gt.min_lon <= p.max_lon and gt.max_lat >= p.min_lat and gt.min_lat <= p.max_lat) as track_count
+		from place_cache p
+		where $1='' or normalized_name like '%' || $1 || '%' or lower(display_name) like '%' || $1 || '%' or lower(country) like '%' || $1 || '%' or lower(region) like '%' || $1 || '%' or lower(city) like '%' || $1 || '%' or lower(road) like '%' || $1 || '%' or lower(aliases_json::text) like '%' || $1 || '%'
+		order by nullif(country, '') nulls last, nullif(region, '') nulls last, nullif(city, '') nulls last, nullif(road, '') nulls last, name, id
+		limit $2 offset $3`,
+		q, limit, offset,
+	)
+	if err != nil {
+		return catalog.PlaceHierarchyPage{}, err
+	}
+	defer rows.Close()
+	page := catalog.PlaceHierarchyPage{
+		Entries: []catalog.PlaceHierarchyEntry{},
+		Page:    catalog.Page{Limit: limit, Offset: offset, Total: total},
+	}
+	for rows.Next() {
+		var place catalog.PlaceCacheEntry
+		var aliases []byte
+		var metadata []byte
+		entry := catalog.PlaceHierarchyEntry{}
+		if err := rows.Scan(
+			&place.ID, &place.Name, &place.NormalizedName, &aliases, &place.Provider, &place.DisplayName, &place.Country, &place.Region, &place.City, &place.Road,
+			&place.Lat, &place.Lon, &place.BBox.MinLon, &place.BBox.MinLat, &place.BBox.MaxLon, &place.BBox.MaxLat, &place.Source, &metadata, &place.CreatedAt, &place.UpdatedAt, &place.LastUsedAt,
+			&entry.AssetCount, &entry.TrackCount,
+		); err != nil {
+			return catalog.PlaceHierarchyPage{}, err
+		}
+		_ = json.Unmarshal(aliases, &place.Aliases)
+		if err := json.Unmarshal(metadata, &place.Metadata); err != nil || place.Metadata == nil {
+			place.Metadata = map[string]any{}
+		}
+		entry.Place = place
+		entry.Hierarchy = placeHierarchyParts(place)
+		entry.Level = placeHierarchyLevel(place)
+		entry.Label = placeHierarchyLabel(place)
+		page.Entries = append(page.Entries, entry)
+	}
+	return page, rows.Err()
+}
+
+func placeHierarchyParts(place catalog.PlaceCacheEntry) []string {
+	return compactDBStrings([]string{place.Country, place.Region, place.City, place.Road, place.Name})
+}
+
+func placeHierarchyLevel(place catalog.PlaceCacheEntry) string {
+	switch {
+	case strings.TrimSpace(place.Road) != "":
+		return "road"
+	case strings.TrimSpace(place.City) != "":
+		return "city"
+	case strings.TrimSpace(place.Region) != "":
+		return "region"
+	case strings.TrimSpace(place.Country) != "":
+		return "country"
+	default:
+		return "place"
+	}
+}
+
+func placeHierarchyLabel(place catalog.PlaceCacheEntry) string {
+	if strings.TrimSpace(place.DisplayName) != "" {
+		return place.DisplayName
+	}
+	return strings.Join(placeHierarchyParts(place), " / ")
 }
 
 func (db *DB) DeletePlace(ctx context.Context, placeID string) error {

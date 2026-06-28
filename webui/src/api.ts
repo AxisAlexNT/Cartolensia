@@ -866,6 +866,37 @@ export type PlacesResponse = {
   note?: string;
 };
 
+export type PlaceHierarchyEntry = {
+  place: PlaceCacheEntry;
+  level: string;
+  label: string;
+  hierarchy: string[];
+  asset_count: number;
+  track_count: number;
+};
+
+export type PlaceHierarchyNode = {
+  key: string;
+  name: string;
+  level: string;
+  asset_count: number;
+  track_count: number;
+  places_count: number;
+  children?: PlaceHierarchyNode[];
+};
+
+export type PlaceHierarchyResponse = {
+  mode: string;
+  offline: boolean;
+  provider: string;
+  online_enabled: boolean;
+  radius_m: number;
+  entries: PlaceHierarchyEntry[];
+  tree: PlaceHierarchyNode[];
+  page: { limit: number; offset: number; total: number };
+  note?: string;
+};
+
 export type SearchResponse = {
   query: string;
   tokens: string[];
@@ -1253,6 +1284,19 @@ export const api = {
     Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
     return request<Record<string, unknown> | null>(`/api/v1/map/tracks?${query.toString()}`).then(normalizeFeatureCollection);
   },
+  mapAssets: (params: Record<string, string | number | boolean> = {}) => {
+    const query = new URLSearchParams({
+      zoom: "10",
+      cluster: "true"
+    });
+    Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
+    return request<Record<string, unknown> | null>(`/api/v1/map/assets?${query.toString()}`).then(normalizeFeatureCollection);
+  },
+  mapHeatmap: (params: Record<string, string | number | boolean> = {}) => {
+    const query = new URLSearchParams({ zoom: "10" });
+    Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
+    return request<Record<string, unknown> | null>(`/api/v1/map/heatmap?${query.toString()}`).then(normalizeFeatureCollection);
+  },
   tileSources: async () => asArray(await request<TileSource[] | null>("/api/v1/map/tile-sources")),
   stats: () => request<Stats>("/api/v1/stats"),
   environmentUsage: (refresh = false) =>
@@ -1574,6 +1618,18 @@ export const api = {
   searchPlaces: () => request<SearchPlacesResponse>("/api/v1/search/places"),
   places: (q = "") =>
     request<PlacesResponse>(`/api/v1/places${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
+  placesHierarchy: (q = "", limit = 100, offset = 0) => {
+    const query = new URLSearchParams();
+    if (q.trim()) query.set("q", q.trim());
+    query.set("limit", String(limit));
+    query.set("offset", String(offset));
+    return request<PlaceHierarchyResponse>(`/api/v1/places/hierarchy?${query.toString()}`).then((response) => ({
+      ...response,
+      entries: asArray(response.entries),
+      tree: asArray(response.tree),
+      page: response.page ?? { limit, offset, total: 0 }
+    }));
+  },
   createPlace: (place: PlaceCacheEntry) =>
     request<PlaceCacheEntry>("/api/v1/places", {
       method: "POST",

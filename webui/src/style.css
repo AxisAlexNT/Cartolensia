@@ -1333,6 +1333,38 @@ td {
   margin: 0 8px 12px;
 }
 
+.heatmap-shell {
+  background: #101820;
+}
+
+.heatmap-controls {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  margin: 0 8px 12px;
+}
+
+.heatmap-controls label {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.heatmap-controls .form-switch {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.heatmap-controls input[type="range"] {
+  width: 100%;
+}
+
 .gallery-track-shell {
   align-self: stretch;
   justify-self: stretch;
@@ -2650,6 +2682,46 @@ td {
 
 .compact-place-card h4 {
   font-size: 0.98rem;
+}
+
+.place-hierarchy-list {
+  display: grid;
+  gap: 10px;
+}
+
+.place-hierarchy-card {
+  align-items: start;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+  padding: 12px;
+}
+
+.place-hierarchy-card h4,
+.place-hierarchy-card p {
+  margin: 0;
+}
+
+.place-hierarchy-meta {
+  color: #8b949e;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  text-align: right;
+}
+
+@media (max-width: 800px) {
+  .place-hierarchy-card {
+    grid-template-columns: 1fr;
+  }
+
+  .place-hierarchy-meta {
+    justify-items: start;
+    text-align: left;
+  }
 }
 
 .settings-subsection {

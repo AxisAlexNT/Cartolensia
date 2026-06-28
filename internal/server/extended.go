@@ -589,9 +589,298 @@ func (s *Server) handleMapSubroute(w http.ResponseWriter, r *http.Request) {
 			collection["warnings"] = warnings
 		}
 		writeJSON(w, http.StatusOK, collection)
+	case "heatmap":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		result, err := s.mapHeatmapFeatures(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		collection := geoFeatureCollection(result.Features, "heatmap_points", queryInt(r, "zoom", 10))
+		collection["heatmap"] = map[string]any{
+			"asset_points":       result.AssetPoints,
+			"track_points":       result.TrackPoints,
+			"total_points":       len(result.Features),
+			"asset_limit":        result.AssetLimit,
+			"track_point_budget": result.TrackOverlay.PointBudget,
+			"track_overlay": map[string]any{
+				"matched":          result.TrackOverlay.Matched,
+				"returned":         result.TrackOverlay.Returned,
+				"truncated":        result.TrackOverlay.Truncated,
+				"limit":            result.TrackOverlay.Limit,
+				"point_budget":     result.TrackOverlay.PointBudget,
+				"points_per_track": result.TrackOverlay.PointsPerTrack,
+				"hide_jumps":       result.TrackOverlay.HideJumps,
+				"jump_threshold_m": result.TrackOverlay.JumpThresholdM,
+				"hidden_jumps":     result.TrackOverlay.HiddenJumps,
+			},
+		}
+		if result.TrackOverlay.HiddenJumps > 0 {
+			collection["warnings"] = []string{fmt.Sprintf("Heatmap ignored %d GPS jump segment(s) over %.0f m.", result.TrackOverlay.HiddenJumps, result.TrackOverlay.JumpThresholdM)}
+		}
+		writeJSON(w, http.StatusOK, collection)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type mapHeatmapFeatureResult struct {
+	Features     []map[string]any
+	AssetPoints  int
+	TrackPoints  int
+	AssetLimit   int
+	TrackOverlay mapTrackFeatureResult
+}
+
+func (s *Server) mapHeatmapFeatures(r *http.Request) (mapHeatmapFeatureResult, error) {
+	includeAssets := heatmapInclude(r, "include_assets", true)
+	includeTracks := heatmapInclude(r, "include_tracks", true)
+	var assetFeatures []map[string]any
+	if includeAssets {
+		assetRequest := cloneRequestWithQuery(r, map[string]string{
+			"cluster":  "false",
+			"clusters": "false",
+		})
+		var err error
+		assetFeatures, _, err = s.mapAssetFeatures(assetRequest)
+		if err != nil {
+			return mapHeatmapFeatureResult{}, err
+		}
+	}
+	var trackResult mapTrackFeatureResult
+	if includeTracks {
+		var err error
+		trackResult, err = s.mapTrackFeatures(r)
+		if err != nil {
+			return mapHeatmapFeatureResult{}, err
+		}
+	}
+	features := make([]map[string]any, 0, len(assetFeatures)+trackResult.PointBudget)
+	for _, feature := range assetFeatures {
+		point, ok := pointCoordinates(feature)
+		if !ok {
+			continue
+		}
+		features = append(features, heatPointFeature(point[0], point[1], "asset", 1.0))
+	}
+	assetPoints := len(features)
+	trackPoints := 0
+	if includeTracks {
+		for _, feature := range trackResult.Features {
+			coords := geometryCoordinates(feature)
+			for _, coord := range coords {
+				features = append(features, heatPointFeature(coord[0], coord[1], "track", 0.45))
+				trackPoints++
+			}
+		}
+	}
+	limit, _ := strconv.Atoi(firstNonEmpty(r.URL.Query().Get("asset_limit"), r.URL.Query().Get("limit")))
+	return mapHeatmapFeatureResult{
+		Features:     features,
+		AssetPoints:  assetPoints,
+		TrackPoints:  trackPoints,
+		AssetLimit:   limit,
+		TrackOverlay: trackResult,
+	}, nil
+}
+
+func heatmapInclude(r *http.Request, key string, fallback bool) bool {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return fallback
+	}
+	return boolQuery(raw)
+}
+
+func cloneRequestWithQuery(r *http.Request, overrides map[string]string) *http.Request {
+	clone := r.Clone(r.Context())
+	urlCopy := *r.URL
+	query := urlCopy.Query()
+	for key, value := range overrides {
+		query.Set(key, value)
+	}
+	urlCopy.RawQuery = query.Encode()
+	clone.URL = &urlCopy
+	return clone
+}
+
+func heatPointFeature(lon, lat float64, source string, weight float64) map[string]any {
+	return map[string]any{
+		"type": "Feature",
+		"geometry": map[string]any{
+			"type":        "Point",
+			"coordinates": []float64{lon, lat},
+		},
+		"properties": map[string]any{
+			"kind":   "heat_point",
+			"source": source,
+			"weight": weight,
+		},
+	}
+}
+
+func pointCoordinates(feature map[string]any) ([2]float64, bool) {
+	geometry, _ := feature["geometry"].(map[string]any)
+	if strings.EqualFold(fmt.Sprint(geometry["type"]), "Point") {
+		coords, ok := floatCoord(geometry["coordinates"])
+		return coords, ok
+	}
+	return [2]float64{}, false
+}
+
+func geometryCoordinates(feature map[string]any) [][2]float64 {
+	geometry, _ := feature["geometry"].(map[string]any)
+	switch strings.ToLower(fmt.Sprint(geometry["type"])) {
+	case "linestring":
+		return lineCoordinates(geometry["coordinates"])
+	case "multilinestring":
+		var out [][2]float64
+		for _, line := range asAnySlice(geometry["coordinates"]) {
+			out = append(out, lineCoordinates(line)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func lineCoordinates(value any) [][2]float64 {
+	items := asAnySlice(value)
+	out := make([][2]float64, 0, len(items))
+	for _, item := range items {
+		if coord, ok := floatCoord(item); ok {
+			out = append(out, coord)
+		}
+	}
+	return out
+}
+
+func floatCoord(value any) ([2]float64, bool) {
+	items := asAnySlice(value)
+	if len(items) < 2 {
+		return [2]float64{}, false
+	}
+	lon, okLon := anyFloat(items[0])
+	lat, okLat := anyFloat(items[1])
+	if !okLon || !okLat || !validLonLat(lon, lat) {
+		return [2]float64{}, false
+	}
+	return [2]float64{lon, lat}, true
+}
+
+func validLonLat(lon, lat float64) bool {
+	return !math.IsNaN(lon) && !math.IsNaN(lat) && !math.IsInf(lon, 0) && !math.IsInf(lat, 0) &&
+		lon >= -180 && lon <= 180 && lat >= -90 && lat <= 90
+}
+
+func asAnySlice(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return typed
+	case []float64:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = item
+		}
+		return out
+	case [][]float64:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = item
+		}
+		return out
+	case [][][]float64:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = item
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func anyFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		v, err := typed.Float64()
+		return v, err == nil
+	default:
+		return 0, false
+	}
+}
+
+type trackRenderCacheStore interface {
+	TrackRenderCacheStatus(context.Context) (catalog.TrackRenderCacheStatus, error)
+	RefreshTrackRenderCache(context.Context, int) (catalog.TrackRenderCacheRefreshResult, error)
+}
+
+func (s *Server) handleMapTrackRenderCacheStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	store, ok := s.deps.Store.(trackRenderCacheStore)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false,
+			"backend":   "memory_or_legacy_store",
+			"note":      "Track render cache status is available with the PostgreSQL store.",
+		})
+		return
+	}
+	status, err := store.TrackRenderCacheStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available": true,
+		"backend":   "postgres_render_cache",
+		"status":    status,
+		"note":      "Map track overlays use precomputed render samples when present and fall back to live bounded sampling while the cache catches up.",
+	})
+}
+
+func (s *Server) handleMapTrackRenderCacheRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.requireWrite(w, r, "map.track_render_cache.refresh") {
+		return
+	}
+	store, ok := s.deps.Store.(trackRenderCacheStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, fmt.Errorf("track render cache refresh requires the PostgreSQL store"))
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if r.Body != nil {
+		var req struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Limit > 0 {
+			limit = req.Limit
+		}
+	}
+	result, err := store.RefreshTrackRenderCache(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) countGPSTrackSummaries(ctx context.Context, max int) (int, bool) {

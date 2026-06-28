@@ -7,6 +7,7 @@ import { defaults as defaultControls } from "ol/control/defaults";
 import ScaleLine from "ol/control/ScaleLine";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
+import HeatmapLayer from "ol/layer/Heatmap";
 import Overlay from "ol/Overlay";
 import { defaults as defaultInteractions } from "ol/interaction/defaults";
 import VectorSource from "ol/source/Vector";
@@ -50,6 +51,8 @@ import {
   type MonthBucket,
   type OCRBlock,
   type PlaceCacheEntry,
+  type PlaceHierarchyEntry,
+  type PlaceHierarchyResponse,
   type PluginManifest,
   type PreviewCacheEntry,
   type PreviewCacheStats,
@@ -93,6 +96,8 @@ const nav = [
   "Settings",
   "Albums",
   "Map",
+  "Heatmap",
+  "Places",
   "GPS/KML Tracks",
   "Transcoding",
   "Base AI",
@@ -122,6 +127,11 @@ const navPageAliases: Record<string, string> = {
   settings: "Settings",
   albums: "Albums",
   map: "Map",
+  heatmap: "Heatmap",
+  "photo-heatmap": "Heatmap",
+  "photos-on-map": "Heatmap",
+  places: "Places",
+  place: "Places",
   "gps-tracks": "GPS/KML Tracks",
   tracks: "GPS/KML Tracks",
   transcoding: "Transcoding",
@@ -187,6 +197,8 @@ function navIcon(label: string): string {
     Settings: "bi-gear",
     Albums: "bi-collection",
     Map: "bi-map",
+    Heatmap: "bi-fire",
+    Places: "bi-geo-alt",
     "GPS/KML Tracks": "bi-signpost-split",
     Transcoding: "bi-film",
     "Base AI": "bi-cpu",
@@ -262,6 +274,12 @@ const searchPlaceCache = ref<SearchPlacesResponse | null>(null);
 const editablePlaces = ref<PlaceCacheEntry[]>([]);
 const placeCacheQuery = ref("");
 const placeCacheMessage = ref("");
+const placesHierarchy = ref<PlaceHierarchyResponse | null>(null);
+const placesHierarchyQuery = ref("");
+const placesHierarchyLimit = ref(100);
+const placesHierarchyOffset = ref(0);
+const placesHierarchyLoading = ref(false);
+const placesHierarchyMessage = ref("");
 const placeDraft = ref<PlaceCacheEntry>({
   name: "",
   display_name: "",
@@ -333,11 +351,18 @@ const trackAssetsReason = ref("");
 const trackOffsetSeconds = ref(0);
 const trackMediaViewMode = ref<"table" | "tile">("tile");
 const mapData = ref<Record<string, unknown> | null>(null);
+const heatmapData = ref<Record<string, unknown> | null>(null);
 const mapStatus = ref<Record<string, unknown> | null>(null);
 const mapMediaKind = ref("");
 const mapCluster = ref(true);
 const mapAlbumId = ref("");
 const mapTrackId = ref("");
+const heatmapRadius = ref(Number(localStorage.getItem("cartolensia.heatmap.radius") || "22"));
+const heatmapBlur = ref(Number(localStorage.getItem("cartolensia.heatmap.blur") || "24"));
+const heatmapOpacity = ref(Number(localStorage.getItem("cartolensia.heatmap.opacity") || "0.72"));
+const heatmapIncludeAssets = ref(localStorage.getItem("cartolensia.heatmap.includeAssets") !== "false");
+const heatmapIncludeTracks = ref(localStorage.getItem("cartolensia.heatmap.includeTracks") !== "false");
+const heatmapPointBudget = ref(Number(localStorage.getItem("cartolensia.heatmap.pointBudget") || "60000"));
 const mapPopup = ref<{
   kind: "cluster" | "asset" | "track";
   title: string;
@@ -419,9 +444,11 @@ let hlsConstructorPromise: Promise<HlsConstructor> | null = null;
 let mapHasInitialFit = false;
 const mapAssetSource = new VectorSource();
 const mapTrackSource = new VectorSource();
+const mapHeatSource = new VectorSource();
 let mapTileLayer: TileLayer<XYZ> | null = null;
 let mapAssetLayer: VectorLayer<VectorSource> | null = null;
 let mapTrackLayer: VectorLayer<VectorSource> | null = null;
+let mapHeatLayer: HeatmapLayer<FeatureLike, VectorSource> | null = null;
 let mapViewportRefreshTimer: number | undefined;
 let mapRefreshInFlight = false;
 let videoTrackMap: OLMap | null = null;
@@ -669,6 +696,12 @@ function setActive(next: string, updateURL = true) {
   if (route === "Knowledge Base") {
     void refreshKnowledgeLLMStatus();
   }
+  if (route === "Places" && !placesHierarchy.value && !placesHierarchyLoading.value) {
+    void loadPlacesHierarchy(true);
+  }
+  if (route === "Heatmap" && !heatmapData.value) {
+    void refreshHeatmap();
+  }
   if (route === "Settings") {
     void refreshSettingsTabData(settingsTab.value).catch((err) => {
       settingsMessage.value = err instanceof Error ? err.message : String(err);
@@ -748,6 +781,10 @@ window.addEventListener("popstate", () => {
   const assetID = new URLSearchParams(window.location.search).get("asset_id");
   if (page === "Asset Detail" && assetID) {
     void (principal.value ? openAsset(assetID) : openPublicAsset(assetID));
+  } else if (page === "Heatmap") {
+    void refreshHeatmap();
+  } else if (page === "Places") {
+    void loadPlacesHierarchy(true);
   }
 });
 
@@ -1522,7 +1559,11 @@ function fitSelectedTrack() {
 
 function fitMainMap() {
   if (!olMap) return;
-  const source = mapAssetSource.getFeatures().length > 0 ? mapAssetSource : mapTrackSource;
+  const source = mapAssetSource.getFeatures().length > 0
+    ? mapAssetSource
+    : active.value === "Heatmap" && mapHeatSource.getFeatures().length > 0
+      ? mapHeatSource
+      : mapTrackSource;
   if (source.getFeatures().length === 0) return;
   const extent = source.getExtent();
   if (extent) {
@@ -4239,6 +4280,42 @@ async function refreshPlaceCache() {
   }
 }
 
+async function loadPlacesHierarchy(reset = false) {
+  if (placesHierarchyLoading.value) return;
+  placesHierarchyLoading.value = true;
+  placesHierarchyMessage.value = "";
+  try {
+    const offset = reset ? 0 : placesHierarchyOffset.value;
+    const payload = await api.placesHierarchy(placesHierarchyQuery.value, placesHierarchyLimit.value, offset);
+    if (reset || !placesHierarchy.value) {
+      placesHierarchy.value = payload;
+    } else {
+      placesHierarchy.value = {
+        ...payload,
+        entries: [...asArray(placesHierarchy.value.entries), ...asArray(payload.entries)],
+        tree: payload.tree
+      };
+    }
+    placesHierarchyOffset.value = (placesHierarchy.value?.entries.length ?? 0);
+    placesHierarchyMessage.value = `${placesHierarchy.value.entries.length} of ${placesHierarchy.value.page.total} cached place rows loaded.`;
+  } catch (err) {
+    placesHierarchyMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    placesHierarchyLoading.value = false;
+  }
+}
+
+function placeHierarchyLine(entry: PlaceHierarchyEntry): string {
+  const hierarchy = asArray(entry.hierarchy).filter(Boolean);
+  return hierarchy.length > 0 ? hierarchy.join(" / ") : (entry.place.display_name || entry.place.name);
+}
+
+function searchPlaceEntry(entry: PlaceHierarchyEntry) {
+  universalSearchQ.value = `place:${entry.place.name}`;
+  setActive("Search");
+  void runUniversalSearch();
+}
+
 async function createPlaceFromDraft() {
   try {
     const created = await api.createPlace(normalizedPlacePayload(placeDraft.value, placeDraftAliases.value));
@@ -4986,10 +5063,18 @@ const mapFeatures = computed(() => {
   return Array.isArray(features) ? (features as Array<Record<string, unknown>>) : [];
 });
 
+const heatmapFeatures = computed(() => {
+  const features = heatmapData.value?.features;
+  return Array.isArray(features) ? (features as Array<Record<string, unknown>>) : [];
+});
+
 const mapTrackOverlay = computed(() => (mapData.value?.track_overlay ?? {}) as Record<string, unknown>);
+const heatmapMeta = computed(() => (heatmapData.value?.heatmap ?? {}) as Record<string, unknown>);
 const mapWarnings = computed(() => [
   ...asArray(mapStatus.value?.warnings as string[] | null | undefined),
-  ...asArray(mapData.value?.warnings as string[] | null | undefined)
+  ...(active.value === "Heatmap"
+    ? asArray(heatmapData.value?.warnings as string[] | null | undefined)
+    : asArray(mapData.value?.warnings as string[] | null | undefined))
 ]);
 const selectedPipelineStorage = computed(() => {
   const selected = pipelineStorage();
@@ -5009,6 +5094,14 @@ const mapFeatureSummary = computed(() => {
   return `${mapFeatures.value.length} features · ${trackNote} · ${clustering} clustering · ${tiles}`;
 });
 
+const heatmapFeatureSummary = computed(() => {
+  const total = Number(heatmapMeta.value.total_points ?? heatmapFeatures.value.length);
+  const assets = Number(heatmapMeta.value.asset_points ?? 0);
+  const tracks = Number(heatmapMeta.value.track_points ?? 0);
+  const mediaFeatures = mapFeatures.value.length;
+  return `${total} heat points · ${assets} media · ${tracks} track samples · ${mediaFeatures} media cluster features`;
+});
+
 function currentMapBBox(): string {
   if (!olMap) return "";
   const size = olMap.getSize();
@@ -5026,11 +5119,15 @@ function currentMapBBox(): string {
 }
 
 function scheduleMapViewportRefresh() {
-  if (active.value !== "Map" || !mapData.value) return;
+  if ((active.value !== "Map" && active.value !== "Heatmap") || (!mapData.value && !heatmapData.value)) return;
   if (mapViewportRefreshTimer !== undefined) window.clearTimeout(mapViewportRefreshTimer);
   mapViewportRefreshTimer = window.setTimeout(() => {
     mapViewportRefreshTimer = undefined;
-    void refreshMap();
+    if (active.value === "Heatmap") {
+      void refreshHeatmap();
+    } else {
+      void refreshMap();
+    }
   }, 300);
 }
 
@@ -5066,12 +5163,66 @@ function mapQuery(): Record<string, string | number | boolean> {
   return query;
 }
 
+function normalizedHeatmapRadius(): number {
+  const value = Number(heatmapRadius.value);
+  if (!Number.isFinite(value) || value <= 0) return 22;
+  return Math.min(80, Math.max(4, Math.round(value)));
+}
+
+function normalizedHeatmapBlur(): number {
+  const value = Number(heatmapBlur.value);
+  if (!Number.isFinite(value) || value < 0) return 24;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function normalizedHeatmapOpacity(): number {
+  const value = Number(heatmapOpacity.value);
+  if (!Number.isFinite(value)) return 0.72;
+  return Math.min(1, Math.max(0.05, value));
+}
+
+function normalizedHeatmapPointBudget(): number {
+  const value = Number(heatmapPointBudget.value);
+  if (!Number.isFinite(value) || value <= 0) return 60000;
+  return Math.min(250000, Math.max(1000, Math.round(value)));
+}
+
+function heatmapQuery(): Record<string, string | number | boolean> {
+  return {
+    ...mapQuery(),
+    include_assets: heatmapIncludeAssets.value,
+    include_tracks: heatmapIncludeTracks.value,
+    asset_limit: heatmapIncludeAssets.value ? 20000 : 1,
+    track_point_budget: heatmapIncludeTracks.value ? normalizedHeatmapPointBudget() : 1
+  };
+}
+
 async function refreshMap() {
   if (mapRefreshInFlight) return;
   mapRefreshInFlight = true;
   try {
     mapData.value = await api.map(mapQuery());
     mapStatus.value = await api.mapStatus().catch(() => mapStatus.value);
+    await nextTick();
+    renderOpenLayers();
+  } finally {
+    mapRefreshInFlight = false;
+  }
+}
+
+async function refreshHeatmap() {
+  if (mapRefreshInFlight) return;
+  mapRefreshInFlight = true;
+  try {
+    const query = heatmapQuery();
+    const [heatData, assetData, statusData] = await Promise.all([
+      api.mapHeatmap(query),
+      api.mapAssets({ ...query, cluster: mapCluster.value }),
+      api.mapStatus().catch(() => mapStatus.value)
+    ]);
+    heatmapData.value = heatData;
+    mapData.value = assetData;
+    mapStatus.value = statusData;
     await nextTick();
     renderOpenLayers();
   } finally {
@@ -5486,6 +5637,15 @@ function ensureOpenLayersMap() {
       }
     });
     mapTrackLayer.setVisible(mapTracksVisible.value);
+    const heatLayer = new HeatmapLayer({
+      source: mapHeatSource,
+      blur: normalizedHeatmapBlur(),
+      radius: normalizedHeatmapRadius(),
+      weight: "weight",
+      opacity: normalizedHeatmapOpacity()
+    });
+    heatLayer.setVisible(active.value === "Heatmap");
+    mapHeatLayer = heatLayer;
     mapAssetLayer = new VectorLayer({
       source: mapAssetSource,
       style: (feature) => {
@@ -5518,7 +5678,7 @@ function ensureOpenLayersMap() {
     mapAssetLayer.setVisible(mapAssetsVisible.value);
     olMap = new OLMap({
       target: mapElement.value,
-      layers: [mapTileLayer, mapTrackLayer, mapAssetLayer],
+      layers: [mapTileLayer, heatLayer, mapTrackLayer, mapAssetLayer],
       view: new View({ center: fromLonLat([44.05, 40.05]), zoom: 9 })
     });
     if (mapPopupElement.value) {
@@ -5563,16 +5723,28 @@ function ensureOpenLayersMap() {
 
 function renderOpenLayers() {
   ensureOpenLayersMap();
-  if (!olMap || !mapData.value) return;
-  const features = new GeoJSON().readFeatures(mapData.value, { featureProjection: "EPSG:3857" });
+  if (!olMap || (!mapData.value && !heatmapData.value)) return;
+  const features = new GeoJSON().readFeatures(mapData.value ?? { type: "FeatureCollection", features: [] }, { featureProjection: "EPSG:3857" });
+  const heatFeatures = new GeoJSON().readFeatures(heatmapData.value ?? { type: "FeatureCollection", features: [] }, { featureProjection: "EPSG:3857" });
   const assetFeatures = features.filter((feature) => String(feature.get("kind") ?? feature.get("asset_type") ?? "") !== "track");
   const trackFeatures = features.filter((feature) => String(feature.get("kind") ?? feature.get("asset_type") ?? "") === "track");
   mapAssetSource.clear();
   mapTrackSource.clear();
+  mapHeatSource.clear();
   mapTrackSource.addFeatures(trackFeatures);
   mapAssetSource.addFeatures(assetFeatures);
-  if (features.length > 0 && !mapHasInitialFit) {
-    const extent = mapAssetSource.getFeatures().length > 0 ? mapAssetSource.getExtent() : mapTrackSource.getExtent();
+  mapHeatSource.addFeatures(heatFeatures);
+  mapTrackLayer?.setVisible(active.value === "Map" && mapTracksVisible.value);
+  mapHeatLayer?.setVisible(active.value === "Heatmap");
+  mapHeatLayer?.setBlur(normalizedHeatmapBlur());
+  mapHeatLayer?.setRadius(normalizedHeatmapRadius());
+  mapHeatLayer?.setOpacity(normalizedHeatmapOpacity());
+  if ((features.length > 0 || heatFeatures.length > 0) && !mapHasInitialFit) {
+    const extent = mapAssetSource.getFeatures().length > 0
+      ? mapAssetSource.getExtent()
+      : mapHeatSource.getFeatures().length > 0
+        ? mapHeatSource.getExtent()
+        : mapTrackSource.getExtent();
     if (extent) {
       olMap.getView().fit(extent, { padding: [28, 28, 28, 28], maxZoom: 14, duration: 150 });
       mapHasInitialFit = true;
@@ -5582,7 +5754,7 @@ function renderOpenLayers() {
 }
 
 watch([active, mapData], async () => {
-  if (active.value === "Map") {
+  if (active.value === "Map" || active.value === "Heatmap") {
     await nextTick();
     renderOpenLayers();
   }
@@ -5599,6 +5771,8 @@ watch([active, mapData], async () => {
 watch([mapMediaKind, mapAlbumId, mapTrackId, mapCluster], () => {
   if (active.value === "Map") {
     void refreshMap();
+  } else if (active.value === "Heatmap") {
+    void refreshHeatmap();
   }
 });
 
@@ -5628,11 +5802,29 @@ watch(showMapDebug, (value) => {
 
 watch([mapTilesVisible, mapTracksVisible, mapAssetsVisible], () => {
   mapTileLayer?.setVisible(mapTilesVisible.value);
-  mapTrackLayer?.setVisible(mapTracksVisible.value);
+  mapTrackLayer?.setVisible(active.value === "Map" && mapTracksVisible.value);
   mapAssetLayer?.setVisible(mapAssetsVisible.value);
   persistLayerPreference("cartolensia.map.tilesVisible", mapTilesVisible.value);
   persistLayerPreference("cartolensia.map.tracksVisible", mapTracksVisible.value);
   persistLayerPreference("cartolensia.map.assetsVisible", mapAssetsVisible.value);
+});
+
+watch([heatmapRadius, heatmapBlur, heatmapOpacity], () => {
+  mapHeatLayer?.setBlur(normalizedHeatmapBlur());
+  mapHeatLayer?.setRadius(normalizedHeatmapRadius());
+  mapHeatLayer?.setOpacity(normalizedHeatmapOpacity());
+  localStorage.setItem("cartolensia.heatmap.radius", String(normalizedHeatmapRadius()));
+  localStorage.setItem("cartolensia.heatmap.blur", String(normalizedHeatmapBlur()));
+  localStorage.setItem("cartolensia.heatmap.opacity", String(normalizedHeatmapOpacity()));
+});
+
+watch([heatmapIncludeAssets, heatmapIncludeTracks, heatmapPointBudget], () => {
+  localStorage.setItem("cartolensia.heatmap.includeAssets", heatmapIncludeAssets.value ? "true" : "false");
+  localStorage.setItem("cartolensia.heatmap.includeTracks", heatmapIncludeTracks.value ? "true" : "false");
+  localStorage.setItem("cartolensia.heatmap.pointBudget", String(normalizedHeatmapPointBudget()));
+  if (active.value === "Heatmap") {
+    void refreshHeatmap();
+  }
 });
 
 watch([mapHideTrackJumps, mapTrackJumpThresholdM], () => {
@@ -5755,6 +5947,10 @@ onMounted(async () => {
     await fetchTranscriptsPage(true);
   } else if (active.value === "Knowledge Base" || active.value === "Knowledge Graph") {
     await loadKnowledgeBase();
+  } else if (active.value === "Heatmap") {
+    await refreshHeatmap();
+  } else if (active.value === "Places") {
+    await loadPlacesHierarchy(true);
   }
   await nextTick();
   renderOpenLayers();
@@ -7299,6 +7495,72 @@ onBeforeUnmount(() => {
           </table>
         </section>
 
+        <section v-else-if="active === 'Places'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Places</h2>
+              <span>Cached reverse-geocoding hierarchy from local Cartolensia metadata. No online geocoder is called from this page.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" :disabled="placesHierarchyLoading" @click="loadPlacesHierarchy(true)">
+              Refresh places
+            </button>
+          </header>
+          <section class="settings-form">
+            <div class="inline-form-row">
+              <input
+                v-model="placesHierarchyQuery"
+                type="search"
+                placeholder="Search country, region, city, street, park, forest..."
+                @keyup.enter="loadPlacesHierarchy(true)"
+              />
+              <button type="button" class="btn btn-primary" :disabled="placesHierarchyLoading" @click="loadPlacesHierarchy(true)">Search</button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="placesHierarchyLoading || !placesHierarchy || placesHierarchy.entries.length >= placesHierarchy.page.total" @click="loadPlacesHierarchy(false)">
+                Load more
+              </button>
+              <button type="button" class="btn btn-outline-secondary" @click="settingsTab = 'search'; setActive('Settings')">
+                Edit cache
+              </button>
+            </div>
+            <p v-if="placesHierarchyMessage" class="muted">{{ placesHierarchyMessage }}</p>
+            <div class="metrics">
+              <article><strong>{{ placesHierarchy?.page.total ?? 0 }}</strong><span>Cached place rows</span></article>
+              <article><strong>{{ placesHierarchy?.radius_m ?? 100 }} m</strong><span>Nearby-match radius</span></article>
+              <article><strong>{{ placesHierarchy?.provider ?? 'local_place_cache' }}</strong><span>Provider</span></article>
+              <article><strong>{{ placesHierarchy?.offline ? 'yes' : 'no' }}</strong><span>Offline cache</span></article>
+            </div>
+          </section>
+          <section class="settings-form">
+            <h3><i class="bi bi-diagram-3" aria-hidden="true"></i> Hierarchy</h3>
+            <div v-if="placesHierarchyLoading && !placesHierarchy" class="empty-state">Loading cached places...</div>
+            <div v-else-if="!placesHierarchy || placesHierarchy.entries.length === 0" class="empty-state">
+              No cached places match this filter yet. Add local places in Settings or use explicit reverse geocoding for selected coordinates.
+            </div>
+            <div v-else class="place-hierarchy-list">
+              <article v-for="entry in placesHierarchy.entries" :key="entry.place.id || `${entry.place.provider}-${entry.place.name}`" class="place-hierarchy-card">
+                <div>
+                  <h4>{{ entry.label || entry.place.display_name || entry.place.name }}</h4>
+                  <p class="muted">{{ placeHierarchyLine(entry) }}</p>
+                  <div class="chip-row">
+                    <span class="status-badge">{{ entry.level }}</span>
+                    <span v-if="entry.place.country" class="status-badge">{{ entry.place.country }}</span>
+                    <span v-if="entry.place.region" class="status-badge">{{ entry.place.region }}</span>
+                    <span v-if="entry.place.city" class="status-badge">{{ entry.place.city }}</span>
+                    <span v-if="entry.place.road" class="status-badge">{{ entry.place.road }}</span>
+                  </div>
+                </div>
+                <div class="place-hierarchy-meta">
+                  <span>{{ entry.asset_count }} asset geotag match{{ entry.asset_count === 1 ? '' : 'es' }}</span>
+                  <span>{{ entry.track_count }} overlapping track{{ entry.track_count === 1 ? '' : 's' }}</span>
+                  <small>{{ entry.place.lat.toFixed(5) }}, {{ entry.place.lon.toFixed(5) }}</small>
+                  <button type="button" class="btn btn-sm btn-outline-primary" @click="searchPlaceEntry(entry)">
+                    Search media
+                  </button>
+                </div>
+              </article>
+            </div>
+          </section>
+        </section>
+
         <section v-else-if="active === 'Map'" class="panel">
           <header class="panel-head">
             <h2>Map</h2>
@@ -7490,6 +7752,161 @@ onBeforeUnmount(() => {
             <span>Show debug GeoJSON</span>
           </label>
           <pre v-if="showMapDebug" class="geojson">{{ JSON.stringify(mapData, null, 2) }}</pre>
+        </section>
+
+        <section v-else-if="active === 'Heatmap'" class="panel">
+          <header class="panel-head">
+            <h2>Heatmap</h2>
+            <div class="actions">
+              <span>{{ heatmapFeatureSummary }}</span>
+              <span>{{ tileStatus }}</span>
+              <button type="button" @click="refreshHeatmap">Refresh heatmap</button>
+              <button v-if="mapAlbumId || mapMediaKind || mapTrackId" type="button" @click="mapAlbumId = ''; mapMediaKind = ''; mapTrackId = ''; refreshHeatmap()">
+                Clear filters
+              </button>
+            </div>
+          </header>
+          <div class="control-grid">
+            <label>
+              Media kind
+              <select v-model="mapMediaKind">
+                <option value="">All</option>
+                <option value="photo">Photos</option>
+                <option value="video">Videos</option>
+                <option value="audio">Audio</option>
+              </select>
+            </label>
+            <label>
+              Album
+              <select v-model="mapAlbumId">
+                <option value="">All albums</option>
+                <option v-for="album in albums" :key="album.id" :value="album.id">{{ album.title }}</option>
+              </select>
+            </label>
+            <label>
+              Track scope
+              <select v-model="mapTrackId">
+                <option value="">All tracks</option>
+                <option v-for="track in tracks" :key="track.track_asset_id" :value="track.track_asset_id">
+                  {{ track.name }}
+                </option>
+              </select>
+            </label>
+            <label class="checkbox-label">
+              <input v-model="mapCluster" type="checkbox" />
+              Media clusters
+            </label>
+          </div>
+          <div class="heatmap-controls">
+            <label class="form-check form-switch">
+              <input v-model="heatmapIncludeAssets" class="form-check-input" type="checkbox" />
+              <span>Media geotags</span>
+            </label>
+            <label class="form-check form-switch">
+              <input v-model="heatmapIncludeTracks" class="form-check-input" type="checkbox" />
+              <span>GPS track points</span>
+            </label>
+            <label>
+              Radius
+              <input v-model.number="heatmapRadius" type="range" min="4" max="80" />
+              <span>{{ normalizedHeatmapRadius() }} px</span>
+            </label>
+            <label>
+              Blur
+              <input v-model.number="heatmapBlur" type="range" min="0" max="100" />
+              <span>{{ normalizedHeatmapBlur() }} px</span>
+            </label>
+            <label>
+              Opacity
+              <input v-model.number="heatmapOpacity" type="range" min="0.05" max="1" step="0.05" />
+              <span>{{ normalizedHeatmapOpacity().toFixed(2) }}</span>
+            </label>
+            <label>
+              Track point budget
+              <input v-model.number="heatmapPointBudget" type="number" min="1000" max="250000" step="1000" />
+            </label>
+          </div>
+          <div v-if="mapWarnings.length > 0" class="alert">
+            <p v-for="warning in mapWarnings" :key="warning">{{ warning }}</p>
+          </div>
+          <p v-if="heatmapFeatures.length === 0 && mapFeatures.length === 0" class="empty-state">
+            No heatmap data matches the current filters. Enable media geotags or GPS track points, then refresh.
+          </p>
+          <div class="map-shell map-page-shell heatmap-shell">
+            <div ref="mapElement" class="ol-map" role="img" aria-label="OpenLayers heatmap"></div>
+            <div class="map-layer-control">
+              <button type="button" class="icon-button" @click="showMapLayerMenu = !showMapLayerMenu">
+                <i class="bi bi-layers" aria-hidden="true"></i>
+                Layers
+              </button>
+              <div v-if="showMapLayerMenu" class="layer-menu">
+                <label class="form-check form-switch">
+                  <input v-model="mapTilesVisible" class="form-check-input" type="checkbox" />
+                  <span>OSM tiles</span>
+                </label>
+                <label class="form-check form-switch">
+                  <input v-model="mapAssetsVisible" class="form-check-input" type="checkbox" />
+                  <span>Media clusters</span>
+                </label>
+                <label class="form-check form-switch">
+                  <input v-model="mapHideTrackJumps" class="form-check-input" type="checkbox" />
+                  <span>Ignore large GPS jumps</span>
+                </label>
+                <label class="compact-field">
+                  Jump threshold
+                  <input v-model.number="mapTrackJumpThresholdM" type="number" min="10" step="100" inputmode="numeric" />
+                  <small>Default 10,000 m; originals and raw parsed tracks are unchanged.</small>
+                </label>
+                <button type="button" class="btn btn-sm btn-outline-primary" @click="fitMainMap">
+                  <i class="bi bi-aspect-ratio" aria-hidden="true"></i>
+                  Fit density
+                </button>
+              </div>
+            </div>
+          </div>
+          <div v-show="mapPopup" ref="mapPopupElement" class="map-popup">
+            <div class="job-row">
+              <strong>{{ mapPopup?.title }}</strong>
+              <button type="button" class="icon-button danger-close" @click="mapPopup = null">
+                <i class="bi bi-x-lg" aria-hidden="true"></i>
+                Close
+              </button>
+            </div>
+            <p>{{ mapPopup?.summary }}</p>
+            <div v-if="mapPopup?.kind === 'cluster'" class="actions">
+              <button type="button" class="btn btn-sm btn-outline-primary" @click="zoomMapToCluster(mapPopup?.bbox)">
+                <i class="bi bi-zoom-in" aria-hidden="true"></i>
+                Zoom to cluster
+              </button>
+            </div>
+            <div class="mini-gallery">
+              <article v-for="asset in mapPopup?.assets ?? []" :key="asset.id" class="mini-card">
+                <img v-if="asset.media_kind === 'photo' && asset.preview_url" :src="asset.preview_url" alt="" loading="lazy" />
+                <span v-else class="media-fallback">{{ asset.media_kind }}</span>
+                <strong>{{ asset.name }}</strong>
+                <div class="actions">
+                  <button type="button" @click="openGallery((mapPopup?.assets ?? []).map((item) => ({
+                    id: item.id,
+                    name: item.name,
+                    media_kind: item.media_kind,
+                    preview_url: item.preview_url || `/api/v1/media/${item.id}/preview`,
+                    original_url: item.original_url || `/api/v1/media/${item.id}/original`
+                  })), (mapPopup?.assets ?? []).findIndex((item) => item.id === asset.id))">
+                    Open viewer
+                  </button>
+                  <a class="btn btn-sm btn-outline-secondary" :href="assetHref(asset.id)" @click="openAssetLink($event, asset.id)">Asset detail</a>
+                </div>
+              </article>
+            </div>
+          </div>
+          <p class="muted">
+            Heat points are generated from cached geotagged media and precomputed GPS track render samples. Track polylines are hidden on this page.
+          </p>
+          <label class="form-check form-switch map-debug-toggle">
+            <input v-model="showMapDebug" class="form-check-input" type="checkbox" />
+            <span>Show debug GeoJSON</span>
+          </label>
+          <pre v-if="showMapDebug" class="geojson">{{ JSON.stringify({ media: mapData, heatmap: heatmapData }, null, 2) }}</pre>
         </section>
 
         <section v-else-if="active === 'Transcoding'" class="panel">

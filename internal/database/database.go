@@ -691,6 +691,69 @@ func (db *DB) Stats(ctx context.Context) (catalog.Stats, error) {
 	return stats, err
 }
 
+type trackRenderLevel struct {
+	Name      string
+	MaxPoints int
+}
+
+func trackRenderLevels() []trackRenderLevel {
+	return []trackRenderLevel{
+		{Name: "overview", MaxPoints: 2},
+		{Name: "z0", MaxPoints: 4},
+		{Name: "z6", MaxPoints: 16},
+		{Name: "z10", MaxPoints: 64},
+		{Name: "z13", MaxPoints: 256},
+		{Name: "z16", MaxPoints: 1024},
+	}
+}
+
+func trackRenderDetailLevelForMaxPoints(maxPoints int) string {
+	switch {
+	case maxPoints <= 4:
+		return "overview"
+	case maxPoints <= 16:
+		return "z6"
+	case maxPoints <= 64:
+		return "z10"
+	case maxPoints <= 256:
+		return "z13"
+	case maxPoints <= 1024:
+		return "z16"
+	default:
+		return ""
+	}
+}
+
+func insertTrackRenderPoints(ctx context.Context, tx pgx.Tx, trackAssetID string, points []catalog.TrackPoint) error {
+	if len(points) == 0 {
+		return nil
+	}
+	for _, level := range trackRenderLevels() {
+		sampled := downsampleTrackPoints(points, level.MaxPoints)
+		for idx, point := range sampled {
+			source := point.Source
+			if source == "" {
+				source = "gpx"
+			}
+			if _, err := tx.Exec(ctx, `
+				insert into gps_track_render_points(track_asset_id, detail_level, ordinal, recorded_at, lat, lon, elevation_m, speed_mps, source)
+				values($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				on conflict(track_asset_id, detail_level, ordinal) do update set
+					recorded_at=excluded.recorded_at,
+					lat=excluded.lat,
+					lon=excluded.lon,
+					elevation_m=excluded.elevation_m,
+					speed_mps=excluded.speed_mps,
+					source=excluded.source,
+					updated_at=now()
+			`, trackAssetID, level.Name, idx+1, point.RecordedAt, point.Lat, point.Lon, point.ElevationM, point.SpeedMPS, source); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (db *DB) UpsertTrackPoints(ctx context.Context, trackAssetID string, points []catalog.TrackPoint) error {
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
@@ -715,39 +778,8 @@ func (db *DB) UpsertTrackPoints(ctx context.Context, trackAssetID string, points
 			return err
 		}
 	}
-	if len(points) > 0 {
-		overview := []struct {
-			ordinal int
-			point   catalog.TrackPoint
-		}{
-			{ordinal: 1, point: points[0]},
-		}
-		if len(points) > 1 {
-			overview = append(overview, struct {
-				ordinal int
-				point   catalog.TrackPoint
-			}{ordinal: 2, point: points[len(points)-1]})
-		}
-		for _, item := range overview {
-			source := item.point.Source
-			if source == "" {
-				source = "gpx"
-			}
-			if _, err := tx.Exec(ctx, `
-				insert into gps_track_render_points(track_asset_id, detail_level, ordinal, recorded_at, lat, lon, elevation_m, speed_mps, source)
-				values($1, 'overview', $2, $3, $4, $5, $6, $7, $8)
-				on conflict(track_asset_id, detail_level, ordinal) do update set
-					recorded_at=excluded.recorded_at,
-					lat=excluded.lat,
-					lon=excluded.lon,
-					elevation_m=excluded.elevation_m,
-					speed_mps=excluded.speed_mps,
-					source=excluded.source,
-					updated_at=now()
-			`, trackAssetID, item.ordinal, item.point.RecordedAt, item.point.Lat, item.point.Lon, item.point.ElevationM, item.point.SpeedMPS, source); err != nil {
-				return err
-			}
-		}
+	if err := insertTrackRenderPoints(ctx, tx, trackAssetID, points); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

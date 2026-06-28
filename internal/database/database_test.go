@@ -87,3 +87,43 @@ func TestNormalizeGeoPageAllowsMapScaleQueries(t *testing.T) {
 		t.Fatalf("geo query should still cap extreme requests, got %d", limit)
 	}
 }
+
+func TestTrackRenderDetailLevelForMaxPoints(t *testing.T) {
+	cases := []struct {
+		maxPoints int
+		want      string
+	}{
+		{0, "overview"},
+		{4, "overview"},
+		{5, "z6"},
+		{16, "z6"},
+		{17, "z10"},
+		{64, "z10"},
+		{65, "z13"},
+		{256, "z13"},
+		{257, "z16"},
+		{1024, "z16"},
+		{1025, ""},
+	}
+	for _, tc := range cases {
+		if got := trackRenderDetailLevelForMaxPoints(tc.maxPoints); got != tc.want {
+			t.Fatalf("maxPoints=%d got %q want %q", tc.maxPoints, got, tc.want)
+		}
+	}
+}
+
+func TestTrackRenderLevelsDownsample(t *testing.T) {
+	points := make([]catalog.TrackPoint, 0, 100)
+	for i := 0; i < 100; i++ {
+		points = append(points, catalog.TrackPoint{Lat: float64(i), Lon: float64(i)})
+	}
+	for _, level := range trackRenderLevels() {
+		sampled := downsampleTrackPoints(points, level.MaxPoints)
+		if len(sampled) > level.MaxPoints {
+			t.Fatalf("%s sampled %d > %d", level.Name, len(sampled), level.MaxPoints)
+		}
+		if len(sampled) == 0 || sampled[0].Lat != points[0].Lat || sampled[len(sampled)-1].Lat != points[len(points)-1].Lat {
+			t.Fatalf("%s did not preserve endpoints: %#v", level.Name, sampled)
+		}
+	}
+}

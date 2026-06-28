@@ -269,6 +269,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/knowledge/chat", s.handleKnowledgeChat)
 	s.mux.HandleFunc("/api/v1/knowledge/llm/status", s.handleKnowledgeLLMStatus)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
+	s.mux.HandleFunc("/api/v1/places/hierarchy", s.handlePlaceHierarchy)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
 	s.mux.HandleFunc("/api/v1/places/reverse", s.handlePlaceReverse)
 	s.mux.HandleFunc("/api/v1/places/", s.handlePlaceByID)
@@ -293,6 +294,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/video-track-player/session", s.handleVideoTrackPlayerSessionCreate)
 	s.mux.HandleFunc("/api/v1/video-track-player/sessions/", s.handleVideoTrackPlayerSessionByID)
 	s.mux.HandleFunc("/api/v1/ocr/runs", s.handleOCRRuns)
+	s.mux.HandleFunc("/api/v1/map/tracks/render-cache/status", s.handleMapTrackRenderCacheStatus)
+	s.mux.HandleFunc("/api/v1/map/tracks/render-cache/refresh", s.handleMapTrackRenderCacheRefresh)
 	s.mux.HandleFunc("/api/v1/map", s.handleMap)
 	s.mux.HandleFunc("/api/v1/map/", s.handleMapSubroute)
 	s.mux.HandleFunc("/api/v1/transcoding/status", s.handleTranscodingStatus)
@@ -2049,6 +2052,154 @@ func sameLocalDay(a, b time.Time) bool {
 	ay, am, ad := a.In(time.Local).Date()
 	by, bm, bd := b.In(time.Local).Date()
 	return ay == by && am == bm && ad == bd
+}
+
+type placeHierarchyStore interface {
+	QueryPlaceHierarchy(context.Context, catalog.PlaceHierarchyQuery) (catalog.PlaceHierarchyPage, error)
+}
+
+func (s *Server) handlePlaceHierarchy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	query := catalog.PlaceHierarchyQuery{
+		Q:      r.URL.Query().Get("q"),
+		Limit:  limit,
+		Offset: offset,
+	}
+	var page catalog.PlaceHierarchyPage
+	var err error
+	if store, ok := s.deps.Store.(placeHierarchyStore); ok {
+		page, err = store.QueryPlaceHierarchy(r.Context(), query)
+	} else {
+		places, listErr := s.deps.Store.ListPlaces(r.Context(), catalog.PlaceQuery{Q: query.Q, Limit: query.Limit, Offset: query.Offset})
+		if listErr != nil {
+			err = listErr
+		} else {
+			page.Page = catalog.Page{Limit: query.Limit, Offset: query.Offset, Total: len(places)}
+			if page.Page.Limit <= 0 {
+				page.Page.Limit = len(places)
+			}
+			page.Entries = make([]catalog.PlaceHierarchyEntry, 0, len(places))
+			for _, place := range places {
+				page.Entries = append(page.Entries, catalog.PlaceHierarchyEntry{
+					Place:     place,
+					Level:     placeCacheLevel(place),
+					Label:     placeCacheLabel(place),
+					Hierarchy: placeCacheHierarchy(place),
+				})
+			}
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":           "local_place_cache",
+		"offline":        true,
+		"provider":       runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
+		"online_enabled": runtimeBoolSetting("search.online_geocoding", false),
+		"radius_m":       runtimeIntSetting("search.reverse_geocode_radius_m", 100),
+		"entries":        page.Entries,
+		"tree":           buildPlaceHierarchyTree(page.Entries),
+		"page":           page.Page,
+		"note":           "Places are read from Cartolensia's local cache. Online geocoders are never called from this page.",
+	})
+}
+
+func placeCacheHierarchy(place catalog.PlaceCacheEntry) []string {
+	return compactStrings([]string{place.Country, place.Region, place.City, place.Road, place.Name})
+}
+
+func placeCacheLevel(place catalog.PlaceCacheEntry) string {
+	switch {
+	case strings.TrimSpace(place.Road) != "":
+		return "road"
+	case strings.TrimSpace(place.City) != "":
+		return "city"
+	case strings.TrimSpace(place.Region) != "":
+		return "region"
+	case strings.TrimSpace(place.Country) != "":
+		return "country"
+	default:
+		return "place"
+	}
+}
+
+func placeCacheLabel(place catalog.PlaceCacheEntry) string {
+	if strings.TrimSpace(place.DisplayName) != "" {
+		return place.DisplayName
+	}
+	return strings.Join(placeCacheHierarchy(place), " / ")
+}
+
+func buildPlaceHierarchyTree(entries []catalog.PlaceHierarchyEntry) []map[string]any {
+	type node struct {
+		Key         string
+		Name        string
+		Level       string
+		AssetCount  int
+		TrackCount  int
+		PlacesCount int
+		Children    map[string]*node
+	}
+	levels := []string{"country", "region", "city", "road", "place"}
+	root := &node{Children: map[string]*node{}}
+	for _, entry := range entries {
+		parent := root
+		parts := entry.Hierarchy
+		if len(parts) == 0 {
+			parts = []string{entry.Place.Name}
+		}
+		for idx, part := range parts {
+			level := "place"
+			if idx < len(levels) {
+				level = levels[idx]
+			}
+			key := level + ":" + strings.ToLower(part)
+			child := parent.Children[key]
+			if child == nil {
+				child = &node{Key: key, Name: part, Level: level, Children: map[string]*node{}}
+				parent.Children[key] = child
+			}
+			child.AssetCount += entry.AssetCount
+			child.TrackCount += entry.TrackCount
+			child.PlacesCount++
+			parent = child
+		}
+	}
+	var flatten func(map[string]*node) []map[string]any
+	flatten = func(nodes map[string]*node) []map[string]any {
+		keys := make([]string, 0, len(nodes))
+		for key := range nodes {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return strings.ToLower(nodes[keys[i]].Name) < strings.ToLower(nodes[keys[j]].Name)
+		})
+		out := make([]map[string]any, 0, len(keys))
+		for _, key := range keys {
+			item := nodes[key]
+			row := map[string]any{
+				"key":          item.Key,
+				"name":         item.Name,
+				"level":        item.Level,
+				"asset_count":  item.AssetCount,
+				"track_count":  item.TrackCount,
+				"places_count": item.PlacesCount,
+			}
+			if len(item.Children) > 0 {
+				row["children"] = flatten(item.Children)
+			}
+			out = append(out, row)
+		}
+		return out
+	}
+	return flatten(root.Children)
 }
 
 func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {

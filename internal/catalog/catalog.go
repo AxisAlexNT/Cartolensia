@@ -372,6 +372,26 @@ type PlaceQuery struct {
 	Offset int
 }
 
+type PlaceHierarchyQuery struct {
+	Q      string
+	Limit  int
+	Offset int
+}
+
+type PlaceHierarchyEntry struct {
+	Place      PlaceCacheEntry `json:"place"`
+	Level      string          `json:"level"`
+	Label      string          `json:"label"`
+	Hierarchy  []string        `json:"hierarchy"`
+	AssetCount int             `json:"asset_count"`
+	TrackCount int             `json:"track_count"`
+}
+
+type PlaceHierarchyPage struct {
+	Entries []PlaceHierarchyEntry `json:"entries"`
+	Page    Page                  `json:"page"`
+}
+
 type GPSTrackQuery struct {
 	Q        string
 	BBox     *BBox
@@ -393,6 +413,25 @@ type TrackPointQuery struct {
 type TrackPointBatchQuery struct {
 	TrackAssetIDs     []string
 	MaxPointsPerTrack int
+}
+
+type TrackRenderCacheStatus struct {
+	TracksTotal      int            `json:"tracks_total"`
+	TracksWithCache  int            `json:"tracks_with_cache"`
+	MissingCache     int            `json:"missing_cache"`
+	PointsByLevel    map[string]int `json:"points_by_level"`
+	RequiredLevel    string         `json:"required_level"`
+	RefreshBatchHint int            `json:"refresh_batch_hint"`
+}
+
+type TrackRenderCacheRefreshResult struct {
+	Processed     int      `json:"processed"`
+	Refreshed     int      `json:"refreshed"`
+	Remaining     int      `json:"remaining"`
+	RequiredLevel string   `json:"required_level"`
+	Errors        []string `json:"errors,omitempty"`
+	Levels        []string `json:"levels"`
+	SafeNote      string   `json:"safe_note"`
 }
 
 type TrackAssetQuery struct {

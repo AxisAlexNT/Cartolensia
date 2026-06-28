@@ -313,6 +313,93 @@ func TestMapTrackOverlayPagesBeyondFirstTrackPage(t *testing.T) {
 	}
 }
 
+func TestMapHeatmapIncludesAssetAndTrackPoints(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       cfg,
+		Plugins:      plugins.BuiltIns(),
+		Store:        store,
+		StoreBackend: "memory",
+	})
+	photo, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/photo.jpg",
+		RelativePath: "photo.jpg",
+		Name:         "photo.jpg",
+		Extension:    "jpg",
+		MIME:         "image/jpeg",
+		MediaKind:    "photo",
+		SizeBytes:    10,
+		MTime:        time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertAssetGeo(ctx, catalog.AssetGeo{AssetID: photo.Asset.ID, Lat: 40.18, Lon: 44.51, Source: "exif"}, true); err != nil {
+		t.Fatal(err)
+	}
+	track, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/track.gpx",
+		RelativePath: "track.gpx",
+		Name:         "track.gpx",
+		Extension:    "gpx",
+		MIME:         "application/gpx+xml",
+		MediaKind:    "track",
+		SizeBytes:    10,
+		MTime:        time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	points := []catalog.TrackPoint{
+		{TrackAssetID: track.Asset.ID, RecordedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), Lat: 40.10, Lon: 44.10, Source: "test"},
+		{TrackAssetID: track.Asset.ID, RecordedAt: time.Date(2026, 1, 1, 12, 1, 0, 0, time.UTC), Lat: 40.11, Lon: 44.11, Source: "test"},
+		{TrackAssetID: track.Asset.ID, RecordedAt: time.Date(2026, 1, 1, 12, 2, 0, 0, time.UTC), Lat: 40.12, Lon: 44.12, Source: "test"},
+	}
+	if err := store.UpsertTrackPoints(ctx, track.Asset.ID, points); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertGPSTrackSummary(ctx, catalog.TrackSummary{
+		TrackAssetID: track.Asset.ID,
+		Name:         "track.gpx",
+		PointCount:   len(points),
+		StartTime:    &points[0].RecordedAt,
+		EndTime:      &points[2].RecordedAt,
+		MinLat:       &points[0].Lat,
+		MinLon:       &points[0].Lon,
+		MaxLat:       &points[2].Lat,
+		MaxLon:       &points[2].Lon,
+		DistanceM:    1000,
+		SourceFormat: "gpx",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/map/heatmap?zoom=12&track_limit=10&track_point_budget=100&asset_limit=10", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("heatmap status %d body %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Features []map[string]any `json:"features"`
+		Heatmap  struct {
+			AssetPoints float64 `json:"asset_points"`
+			TrackPoints float64 `json:"track_points"`
+			TotalPoints float64 `json:"total_points"`
+		} `json:"heatmap"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Heatmap.AssetPoints != 1 || payload.Heatmap.TrackPoints < 3 || payload.Heatmap.TotalPoints != float64(len(payload.Features)) {
+		t.Fatalf("unexpected heatmap counts: %#v features=%d", payload.Heatmap, len(payload.Features))
+	}
+}
+
 func TestTrackJumpFilterSplitsTeleportSegments(t *testing.T) {
 	points := []catalog.TrackPoint{
 		{Lat: 40.000, Lon: 44.000},
@@ -770,6 +857,11 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/places?q=fixture", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Fixture Lab"`) || !strings.Contains(rec.Body.String(), `"Fixture Road"`) {
 		t.Fatalf("list places status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/places/hierarchy?q=fixture", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"local_place_cache"`) || !strings.Contains(rec.Body.String(), `"Fixture Lab"`) || !strings.Contains(rec.Body.String(), `"tree"`) {
+		t.Fatalf("place hierarchy status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/places/"+createdPlace.ID, strings.NewReader(`{"display_name":"Fixture Lab Cache"}`)))
