@@ -2105,7 +2105,7 @@ func (s *Server) handlePlaceHierarchy(w http.ResponseWriter, r *http.Request) {
 		"mode":           "local_place_cache",
 		"offline":        true,
 		"provider":       runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
-		"online_enabled": runtimeBoolSetting("search.online_geocoding", false),
+		"online_enabled": runtimeBoolSetting("search.online_geocoding", true),
 		"radius_m":       runtimeIntSetting("search.reverse_geocode_radius_m", 100),
 		"entries":        page.Entries,
 		"tree":           buildPlaceHierarchyTree(page.Entries),
@@ -2233,8 +2233,8 @@ func (s *Server) handlePlaceProviders(w http.ResponseWriter, r *http.Request) {
 	provider := normalizeGeocoderProvider(runtimeStringSetting("search.geocoder_provider", "nominatim"))
 	baseURL := strings.TrimRight(runtimeStringSetting("search.geocoder_provider_url", defaultGeocoderURL(provider)), "/")
 	locale := normalizedGeocoderLocale()
-	onlineEnabled := runtimeBoolSetting("search.online_geocoding", false)
-	userAgent := strings.TrimSpace(runtimeStringSetting("search.geocoder_user_agent", "Cartolensia/1.0 self-hosted user-triggered reverse geocoder"))
+	onlineEnabled := runtimeBoolSetting("search.online_geocoding", true)
+	userAgent := strings.TrimSpace(runtimeStringSetting("search.geocoder_user_agent", "Cartolensia/1.0 self-hosted online-cache reverse geocoder"))
 	minInterval := runtimeIntSetting("search.geocoder_min_interval_ms", 1100)
 	googleConfigured := strings.TrimSpace(os.Getenv("CARTOLENSIA_GOOGLE_GEOCODING_API_KEY")) != ""
 	googleCacheAcknowledged := googleGeocodingCacheAcknowledged()
@@ -2248,7 +2248,7 @@ func (s *Server) handlePlaceProviders(w http.ResponseWriter, r *http.Request) {
 			Locale:      locale,
 			Policy:      "Always available offline. No network calls.",
 			Recommended: true,
-			Note:        "Use this as the default lookup path. Online providers only add cache rows when explicitly requested.",
+			Note:        "Always checked first. Online providers only fill missing cache rows and never replace local cache matches.",
 		},
 		{
 			Key:         "nominatim",
@@ -2259,7 +2259,7 @@ func (s *Server) handlePlaceProviders(w http.ResponseWriter, r *http.Request) {
 			URL:         baseURL,
 			Locale:      locale,
 			License:     "OpenStreetMap/Open Database License data; provider terms apply",
-			Policy:      "User-triggered only, cached, rate-limited. Public OSMF Nominatim is not for bulk reverse-geocoding.",
+			Policy:      "Enabled by default for missing cache entries, cached, and rate-limited. For bulk enrichment, use a self-hosted endpoint.",
 			Recommended: true,
 			Note:        fmt.Sprintf("User-Agent configured: %t; minimum interval: %d ms.", userAgent != "", minInterval),
 		},
@@ -2272,7 +2272,7 @@ func (s *Server) handlePlaceProviders(w http.ResponseWriter, r *http.Request) {
 			URL:         baseURL,
 			Locale:      locale,
 			License:     "Depends on imported geodata and operator deployment",
-			Policy:      "Recommended for large archives. Cartolensia still caches results and avoids automatic bulk public calls.",
+			Policy:      "Recommended for large archives. Cartolensia caches every result and can safely run broad cache-fill jobs against operator-controlled endpoints.",
 			Recommended: true,
 		},
 		{
@@ -2314,15 +2314,15 @@ func (s *Server) handlePlaceProviders(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":                 runtimeStringSetting("search.geocoder_mode", "cache_only"),
+		"mode":                 runtimeStringSetting("search.geocoder_mode", "online_cache"),
 		"online_enabled":       onlineEnabled,
 		"active_provider":      provider,
 		"active_provider_url":  baseURL,
 		"locale":               locale,
 		"min_interval_ms":      minInterval,
 		"providers":            providers,
-		"cache_policy":         "Cartolensia always checks local place_cache first and only calls online geocoders from explicit user-triggered reverse-geocode actions.",
-		"bulk_policy":          "Do not bulk-call public geocoders. For large libraries, import local geodata or use a self-hosted Nominatim/Pelias/Photon endpoint.",
+		"cache_policy":         "Cartolensia always checks local place_cache first. Missing coordinates use the configured online provider when online geocoding is enabled, and every result is persisted for offline reuse.",
+		"bulk_policy":          "Public providers remain rate-limited. For large libraries, use imported local geodata or a self-hosted Nominatim/Pelias/Photon endpoint.",
 		"google_secret_source": "CARTOLENSIA_GOOGLE_GEOCODING_API_KEY",
 		"google_cache_ack":     googleCacheAcknowledged,
 	})
@@ -2336,18 +2336,24 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Lat     float64 `json:"lat"`
 		Lon     float64 `json:"lon"`
-		Online  bool    `json:"online,omitempty"`
+		Online  *bool   `json:"online,omitempty"`
 		RadiusM float64 `json:"radius_m,omitempty"`
 	}
+	onlineRequested := runtimeBoolSetting("search.online_geocoding", true)
 	if r.Method == http.MethodGet {
 		req.Lat, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lat")), 64)
 		req.Lon, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lon")), 64)
-		req.Online = boolQuery(r.URL.Query().Get("online"))
+		if _, ok := r.URL.Query()["online"]; ok {
+			onlineRequested = boolQuery(r.URL.Query().Get("online"))
+		}
 		req.RadiusM, _ = strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("radius_m")), 64)
 	} else if r.Body != nil {
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			writeError(w, http.StatusBadRequest, err)
 			return
+		}
+		if req.Online != nil {
+			onlineRequested = *req.Online
 		}
 	}
 	if req.Lat < -90 || req.Lat > 90 || req.Lon < -180 || req.Lon > 180 {
@@ -2381,7 +2387,7 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !req.Online || !runtimeBoolSetting("search.online_geocoding", false) {
+	if !onlineRequested || !runtimeBoolSetting("search.online_geocoding", true) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"lat":      req.Lat,
 			"lon":      req.Lon,
@@ -2390,7 +2396,7 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 			"places":   []catalog.PlaceCacheEntry{},
 			"radius_m": req.RadiusM,
 			"provider": runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
-			"note":     "No local cached place contains this coordinate. Online reverse geocoding is disabled or was not requested.",
+			"note":     "No local cached place contains this coordinate. Online reverse geocoding is disabled for this request or runtime.",
 		})
 		return
 	}
@@ -2800,7 +2806,7 @@ func (s *Server) reverseGeocodeNominatim(ctx context.Context, provider, baseURL 
 			"place_id":   data.PlaceID,
 			"osm_type":   data.OSMType,
 			"osm_id":     data.OSMID,
-			"policy":     "user-triggered online reverse geocode; cached for offline reuse; no automatic bulk public geocoder calls",
+			"policy":     "online cache-fill reverse geocode; cached for offline reuse; use self-hosted/operator-approved endpoints for large archives",
 			"source_url": strings.TrimRight(baseURL, "/"),
 		},
 	})
@@ -3023,7 +3029,7 @@ func geocoderRequest(ctx context.Context, endpoint, locale string) (*http.Reques
 		cancel()
 		return nil, nil, err
 	}
-	req.Header.Set("User-Agent", firstNonEmpty(runtimeStringSetting("search.geocoder_user_agent", ""), "Cartolensia/1.0 self-hosted user-triggered reverse geocoder"))
+	req.Header.Set("User-Agent", firstNonEmpty(runtimeStringSetting("search.geocoder_user_agent", ""), "Cartolensia/1.0 self-hosted online-cache reverse geocoder"))
 	if locale != "" {
 		req.Header.Set("Accept-Language", locale)
 	}
@@ -3075,7 +3081,7 @@ func normalizeFeaturePlace(provider, sourceURL, locale string, lat, lon float64,
 			"source_url": sourceURL,
 			"source_id":  firstExisting(props, "id", "gid", "osm_id"),
 			"layer":      firstExisting(props, "layer", "osm_key", "type"),
-			"policy":     "user-triggered online reverse geocode; cached for offline reuse; use self-hosted/operator-approved endpoints for large archives",
+			"policy":     "online cache-fill reverse geocode; cached for offline reuse; use self-hosted/operator-approved endpoints for large archives",
 		},
 	})
 }

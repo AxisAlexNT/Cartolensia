@@ -5351,3 +5351,35 @@ Safety confirmation:
 - no missing-file marking;
 - no commit;
 - no push.
+
+## 2026-06-29 Online Reverse-Geocoder Default
+
+### Implemented
+
+- Changed reverse geocoding from cache-only default to online cache-fill default:
+  - `search.geocoder_mode` now defaults to `online_cache`;
+  - `search.online_geocoding` now defaults to `true` and can be overridden with `CARTOLENSIA_ONLINE_GEOCODING=false`;
+  - direct `/api/v1/places/reverse` requests that omit `online` use the runtime default;
+  - new `/api/v1/places/reverse-geocode/start` jobs that omit `online` use the runtime default;
+  - callers can still pass `online=false` for an explicit cache-only lookup.
+- Kept the provider path cache-first: local `place_cache` matches return immediately and provider calls happen only for cache misses.
+- Kept provider calls rate-limited and persisted to `place_cache` for offline reuse.
+- Updated Settings/Tasks UI help text so reverse geocoding starts enabled by default.
+- Updated operations/security/architecture documentation to reflect the new default and the public-provider caveat.
+
+### Validation
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- Built `/tmp/cartolensia-online-geocoder` and deployed it plus the rebuilt WebUI to `rjazhenka`.
+- Remote `/api/v1/places/providers` now reports `mode=online_cache`, `online_enabled=true`, active provider `nominatim`, URL `https://nominatim.openstreetmap.org`, and minimum interval `1100 ms`.
+- A remote authenticated `/api/v1/places/reverse` call with omitted `online` used the default online cache-fill path and stored one Nominatim result in `place_cache`.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+- Broad production enrichment should use imported local geodata or a self-hosted/operator-approved Nominatim/Pelias/Photon endpoint instead of bulk-calling shared public providers.

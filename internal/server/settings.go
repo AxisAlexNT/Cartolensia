@@ -42,12 +42,12 @@ var runtimeSettings = struct {
 	"preview.cache_max_bytes":                           int64(10 * 1024 * 1024 * 1024),
 	"gallery.default_view":                              "tile",
 	"search.default_limit":                              100,
-	"search.geocoder_mode":                              "cache_only",
-	"search.online_geocoding":                           false,
+	"search.geocoder_mode":                              "online_cache",
+	"search.online_geocoding":                           envBoolDefault("CARTOLENSIA_ONLINE_GEOCODING", true),
 	"search.geocoder_provider":                          "nominatim",
 	"search.geocoder_provider_url":                      "https://nominatim.openstreetmap.org",
 	"search.geocoder_locale":                            envStringDefault("CARTOLENSIA_GEOCODER_LOCALE", ""),
-	"search.geocoder_user_agent":                        envStringDefault("CARTOLENSIA_GEOCODER_USER_AGENT", "Cartolensia/1.0 self-hosted user-triggered reverse geocoder"),
+	"search.geocoder_user_agent":                        envStringDefault("CARTOLENSIA_GEOCODER_USER_AGENT", "Cartolensia/1.0 self-hosted online-cache reverse geocoder"),
 	"search.geocoder_contact_email":                     envStringDefault("CARTOLENSIA_GEOCODER_CONTACT_EMAIL", ""),
 	"search.geocoder_min_interval_ms":                   envIntDefault("CARTOLENSIA_GEOCODER_MIN_INTERVAL_MS", 1100),
 	"search.reverse_geocode_radius_m":                   100,
@@ -75,6 +75,13 @@ func envIntDefault(name string, fallback int) int {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			return parsed
 		}
+	}
+	return fallback
+}
+
+func envBoolDefault(name string, fallback bool) bool {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return boolQuery(value)
 	}
 	return fallback
 }
@@ -440,14 +447,14 @@ func runtimeSettingsSchema() []map[string]any {
 		{"tab": "map", "key": "map.cluster_radius_px", "type": "number", "label": "Cluster radius px"},
 		{"tab": "map", "key": "map.tiles_enabled", "type": "boolean", "label": "OSM tiles enabled"},
 		{"tab": "search", "key": "search.default_limit", "type": "number", "label": "Default search limit"},
-		{"tab": "search", "key": "search.geocoder_mode", "type": "text", "label": "Geocoder mode"},
-		{"tab": "search", "key": "search.online_geocoding", "type": "boolean", "label": "Online geocoding enabled"},
+		{"tab": "search", "key": "search.geocoder_mode", "type": "text", "label": "Geocoder mode", "help": "Default online_cache means local cache first, then configured online provider for missing coordinates, with results persisted to place_cache."},
+		{"tab": "search", "key": "search.online_geocoding", "type": "boolean", "label": "Online geocoding enabled by default", "help": "Enabled by default. Provider calls are cache-first, rate-limited, and stored locally for offline reuse."},
 		{"tab": "search", "key": "search.geocoder_provider", "type": "text", "label": "Geocoder provider", "help": "Supported values: nominatim, nominatim_compatible, photon, pelias, google. local_place_cache disables online lookups."},
 		{"tab": "search", "key": "search.geocoder_provider_url", "type": "text", "label": "Geocoder provider URL", "help": "Provider base URL. Use self-hosted Nominatim/Pelias/Photon for large archives. Google uses its official endpoint unless overridden."},
 		{"tab": "search", "key": "search.geocoder_locale", "type": "text", "label": "Reverse-geocoder locale", "help": "Accept-Language/language hint, e.g. en, ru, hy, zh, or comma-preferred locales. Empty uses provider default."},
 		{"tab": "search", "key": "search.geocoder_user_agent", "type": "text", "label": "Geocoder User-Agent", "help": "Required by many OSM providers. Include operator contact in production when using public services."},
 		{"tab": "search", "key": "search.geocoder_contact_email", "type": "text", "label": "Geocoder contact email", "help": "Optional Nominatim email parameter. Stored only in local runtime settings."},
-		{"tab": "search", "key": "search.geocoder_min_interval_ms", "type": "number", "label": "Geocoder minimum interval ms", "help": "Per-provider process rate limit for explicit online reverse-geocode calls. Default 1100 ms for public Nominatim safety."},
+		{"tab": "search", "key": "search.geocoder_min_interval_ms", "type": "number", "label": "Geocoder minimum interval ms", "help": "Per-provider process rate limit for online cache-fill reverse-geocode calls. Default 1100 ms for public Nominatim safety."},
 		{"tab": "search", "key": "search.reverse_geocode_radius_m", "type": "number", "label": "Reverse geocode radius (m)", "help": "Nearby cached places inside this radius are returned along with containing admin bboxes. Default 100 m."},
 		{"tab": "search", "key": "search.runner_mode", "type": "text", "label": "Search planner mode", "help": "deterministic or local_llm. Deterministic remains the safe offline default."},
 		{"tab": "knowledge", "key": "knowledge.runner_mode", "type": "text", "label": "Knowledge runner mode", "help": "deterministic or local_llm. Local LLM uses only read-only tool results."},

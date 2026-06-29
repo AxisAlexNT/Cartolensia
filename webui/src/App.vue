@@ -363,7 +363,7 @@ const tasksMessage = ref("");
 const tasksBusy = ref("");
 const tasksLimit = ref(-1);
 const tasksBatchSize = ref(32);
-const tasksReverseGeocodeOnline = ref(false);
+const tasksReverseGeocodeOnline = ref(true);
 const tasksStorage = ref("");
 const tasksPrefix = ref("");
 const pendingConfig = ref<Record<string, unknown>>({});
@@ -5086,9 +5086,9 @@ const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
   ],
   search: [
     { key: "search.default_limit", label: "Default search limit", help: "Bounded result count for broad universal searches.", kind: "number" },
-    { key: "search.geocoder_mode", label: "Geocoder mode", help: "cache_only is the current safe default.", kind: "text" },
-    { key: "search.online_geocoding", label: "Online geocoding enabled", help: "Currently off by default; provider calls must be user-triggered and cached.", kind: "boolean" },
-    { key: "search.geocoder_provider", label: "Geocoder provider", help: "nominatim, nominatim_compatible, photon, pelias, google, or local_place_cache. Online calls are explicit only.", kind: "text" },
+    { key: "search.geocoder_mode", label: "Geocoder mode", help: "Default online_cache checks local cache first, then fills missing places through the configured provider.", kind: "text" },
+    { key: "search.online_geocoding", label: "Online geocoding enabled", help: "Enabled by default. Provider calls are rate-limited and every result is cached locally.", kind: "boolean" },
+    { key: "search.geocoder_provider", label: "Geocoder provider", help: "nominatim, nominatim_compatible, photon, pelias, google, or local_place_cache. Prefer self-hosted OSM providers for broad jobs.", kind: "text" },
     { key: "search.geocoder_provider_url", label: "Geocoder provider URL", help: "Provider base URL. Use self-hosted OSM providers for large archives. Google uses its official URL unless overridden.", kind: "text" },
     { key: "search.geocoder_locale", label: "Geocoder locale", help: "Accept-Language/language hint, e.g. en, ru, hy, zh or comma-preferred locales.", kind: "text" },
     { key: "search.geocoder_user_agent", label: "Geocoder User-Agent", help: "Required by many OSM providers. Include operator contact in production.", kind: "text" },
@@ -10360,7 +10360,7 @@ onBeforeUnmount(() => {
                 <div class="section-title compact-title">
                   <div>
                     <h4><i class="bi bi-database-gear" aria-hidden="true"></i> Operator Place Cache</h4>
-                    <p class="muted">Editable local entries power offline place search and asset-detail reverse geocoding. No public geocoder is called here.</p>
+                    <p class="muted">Editable local entries power offline place search and asset-detail reverse geocoding. Missing places are filled by the configured provider when online geocoding is enabled, then reused from cache.</p>
                   </div>
                   <button type="button" class="btn btn-outline-primary btn-sm" @click="refreshPlaceCache">
                     <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
@@ -10456,7 +10456,7 @@ onBeforeUnmount(() => {
                   </button>
                 </article>
               </div>
-              <p class="muted">No public geocoder is called automatically. Future Nominatim-compatible lookups must be user-triggered and cached before being reused offline.</p>
+              <p class="muted">Reverse geocoding is cache-first. Online providers are enabled by default for cache misses, rate-limited, and persisted before reuse offline.</p>
             </article>
             <article v-if="settingsTab === 'preview'" class="settings-form">
               <h3><i class="bi bi-images" aria-hidden="true"></i> Preview Cache</h3>

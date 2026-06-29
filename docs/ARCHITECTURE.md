@@ -184,7 +184,7 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Albums page for virtual album creation, item management, and map handoff;
 - GPS Tracks page backed by parsed GPX/KML/KMZ track points and enriched distance/duration metadata, including media lookup and snap-media controls;
 - Map page backed by GeoJSON from the map API with bundled OpenLayers vector rendering, screen-distance clustering, count labels, click-priority asset/cluster layers above tracks, cluster/point mini-gallery popups, track click popups, album filters, media filters, and track filters;
-- universal Explorer search with result explanations, table/tile/gallery reuse, an explicit `postgres_local` `SearchBackend`, OCR/caption/AI metadata matching, and cache-only local place matching for entries such as Yerevan, Vanadzor, Lori Province, and Armenia;
+- universal Explorer search with result explanations, table/tile/gallery reuse, an explicit `postgres_local` `SearchBackend`, OCR/caption/AI metadata matching, and cache-first place matching backed by the durable `place_cache`;
 - Duplicates page for report-only SHA-512+size content groups;
 - Storages page;
 - Plugins page and plugin detail health/status surface;
@@ -329,7 +329,7 @@ Asset detail exposes OCR full text, transcripts, audio features, video frame cap
 - Normal discovery/indexing jobs use `max_files=-1` and `max_bytes=-1` as explicit unlimited sentinels. Real archive storage still requires a named storage and non-root prefix; omitted/zero limits remain invalid for guarded real-archive flows.
 - Dry-run/preview discovery keeps conservative caps and reports that those caps are preview-only.
 - Track rendering now has a shared OpenLayers style path for direction arrows. Runtime setting `gps.track_arrow_interval_m` controls spacing, defaults to `500`, and `0` disables arrows.
-- Reverse geocoding is cache-first. `/api/v1/places/reverse` resolves coordinates against durable `place_cache` bounding boxes before considering a user-triggered Nominatim-compatible provider. Online provider use remains disabled by default and every online result is persisted back to `place_cache`.
+- Reverse geocoding is cache-first. `/api/v1/places/reverse` resolves coordinates against durable `place_cache` bounding boxes before using the configured online provider for cache misses. Online cache-fill is enabled by default, rate-limited, and every provider result is persisted back to `place_cache` for offline reuse.
 - The current map clustering implementation remains screen-distance based. Persisted zoom-level cluster cache endpoints are still planned; frontend cluster state should continue to replace stale layer data on zoom changes.
 
 ## 2026-06-09 Metadata Context And Timestamp Candidates

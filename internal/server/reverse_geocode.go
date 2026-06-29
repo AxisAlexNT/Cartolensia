@@ -16,7 +16,7 @@ type reverseGeocodeStartRequest struct {
 	Limit       int     `json:"limit"`
 	BatchSize   int     `json:"batch_size"`
 	RadiusM     float64 `json:"radius_m"`
-	Online      bool    `json:"online"`
+	Online      *bool   `json:"online"`
 	OnlyMissing bool    `json:"only_missing"`
 	MediaKind   string  `json:"media_kind"`
 }
@@ -48,11 +48,15 @@ func (s *Server) handleReverseGeocodeStart(w http.ResponseWriter, r *http.Reques
 	if r.Body != nil {
 		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
 	}
+	online := runtimeBoolSetting("search.online_geocoding", true)
+	if req.Online != nil {
+		online = *req.Online
+	}
 	payload := normalizeReverseGeocodePayload(reverseGeocodeJobPayload{
 		Limit:       req.Limit,
 		BatchSize:   req.BatchSize,
 		RadiusM:     req.RadiusM,
-		Online:      req.Online,
+		Online:      online,
 		OnlyMissing: req.OnlyMissing,
 		MediaKind:   req.MediaKind,
 		StartedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -181,7 +185,7 @@ func (s *Server) RunReverseGeocodeJob(ctx context.Context, job *jobs.Job, worker
 			if len(local) > 0 {
 				matched++
 				processed++
-			} else if payload.Online && runtimeBoolSetting("search.online_geocoding", false) {
+			} else if payload.Online && runtimeBoolSetting("search.online_geocoding", true) {
 				place, err := s.reverseGeocodeOnline(ctx, geo.Geo.Lat, geo.Geo.Lon)
 				if err != nil {
 					failed++

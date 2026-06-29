@@ -1769,7 +1769,7 @@ export const api = {
     request<Record<string, unknown>>(`/api/v1/places/${encodeURIComponent(id)}`, {
       method: "DELETE"
     }),
-  reversePlace: (lat: number, lon: number, online = false, radiusM?: number) =>
+  reversePlace: (lat: number, lon: number, online = true, radiusM?: number) =>
     request<Record<string, unknown>>("/api/v1/places/reverse", {
       method: "POST",
       body: JSON.stringify({ lat, lon, online, radius_m: radiusM })
