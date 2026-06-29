@@ -139,6 +139,12 @@ func (db *DB) ExplorerView(ctx context.Context, opts catalog.ExplorerOptions) (c
 func explorerLocationWhere(opts catalog.ExplorerOptions, current, prefix string) (string, []any) {
 	var parts []string
 	var args []any
+	if monthStart, monthEnd, ok := explorerMonthRange(opts.Month); ok {
+		args = append(args, monthStart)
+		parts = append(parts, fmt.Sprintf("coalesce(a.taken_at, l.mtime) >= $%d", len(args)))
+		args = append(args, monthEnd)
+		parts = append(parts, fmt.Sprintf("coalesce(a.taken_at, l.mtime) < $%d", len(args)))
+	}
 	if opts.Storage != "" {
 		args = append(args, opts.Storage)
 		parts = append(parts, fmt.Sprintf("s.name=$%d", len(args)))
@@ -164,6 +170,18 @@ func explorerLocationWhere(opts catalog.ExplorerOptions, current, prefix string)
 		parts = append(parts, fmt.Sprintf("l.relative_path like $%d", len(args)))
 	}
 	return strings.Join(parts, " and "), args
+}
+
+func explorerMonthRange(value string) (time.Time, time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, time.Time{}, false
+	}
+	start, err := time.Parse("2006-01", value)
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	return start.UTC(), start.AddDate(0, 1, 0).UTC(), true
 }
 
 func explorerLocationOrderBy(sortKey string) string {
@@ -492,6 +510,35 @@ func (db *DB) ListAlbums(ctx context.Context, query catalog.AlbumQuery) ([]catal
 		group by a.id
 		order by a.sort_order, a.title
 		limit $`+fmt.Sprint(len(args)-1)+` offset $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	albums := []catalog.Album{}
+	for rows.Next() {
+		var album catalog.Album
+		if err := rows.Scan(&album.ID, &album.ParentID, &album.Slug, &album.Title, &album.Description, &album.SortOrder, &album.CreatedAt, &album.UpdatedAt, &album.ItemCount); err != nil {
+			return nil, err
+		}
+		albums = append(albums, album)
+	}
+	return albums, rows.Err()
+}
+
+func (db *DB) ListAssetAlbums(ctx context.Context, assetID string) ([]catalog.Album, error) {
+	if _, err := db.GetAsset(ctx, assetID); err != nil {
+		return nil, err
+	}
+	rows, err := db.pool.Query(ctx, `
+		select a.id::text, coalesce(a.parent_id::text, ''), a.slug, a.title, a.description, a.sort_order,
+			a.created_at, a.updated_at, count(all_items.asset_id)::int
+		from album_items membership
+		join albums a on a.id=membership.album_id
+		left join album_items all_items on all_items.album_id=a.id
+		where membership.asset_id=$1
+		group by a.id
+		order by a.sort_order, a.title
+	`, assetID)
 	if err != nil {
 		return nil, err
 	}

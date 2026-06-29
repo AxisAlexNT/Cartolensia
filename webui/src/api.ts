@@ -798,6 +798,14 @@ export type KnowledgeAction = {
   details?: Record<string, unknown>;
 };
 
+export type KnowledgeAttachment = {
+  name: string;
+  mime: string;
+  size_bytes: number;
+  text?: string;
+  data_url?: string;
+};
+
 export type KnowledgeChatResponse = {
   conversation_id?: string;
   answer: string;
@@ -812,6 +820,23 @@ export type KnowledgeChatResponse = {
   limit: number;
   llm_status: string;
   note: string;
+};
+
+export type KnowledgeChatStreamEvent = {
+  event: string;
+  message?: string;
+  error?: string;
+  query?: string;
+  tokens?: string[];
+  tool?: string;
+  status?: string;
+  returned?: number;
+  total?: number;
+  facts?: number;
+  relations?: number;
+  text?: string;
+  response?: KnowledgeChatResponse;
+  [key: string]: unknown;
 };
 
 export type KnowledgeLLMStatus = {
@@ -1076,6 +1101,15 @@ async function refreshCSRF(): Promise<void> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await authenticatedFetch(path, init);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error ?? `${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function authenticatedFetch(path: string, init?: RequestInit): Promise<Response> {
   const method = init?.method?.toUpperCase() ?? "GET";
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (init?.headers) Object.assign(headers, init.headers as Record<string, string>);
@@ -1083,16 +1117,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     await refreshCSRF().catch(() => undefined);
     if (csrfToken) headers[csrfHeader] = csrfToken;
   }
-  const response = await fetch(path, {
+  return fetch(path, {
     credentials: "same-origin",
     ...init,
     headers
   });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? `${response.status} ${response.statusText}`);
-  }
-  return (await response.json()) as T;
 }
 
 function asArray<T>(value: T[] | null | undefined): T[] {
@@ -1232,6 +1261,10 @@ export const api = {
         ])
       )
     })),
+  assetAlbums: async (id: string) => {
+    const payload = await request<{ albums?: Album[] } | Album[] | null>(`/api/v1/assets/${encodeURIComponent(id)}/albums`);
+    return asArray(Array.isArray(payload) ? payload : payload?.albums);
+  },
   duplicates: (limit = 50, offset = 0) =>
     request<DuplicatePage | null>(`/api/v1/duplicates?limit=${limit}&offset=${offset}`).then(normalizeDuplicatePage),
   assetMonths: async (query = "") =>
@@ -1619,10 +1652,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ limit })
     }),
-  knowledgeChat: (message: string, conversationId = "", limit = 25) =>
+  knowledgeChat: (message: string, conversationId = "", limit = 25, attachments: KnowledgeAttachment[] = []) =>
     request<KnowledgeChatResponse>("/api/v1/knowledge/chat", {
       method: "POST",
-      body: JSON.stringify({ message, conversation_id: conversationId, limit })
+      body: JSON.stringify({ message, conversation_id: conversationId, limit, attachments })
     }).then((response) => ({
       ...response,
       media: asArray(response.media).map((item) => ({ ...item, asset: normalizeAsset(item.asset) })),
@@ -1633,6 +1666,64 @@ export const api = {
       sql_results: asArray(response.sql_results),
       messages: asArray(response.messages)
     })),
+  knowledgeChatStream: async (
+    message: string,
+    conversationId = "",
+    limit = 25,
+    attachments: KnowledgeAttachment[] = [],
+    onEvent: (event: KnowledgeChatStreamEvent) => void
+  ): Promise<KnowledgeChatResponse> => {
+    const response = await authenticatedFetch("/api/v1/knowledge/chat/stream", {
+      method: "POST",
+      body: JSON.stringify({ message, conversation_id: conversationId, limit, attachments })
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error ?? `${response.status} ${response.statusText}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Streaming responses are not supported by this browser.");
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResponse: KnowledgeChatResponse | null = null;
+    const parseBlock = (block: string) => {
+      const lines = block.split(/\r?\n/);
+      const eventName = lines.find((line) => line.startsWith("event:"))?.slice("event:".length).trim() || "message";
+      const data = lines
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trimStart())
+        .join("\n");
+      if (!data) return;
+      const parsed = JSON.parse(data) as KnowledgeChatStreamEvent | KnowledgeChatResponse;
+      const event = { ...(parsed as Record<string, unknown>), event: eventName } as KnowledgeChatStreamEvent;
+      if (eventName === "final") {
+        const responsePayload = parsed as KnowledgeChatResponse;
+        finalResponse = {
+          ...responsePayload,
+          media: asArray(responsePayload.media).map((item) => ({ ...item, asset: normalizeAsset(item.asset) })),
+          facts: asArray(responsePayload.facts),
+          relations: asArray(responsePayload.relations),
+          tool_calls: asArray(responsePayload.tool_calls),
+          actions: asArray(responsePayload.actions),
+          sql_results: asArray(responsePayload.sql_results),
+          messages: asArray(responsePayload.messages)
+        };
+        event.response = finalResponse;
+      }
+      onEvent(event);
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\n\n/);
+      buffer = blocks.pop() ?? "";
+      blocks.forEach(parseBlock);
+    }
+    if (buffer.trim()) parseBlock(buffer);
+    if (!finalResponse) throw new Error("The local LLM stream ended without a final answer.");
+    return finalResponse;
+  },
   knowledgeLLMStatus: () => request<KnowledgeLLMStatus>("/api/v1/knowledge/llm/status"),
   search: (q: string, limit = 100, offset = 0) =>
     request<SearchResponse>(
@@ -1682,6 +1773,18 @@ export const api = {
     request<Record<string, unknown>>("/api/v1/places/reverse", {
       method: "POST",
       body: JSON.stringify({ lat, lon, online, radius_m: radiusM })
+    }),
+  startReverseGeocode: (payload: {
+    limit?: number;
+    batch_size?: number;
+    radius_m?: number;
+    online?: boolean;
+    only_missing?: boolean;
+    media_kind?: string;
+  } = {}) =>
+    request<Job>("/api/v1/places/reverse-geocode/start", {
+      method: "POST",
+      body: JSON.stringify(payload)
     }),
   settings: () => request<SettingsPayload>("/api/v1/settings").then((payload) => ({
     ...payload,

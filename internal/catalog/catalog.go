@@ -766,6 +766,7 @@ type Store interface {
 	DeleteAlbum(context.Context, string) error
 	GetAlbum(context.Context, string) (Album, error)
 	ListAlbums(context.Context, AlbumQuery) ([]Album, error)
+	ListAssetAlbums(context.Context, string) ([]Album, error)
 	AddAlbumItems(context.Context, string, []string) error
 	RemoveAlbumItem(context.Context, string, string) error
 	ListAlbumItems(context.Context, AlbumItemQuery) (AlbumItemPage, error)
@@ -1502,6 +1503,7 @@ type ExplorerOptions struct {
 	MediaKind  string
 	HashStatus string
 	Extension  string
+	Month      string
 	Limit      int
 	Offset     int
 	Sort       string
@@ -1564,6 +1566,9 @@ func BuildExplorerView(assets []Asset, opts ExplorerOptions) (ExplorerView, erro
 			continue
 		}
 		for _, loc := range asset.Locations {
+			if opts.Month != "" && !explorerLocationMatchesMonth(asset, loc, opts.Month) {
+				continue
+			}
 			if opts.Storage != "" && loc.StorageName != opts.Storage {
 				continue
 			}
@@ -1626,6 +1631,21 @@ func BuildExplorerView(assets []Asset, opts ExplorerOptions) (ExplorerView, erro
 	}
 	view.Files = view.Files[opts.Offset:end]
 	return view, nil
+}
+
+func explorerLocationMatchesMonth(asset Asset, loc Location, month string) bool {
+	start, err := time.Parse("2006-01", month)
+	if err != nil {
+		return true
+	}
+	var ts time.Time
+	if asset.TakenAt != nil {
+		ts = asset.TakenAt.UTC()
+	} else {
+		ts = loc.MTime.UTC()
+	}
+	end := start.AddDate(0, 1, 0)
+	return !ts.Before(start.UTC()) && ts.Before(end.UTC())
 }
 
 func BuildDuplicateGroups(assets []Asset, limit, offset int) DuplicatePage {

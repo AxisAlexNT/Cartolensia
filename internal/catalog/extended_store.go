@@ -382,6 +382,33 @@ func (s *MemoryStore) ListAlbums(_ context.Context, query AlbumQuery) ([]Album, 
 	return append([]Album(nil), out[offset:end]...), nil
 }
 
+func (s *MemoryStore) ListAssetAlbums(_ context.Context, assetID string) ([]Album, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.assets[assetID]; !ok {
+		return nil, ErrNotFound
+	}
+	out := []Album{}
+	for albumID, items := range s.albumItems {
+		if _, ok := items[assetID]; !ok {
+			continue
+		}
+		album, ok := s.albums[albumID]
+		if !ok {
+			continue
+		}
+		album.ItemCount = len(items)
+		out = append(out, album)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SortOrder == out[j].SortOrder {
+			return out[i].Title < out[j].Title
+		}
+		return out[i].SortOrder < out[j].SortOrder
+	})
+	return out, nil
+}
+
 func (s *MemoryStore) AddAlbumItems(_ context.Context, albumID string, assetIDs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

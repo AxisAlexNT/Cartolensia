@@ -315,5 +315,9 @@ The Knowledge Base and Knowledge Graph are derived metadata. They must follow th
 - unauthenticated users must not access non-public KB/KG APIs;
 - local LLM planners, when enabled, must not call remote APIs by default;
 - local LLM tool requests are advisory only; Cartolensia validates and executes only bounded media search, knowledge fact/relation search, and read-only SQL against `cartolensia_search_*` views;
+- concrete find/list/count media answers are rendered from backend-verified
+  tool results; local LLM synthesis cannot replace them with ungrounded prose;
 - model-generated SQL must be executed only through the existing single-`SELECT`, read-only, allowlisted `cartolensia_search_*` view runner;
+- streaming chat uses authenticated SSE and exposes only server-approved tool events plus compact citations/actions; it does not expose database credentials or raw table access;
+- chat attachments are bounded and sent only to the authenticated Cartolensia server and configured local LLM endpoint. Text-like attachments are prompt context; image attachments require a local vision-capable model and otherwise degrade to filename/text context;
 - KB/KG exports should be treated as sensitive metadata because they can summarize private files without containing the original media.

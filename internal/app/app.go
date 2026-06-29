@@ -173,6 +173,9 @@ func New(ctx context.Context, configPath string) (*App, error) {
 			runner := preview.Runner{Registry: app.Registry, Store: app.Store, CacheDir: app.Config.Cache.Dir, WorkerID: manager.WorkerID(), LeaseDuration: manager.LeaseDuration()}
 			return runner.Generate(ctx, job)
 		})
+		manager.Register("reverse_geocode", func(ctx context.Context, job *jobs.Job) error {
+			return app.server.RunReverseGeocodeJob(ctx, job, manager.WorkerID(), manager.LeaseDuration())
+		})
 		manager.Register("ai_backfill", func(ctx context.Context, job *jobs.Job) error {
 			return app.server.RunAIBackfillJob(ctx, job, manager.WorkerID(), manager.LeaseDuration())
 		})

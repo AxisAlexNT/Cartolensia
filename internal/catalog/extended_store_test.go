@@ -32,6 +32,13 @@ func TestMemoryAlbumsDoNotDeleteAssets(t *testing.T) {
 	if err := store.AddAlbumItems(ctx, album.ID, []string{result.Asset.ID}); err != nil {
 		t.Fatal(err)
 	}
+	memberships, err := store.ListAssetAlbums(ctx, result.Asset.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memberships) != 1 || memberships[0].ID != album.ID {
+		t.Fatalf("expected direct asset album membership lookup, got %#v", memberships)
+	}
 	if err := store.DeleteAlbum(ctx, album.ID); err != nil {
 		t.Fatal(err)
 	}

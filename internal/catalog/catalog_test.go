@@ -217,6 +217,20 @@ func TestBuildExplorerViewGroupsFolders(t *testing.T) {
 	if filtered.FileCount != 0 || filtered.FolderCount != 0 {
 		t.Fatalf("video filter should hide photo folder entries, got %#v", filtered)
 	}
+	december, err := BuildExplorerView(assets, ExplorerOptions{Path: "", Month: "1970-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if december.FolderCount != 2 {
+		t.Fatalf("month filter should keep folders with matching mtime candidates, got %#v", december)
+	}
+	missingMonth, err := BuildExplorerView(assets, ExplorerOptions{Path: "", Month: "1979-12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missingMonth.FolderCount != 0 || missingMonth.FileCount != 0 {
+		t.Fatalf("month filter should hide non-matching folders/files, got %#v", missingMonth)
+	}
 }
 
 func TestAssetTimestampCandidatesUseEXIFAndPixelFilename(t *testing.T) {

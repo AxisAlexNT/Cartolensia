@@ -267,10 +267,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/knowledge/relations", s.handleKnowledgeRelations)
 	s.mux.HandleFunc("/api/v1/knowledge/extract", s.handleKnowledgeExtract)
 	s.mux.HandleFunc("/api/v1/knowledge/chat", s.handleKnowledgeChat)
+	s.mux.HandleFunc("/api/v1/knowledge/chat/stream", s.handleKnowledgeChatStream)
 	s.mux.HandleFunc("/api/v1/knowledge/llm/status", s.handleKnowledgeLLMStatus)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/places/hierarchy", s.handlePlaceHierarchy)
 	s.mux.HandleFunc("/api/v1/places/providers", s.handlePlaceProviders)
+	s.mux.HandleFunc("/api/v1/places/reverse-geocode/start", s.handleReverseGeocodeStart)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
 	s.mux.HandleFunc("/api/v1/places/reverse", s.handlePlaceReverse)
 	s.mux.HandleFunc("/api/v1/places/", s.handlePlaceByID)
@@ -3532,6 +3534,13 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 {
 		switch parts[1] {
+		case "albums":
+			albums, err := s.deps.Store.ListAssetAlbums(r.Context(), asset.ID)
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "albums": albums, "total": len(albums)})
 		case "ai":
 			writeJSON(w, http.StatusOK, s.assetAIRecord(r.Context(), asset))
 		case "faces":
@@ -3625,6 +3634,7 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 			MediaKind:  query.Get("media_kind"),
 			HashStatus: query.Get("hash_status"),
 			Extension:  query.Get("extension"),
+			Month:      query.Get("month"),
 			Limit:      limit,
 			Offset:     offset,
 			Sort:       query.Get("sort"),
@@ -8805,11 +8815,26 @@ func (s *Server) assetPlaceRecords(ctx context.Context, asset catalog.Asset) []a
 	out := []assetPlaceRecord{}
 	seen := map[string]struct{}{}
 	places := s.placeEntries(ctx)
+	radiusM := float64(runtimeIntSetting("search.reverse_geocode_radius_m", 100))
+	if radiusM < 0 {
+		radiusM = 0
+	}
+	if radiusM > 5000 {
+		radiusM = 5000
+	}
 	for _, coordinate := range coordinates {
-		for _, place := range placesForPoint(coordinate.lat, coordinate.lon, places) {
+		matches := mergePlaceMatches(
+			placesForPoint(coordinate.lat, coordinate.lon, places),
+			nearbyPlacesForPoint(coordinate.lat, coordinate.lon, places, radiusM),
+		)
+		for _, place := range matches {
 			key := fmt.Sprintf("%s|%s|%.6f|%.6f", coordinate.source, strings.ToLower(place.Name), coordinate.lat, coordinate.lon)
 			if _, ok := seen[key]; ok {
 				continue
+			}
+			matchKind := firstNonEmpty(stringFromMap(place.Metadata, "match_kind"), "cached place match")
+			if distance := floatFromAny(place.Metadata["distance_m"]); distance > 0 {
+				matchKind = fmt.Sprintf("%s within %.0f m", matchKind, distance)
 			}
 			seen[key] = struct{}{}
 			out = append(out, assetPlaceRecord{
@@ -8821,7 +8846,7 @@ func (s *Server) assetPlaceRecords(ctx context.Context, asset catalog.Asset) []a
 				DisplayName:      place.DisplayName,
 				Provider:         place.Provider,
 				Source:           place.Source,
-				Match:            "coordinate inside cached place bbox",
+				Match:            matchKind,
 				BBox:             place.BBox,
 				Metadata:         coordinate.metadata,
 			})
@@ -8957,7 +8982,7 @@ func (s *Server) seedDefaultPlaces() {
 }
 
 func (s *Server) placeEntries(ctx context.Context) []catalog.PlaceCacheEntry {
-	places, err := s.deps.Store.ListPlaces(ctx, catalog.PlaceQuery{Limit: 1000})
+	places, err := s.deps.Store.ListPlaces(ctx, catalog.PlaceQuery{Limit: 100000})
 	if err == nil && len(places) > 0 {
 		return places
 	}

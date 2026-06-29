@@ -424,9 +424,11 @@ func quotedPhrases(text string) []string {
 
 func significantSearchWords(text string) []string {
 	stop := map[string]struct{}{
-		"find": {}, "show": {}, "me": {}, "with": {}, "from": {}, "and": {}, "or": {}, "the": {}, "a": {}, "an": {}, "in": {}, "on": {}, "near": {},
-		"найди": {}, "покажи": {}, "мне": {}, "с": {}, "со": {}, "и": {}, "или": {}, "в": {}, "на": {}, "около": {}, "рядом": {}, "где": {},
-		"год": {}, "года": {}, "году": {}, "лето": {}, "летом": {}, "пожалуйста": {},
+		"find": {}, "show": {}, "count": {}, "all": {}, "made": {}, "taken": {}, "created": {}, "please": {},
+		"me": {}, "with": {}, "from": {}, "and": {}, "or": {}, "the": {}, "a": {}, "an": {}, "in": {}, "on": {}, "near": {}, "by": {},
+		"найди": {}, "покажи": {}, "посчитай": {}, "все": {}, "всех": {}, "сделанные": {}, "снятые": {}, "снято": {}, "пожалуйста": {},
+		"мне": {}, "с": {}, "со": {}, "и": {}, "или": {}, "в": {}, "на": {}, "около": {}, "рядом": {}, "где": {},
+		"год": {}, "года": {}, "году": {}, "лето": {}, "летом": {},
 	}
 	fields := strings.FieldsFunc(text, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\n' || r == ',' || r == ';' || r == ':' || r == '(' || r == ')' || r == '[' || r == ']'
@@ -447,12 +449,29 @@ func significantSearchWords(text string) []string {
 		case "photo", "photos", "image", "images", "picture", "pictures", "video", "videos", "audio", "track", "tracks", "фото", "фотографии", "фотография", "снимки", "изображения", "видео", "аудио", "трек", "маршрут":
 			continue
 		}
-		out = append(out, word)
+		out = append(out, canonicalKnowledgeSearchWord(word))
 	}
 	if len(out) > 8 {
 		out = out[:8]
 	}
 	return uniqueStrings(out)
+}
+
+func canonicalKnowledgeSearchWord(word string) string {
+	word = strings.ToLower(strings.TrimSpace(word))
+	switch word {
+	case "trains":
+		return "train"
+	case "railway", "railways", "railroad", "railroads":
+		return "train"
+	}
+	if strings.HasPrefix(word, "поезд") {
+		return "поезд"
+	}
+	if strings.HasPrefix(word, "станци") {
+		return "станци"
+	}
+	return word
 }
 
 func searchPlanPreview(plan searchPlan) string {

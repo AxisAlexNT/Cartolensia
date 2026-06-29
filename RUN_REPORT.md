@@ -4497,6 +4497,65 @@ Safety confirmation:
 - no commit;
 - no push.
 
+## 2026-06-29 Settings/Tasks/Reverse-Geocode Stabilization
+
+Implemented/updated this run:
+
+- Added a durable `reverse_geocode` job and
+  `POST /api/v1/places/reverse-geocode/start`.
+- Registered the new job with the worker manager so it is visible and
+  cancellable from Jobs.
+- Asset Detail place rendering now uses both cached place bboxes and nearby
+  cached centroids, so opening an asset or clicking `Refresh place` finds local
+  hierarchy matches more consistently.
+- Added a `Tasks` navigation page for starting discovery/indexing, hash,
+  metadata enrichment, local reverse geocoding, previews, and scoped AI
+  backfill jobs from one page.
+- Reduced Settings page render pressure by keeping auth/API-token UI work under
+  the Auth tab and avoiding stale `asset_id` query parameters when changing
+  non-asset routes.
+- Hardened Knowledge Graph preview interaction with bounded graph rendering,
+  drag-to-pan, wheel zoom, selected-node details, and clickable asset links.
+
+Validation:
+
+- `gofmt -w internal/server/reverse_geocode.go internal/app/app.go internal/server/server.go internal/server/server_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- Built `/tmp/cartolensia-fix` from the verified source tree.
+- Deployed the verified backend and WebUI bundle to rjazhenka and restarted only
+  the `cartolensia` service.
+- Authenticated remote validation:
+  - `/api/v1/settings` returned successfully;
+  - `/api/v1/jobs?limit=8` showed active background processing;
+  - a 10-coordinate `reverse_geocode` test job was picked up by the worker with
+    `10 / 10` progress and `0` errors;
+  - a full local-cache reverse-geocode pass was queued with `limit=-1`,
+    `batch_size=1000`, `online=false`.
+- Final remote poll: `cartolensia` was `active`; the full cache-only
+  `reverse_geocode` pass was running at `98,026` scanned coordinates with
+  `21,350` cached-place matches and `0` errors, while AI backfills and hashing
+  continued from persisted state.
+
+Known limitations:
+
+- The queued full reverse-geocode pass is cache-only by default. Broad online
+  geocoding remains intentionally opt-in; for large libraries, use imported
+  local geodata or a self-hosted Nominatim/Pelias/Photon endpoint instead of
+  public bulk reverse-geocoding.
+- Knowledge Graph still previews a bounded working set for browser performance;
+  deeper graph paging/filtering is available through the list controls.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
 ## 2026-06-28 Remote Production Stabilization, Usage, LLM Actions, And AI Backfill
 
 Implemented and deployed:
@@ -4566,6 +4625,60 @@ Validation:
 - `npm --prefix webui run build`
 - `bash -n scripts/release/build-local-full-tarzst.sh scripts/release/build-local-full-7z.sh scripts/remote/create-essential-export.sh`
 - Authenticated remote checks for stats, jobs, environment usage, AI status, LLM status, and GPU state.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-29 Local LLM Chat Streaming And Attachments
+
+Implemented this run:
+
+- Fixed the Knowledge Base "Ask" path that appeared to do nothing or showed a browser `NetworkError` by adding an authenticated streaming chat endpoint:
+  - `POST /api/v1/knowledge/chat/stream`;
+  - Server-Sent Events for `status`, `tool`, `token`, `error`, and `final`;
+  - compacted final citations/tool payloads so large transcript/fact rows do not swamp the browser.
+- Added token-level Ollama streaming. The UI now shows progress while local tools run and displays answer text as the local model emits tokens.
+- Added a dedicated `LLM Chat` WebUI page:
+  - menu entry and route `?page=llm-chat`;
+  - chat bubbles, local/deterministic mode toggle, model selector, LLM health badge, tool trace details, clickable asset citations, and suggested guarded action cards;
+  - attachment support with paste and file picker for images and text-like files;
+  - image attachments are passed to Ollama-compatible models when possible.
+- Added a safe fallback for text-only local models: if the selected Ollama model rejects image inputs, Cartolensia retries using text/filename attachment context instead of failing the whole answer.
+- Kept the existing `Knowledge Base` ask box, but switched it to the same streaming API and added visible recent tool events.
+
+Tests run locally:
+
+- `gofmt -w internal/server/knowledge.go internal/server/knowledge_llm_test.go internal/server/server.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go build -o /tmp/cartolensia-chat-fix ./cmd/cartolensia`
+
+Remote deployment/validation:
+
+- Deployed the verified backend binary to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka.
+- Deployed the verified WebUI bundle to `/opt/cartolensia/current/webui/dist`.
+- Restarted only the `cartolensia` service; PostgreSQL, originals/Samba mounts, Ollama, and the AI sidecar were not reset.
+- Authenticated remote `/api/v1/knowledge/llm/status` returned local LLM mode with provider `ollama`, model `qwen3:8b`, endpoint `http://127.0.0.1:11434`, `configured=true`, and `reachable=true`.
+- Authenticated remote `/api/v1/knowledge/chat/stream` returned streamed `status`, `tool`, `token`, and `final` SSE events.
+- Remote AI status after deployment showed:
+  - CUDA sidecar reachable and `status=ok`;
+  - device `cuda`;
+  - pgvector backend active;
+  - ASR, OCR, captions, classifier, face detector, OpenCLIP, and safety models loaded.
+- Remote jobs after restart showed long-running production backfills continuing/resuming from persistent job state. The app logged expired job leases being returned to the queue after the restart.
+
+Known limitations:
+
+- The current configured chat model is `qwen3:8b`, which is text-only. The WebUI/backend now support image attachments and graceful fallback, but a vision-capable local model still needs to be installed/configured before true image-question answering is available.
+- The chat page is a native Vue implementation rather than Gradio. This keeps it authenticated, offline, single-bundle, and consistent with the rest of Cartolensia.
+- The production indexing/AI pipeline is still not complete for the entire NAS-scale library; jobs are continuing in PostgreSQL-backed resumable queues.
 
 Safety confirmation:
 
@@ -5066,6 +5179,169 @@ Known limitations:
 
 - No bulk online reverse-geocoding was started. For production-scale enrichment, use imported local geodata or a self-hosted Nominatim/Pelias/Photon endpoint.
 - Google support is opt-in and terms-dependent; Cartolensia redacts the API key and refuses to cache Google reverse-geocode rows unless the explicit cache-terms acknowledgement environment variable is present.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-29 Local LLM Chat Streaming Follow-Up
+
+Implemented/updated this run:
+
+- Documented the new authenticated Knowledge/LLM streaming endpoint and the
+  dedicated `LLM Chat` page in `docs/OPERATIONS.md`, `docs/ARCHITECTURE.md`,
+  and `docs/SECURITY.md`.
+- Clarified that `POST /api/v1/knowledge/chat/stream` emits Server-Sent Events:
+  `status`, `tool`, `token`, `error`, and `final`.
+- Documented the local-only attachment policy:
+  - text attachments are summarized into the prompt;
+  - image attachments are passed only to local Ollama-compatible vision models;
+  - text-only models such as the current `qwen3:8b` deployment retry with
+    filename/text context instead of failing.
+- Clarified that the production UI stays native Vue instead of Gradio so auth,
+  CSRF, offline assets, mobile layout, and guarded action cards remain inside
+  Cartolensia.
+
+Tests run:
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Remote validation:
+
+- Authenticated `GET /api/v1/knowledge/llm/status` on rjazhenka reported
+  provider `ollama`, model `qwen3:8b`, `configured=true`, and `reachable=true`.
+- Authenticated `POST /api/v1/knowledge/chat/stream` on rjazhenka was verified
+  with the production CSRF flow from `/api/v1/auth/csrf`. It emitted `status`,
+  `tool`, and `token` events from the local Ollama-backed runner.
+- Remote `/api/v1/ai/status` still reports the CUDA sidecar as configured with
+  Tesseract OCR, faster-whisper, BLIP captioning, OpenCLIP, safety, classifier,
+  and YuNet face detection loaded or available.
+- Existing production backfill jobs remain active/resumable; no queue or DB
+  reset was performed.
+
+Known limitations:
+
+- The currently configured local model, `qwen3:8b`, is text-only. The new image
+  attachment path is ready for a local vision model, but a vision-capable model
+  has not been installed in this pass.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-29 Explorer Month Filter And Asset Album UX Fix
+
+Implemented/updated this run:
+
+- Moved Explorer month filtering into the backend Explorer query path so folder
+  rows and file rows are filtered consistently by `YYYY-MM`.
+- Added `month` support to PostgreSQL-backed and in-memory Explorer views.
+- Changed Explorer folder navigation and Apply/Clear filters to reload only the
+  Explorer view instead of refreshing jobs, maps, settings, AI status, and every
+  other dashboard panel.
+- Changed Explorer search-box behavior to use the indexed Explorer query rather
+  than replacing the folder view with separate global Search results.
+- Added normal anchor behavior for Explorer breadcrumbs/folders, so middle-click
+  and modified-click can open folders in a new tab.
+- Added `GET /api/v1/assets/{id}/albums` backed by a direct album membership
+  query.
+- Added Asset Detail storage-folder links for every asset location, preserving
+  storage scope when opening neighboring files in Explorer.
+- Added Asset Detail album membership management:
+  - current album memberships are listed on the asset page;
+  - assets can be removed from albums in place;
+  - assets can be added to an existing album;
+  - `New album...` creates an album and immediately adds the current asset.
+
+Tests run:
+
+- `gofmt -w internal/catalog/catalog.go internal/catalog/catalog_test.go internal/catalog/extended_store.go internal/catalog/extended_store_test.go internal/database/extended.go internal/server/server.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/catalog`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.
+
+## 2026-06-29 Knowledge Base LLM Retrieval Grounding Fix
+
+Implemented/updated this run:
+
+- Fixed the Knowledge Base / Ask Cartolensia retrieval path so concrete
+  "find/list/count" questions are answered from verified read-only tool results
+  instead of allowing the local LLM to replace the answer with generic schema
+  prose.
+- Added a PostgreSQL evidence search over safe `cartolensia_search_*` views for
+  metadata that regular asset filename/path search cannot cover:
+  AI predictions/classes, tags, OCR/document text, transcripts, video frame
+  captions, audio features, track summaries, and knowledge facts.
+- Added total-match reporting from the evidence query so direct answers can say
+  how many indexed media records matched while still returning a bounded first
+  page of clickable results.
+- Hardened local LLM synthesis validation:
+  - schema essays, "potential SQL" explanations, and relationship/capability
+    summaries are rejected;
+  - media retrieval answers must cite a retrieved asset near the beginning;
+  - direct retrieval/count tasks skip free-form synthesis and keep the
+    deterministic result list.
+- Prevented local LLM tool planning from invoking transcode or segmented-video
+  tools unless the user explicitly asks for transcoding/encoding or segment
+  merging.
+
+Tests run:
+
+- `gofmt -w internal/server/knowledge.go internal/server/knowledge_llm_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+
+Remote deployment/validation:
+
+- Built `/tmp/cartolensia-llm-agent` from the verified source tree.
+- Deployed it to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka and
+  restarted only the `cartolensia` service.
+- Remote `https://127.0.0.1:18443/api/v1/health` returned `ok`.
+- Authenticated production Knowledge Base query:
+  `Please, find and count all photos with trains, made in May 2025.`
+  returned HTTP 200 with:
+  - `llm_status=local_llm_retrieval_answer`;
+  - `media_count=12` returned on the first page;
+  - `Found 73 matching media results in the current indexed metadata`;
+  - first matches such as `PXL_20250524_190418459.jpg`,
+    `PXL_20250524_185921826.jpg`, and other May 2025 photos matched by
+    `bullet train` classifier/tag evidence.
+- The final answer no longer contains the prior schema/capability essay.
+- Remote job status after deployment: `9` running, `0` queued, `26` failed,
+  `2625` succeeded. The visible active jobs include `ai_backfill` workers and a
+  `hash` worker, so production background processing is still active.
+
+Known limitations:
+
+- Evidence search remains PostgreSQL-local and bounded by the read-only query
+  timeout; very broad free-text requests may still need more specialized
+  indexed views as the library grows.
+- The configured local model `qwen3:8b` is still text-only. Vision-chat support
+  is wired in the API/UI, but requires a locally installed vision-capable model.
 
 Safety confirmation:
 

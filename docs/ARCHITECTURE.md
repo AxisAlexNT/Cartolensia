@@ -436,6 +436,27 @@ Extraction is idempotent and bounded. Stable deterministic fact/relation IDs let
 
 The Knowledge chat API is tool-first. It always has a deterministic local English/Russian planner and can optionally call a local LLM through Ollama or an OpenAI-compatible/vLLM endpoint. In local LLM mode the model can request only allowlisted tools: bounded media search, knowledge fact search, knowledge relation search, and guarded read-only SQL against `cartolensia_search_*` views. The backend validates and executes every tool call; the model never gets database credentials or write-capable access. Remote LLM APIs are not used by default.
 
+For direct media retrieval requests such as "find", "list", "show", or
+"count" matching files, Cartolensia renders the final answer from verified tool
+results even when local LLM mode is enabled. The model may help plan tools, but
+it cannot replace a concrete search/count answer with free-form prose. This
+keeps result counts, filenames, and action cards grounded in read-only
+PostgreSQL views and avoids schema/capability essays.
+
+Interactive chat uses `POST /api/v1/knowledge/chat/stream`, an authenticated
+Server-Sent Events endpoint layered over the same planner and tool runner. The
+stream separates progress (`status`), tool execution (`tool`), generated local
+model text (`token`), and the compact final response (`final`). The compact
+final payload keeps large fact, transcript, OCR, and relation lists from being
+returned wholesale to the browser.
+
+The chat request can include bounded text and image attachments. Text
+attachments are summarized into the prompt. Image data URLs are forwarded only
+to Ollama-compatible models that support image input; if the configured local
+model rejects images, the server retries with text/filename context instead of
+failing the whole answer. Attachments do not create originals-side sidecars and
+are not persisted as archive files by the current implementation.
+
 Design boundaries:
 
 - extracted facts remain reviewable metadata, not ground truth;

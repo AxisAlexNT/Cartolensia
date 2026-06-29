@@ -1033,9 +1033,45 @@ GET  /api/v1/knowledge/relations?relation=linked_to_track&limit=100
 GET  /api/v1/knowledge/llm/status
 POST /api/v1/knowledge/extract
 POST /api/v1/knowledge/chat
+POST /api/v1/knowledge/chat/stream
 ```
 
 `POST /api/v1/knowledge/chat` stores the conversation and the tool calls it used. Deterministic mode is always available. Local LLM mode can use the same tools plus model-requested read-only SQL, but every request still passes through the same allowlist and timeout. Do not connect this feature to remote LLM APIs by default.
+
+For concrete retrieval/count prompts, for example "find all photos with trains
+in May 2025", the local model can assist planning but the final answer is
+rendered directly from verified read-only results. This is intentional: it
+prevents the model from replacing useful filenames and counts with generic
+schema explanations. Broader summarization questions can still use local model
+synthesis after tools have gathered the evidence.
+
+Use the `LLM Chat` page for interactive work. It uses
+`POST /api/v1/knowledge/chat/stream`, an authenticated Server-Sent Events
+endpoint that emits:
+
+- `status`: planner and model lifecycle messages.
+- `tool`: bounded search, fact, relation, SQL, and action-planning calls.
+- `token`: local model output as it is generated.
+- `final`: compact citations, action cards, tool calls, and saved conversation
+  metadata.
+
+The streaming endpoint prevents long local model calls from looking like a
+browser hang. If a reverse proxy is placed in front of Cartolensia, disable
+response buffering for this path.
+
+The chat composer accepts pasted or attached local files. Text-like attachments
+are summarized into the local prompt. Image attachments are passed to
+Ollama-compatible vision models when the selected local model supports images.
+Text-only models, such as the current `qwen3:8b` deployment, retry with
+attachment filenames and extracted text context instead of failing the request.
+Attachments are handled by the authenticated Cartolensia server and configured
+local LLM endpoint only; no remote LLM API is used by default.
+
+Cartolensia uses a native Vue chat UI instead of Gradio for the production
+interface so authentication, CSRF protection, offline assets, mobile layout, and
+tool action cards stay inside the same application shell. Operators can still
+run separate Gradio experiments beside Cartolensia if they keep them on trusted
+interfaces and do not grant write access to originals.
 
 The read-only SQL workbench also accepts:
 
@@ -1193,3 +1229,17 @@ The agent may use deterministic tools or a local LLM endpoint, but Cartolensia
 keeps policy enforcement server-side. Tool calls are bounded, read-only for
 PostgreSQL search/knowledge views, and write only to Cartolensia metadata,
 cache, or export areas when an explicit action button is pressed.
+
+### Tasks And Reverse Geocoding
+
+The WebUI `Tasks` page is the operator entry point for durable background work:
+discovery/indexing, hashing, metadata enrichment, reverse geocoding, preview
+generation, and scoped AI backfills. Use `limit=-1` for normal unbounded jobs;
+preview/dry-run flows may still cap displayed samples for safety.
+
+Reverse geocoding is local-first. The `reverse_geocode` task scans known asset
+coordinates and matches the durable `place_cache` by bbox plus the configured
+nearby radius. It only calls an online provider when both the runtime setting and
+the task request explicitly enable online geocoding. Do not bulk-call public
+geocoders for large archives; import local geodata or use a self-hosted
+Nominatim/Pelias/Photon-compatible endpoint instead.

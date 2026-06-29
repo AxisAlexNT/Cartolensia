@@ -43,7 +43,9 @@ import {
   type JobStats,
   type IndexingStatus,
   type KnowledgeAction,
+  type KnowledgeAttachment,
   type KnowledgeChatResponse,
+  type KnowledgeChatStreamEvent,
   type KnowledgeExtractionResult,
   type KnowledgeFact,
   type KnowledgeLLMStatus,
@@ -110,8 +112,10 @@ const nav = [
   "Safety Review",
   "Search",
   "Console",
+  "LLM Chat",
   "Knowledge Base",
   "Knowledge Graph",
+  "Tasks",
   "Geo Align",
   "Video Track Player"
 ];
@@ -151,10 +155,14 @@ const navPageAliases: Record<string, string> = {
   "universal-search": "Search",
   console: "Console",
   logs: "Console",
+  "llm-chat": "LLM Chat",
+  chat: "LLM Chat",
+  ask: "LLM Chat",
   "knowledge-base": "Knowledge Base",
   knowledge: "Knowledge Base",
   "knowledge-graph": "Knowledge Graph",
   graph: "Knowledge Graph",
+  tasks: "Tasks",
   "geo-align": "Geo Align",
   "video-track-player": "Video Track Player"
 };
@@ -211,8 +219,10 @@ function navIcon(label: string): string {
     "Safety Review": "bi-shield-exclamation",
     Search: "bi-search-heart",
     Console: "bi-terminal",
+    "LLM Chat": "bi-chat-dots",
     "Knowledge Base": "bi-journal-richtext",
     "Knowledge Graph": "bi-diagram-3",
+    Tasks: "bi-play-list",
     "Geo Align": "bi-crosshair",
     "Video Track Player": "bi-play-btn"
   };
@@ -228,7 +238,7 @@ const explorerPageLimit = 200;
 const explorerBulkPageLimit = 500;
 const explorerLoadingMore = ref(false);
 const explorerLoadingAll = ref(false);
-const explorerPath = ref("");
+const explorerPath = ref(new URLSearchParams(window.location.search).get("path") ?? "");
 const explorerQ = ref("");
 const explorerMediaKind = ref("");
 const explorerHashStatus = ref("");
@@ -262,12 +272,35 @@ const knowledgeFactOffset = ref(0);
 const knowledgeRelationOffset = ref(0);
 const knowledgeLoading = ref(false);
 const knowledgeMessage = ref("");
+const knowledgeGraphSelectedNodeId = ref("");
+const knowledgeGraphZoom = ref(1);
+const knowledgeGraphPanX = ref(0);
+const knowledgeGraphPanY = ref(0);
+const knowledgeGraphDragging = ref(false);
+let knowledgeGraphLastPointer = { x: 0, y: 0 };
 const knowledgeExtraction = ref<KnowledgeExtractionResult | null>(null);
 const knowledgeChatInput = ref("");
 const knowledgeChatConversationID = ref("");
 const knowledgeChat = ref<KnowledgeChatResponse | null>(null);
 const knowledgeChatBusy = ref(false);
+const knowledgeChatEvents = ref<KnowledgeChatStreamEvent[]>([]);
 const knowledgeLLMStatus = ref<KnowledgeLLMStatus | null>(null);
+const knowledgeModelDraft = ref("");
+type LLMChatMessage = {
+  id: number;
+  role: "user" | "assistant" | "status" | "tool" | "error";
+  content: string;
+  created_at: string;
+  attachments?: KnowledgeAttachment[];
+  events?: KnowledgeChatStreamEvent[];
+  response?: KnowledgeChatResponse;
+};
+const llmChatInput = ref("");
+const llmChatMessages = ref<LLMChatMessage[]>([]);
+const llmChatBusy = ref(false);
+const llmChatAttachments = ref<KnowledgeAttachment[]>([]);
+const llmChatFileInput = ref<HTMLInputElement | null>(null);
+let llmChatSeq = 0;
 const uiLogs = ref<Array<{ id: number; level: string; message: string; created_at: string; stack?: string }>>([]);
 const consoleFilter = ref("");
 let uiLogSeq = 0;
@@ -326,6 +359,13 @@ const settingsMessage = ref("");
 const settingsEffectiveLoading = ref(false);
 const rawSettingsText = ref("");
 const readiness = ref<ReadinessPayload | null>(null);
+const tasksMessage = ref("");
+const tasksBusy = ref("");
+const tasksLimit = ref(-1);
+const tasksBatchSize = ref(32);
+const tasksReverseGeocodeOnline = ref(false);
+const tasksStorage = ref("");
+const tasksPrefix = ref("");
 const pendingConfig = ref<Record<string, unknown>>({});
 const components = ref<ComponentRecord[]>([]);
 const componentRoot = ref("");
@@ -560,10 +600,17 @@ const selectedAlbumId = ref("");
 const albumItems = ref<AlbumItemPage | null>(null);
 const newAlbumTitle = ref("");
 const newAlbumDescription = ref("");
+const assetAlbums = ref<Album[]>([]);
+const assetAlbumTargetId = ref("");
+const assetNewAlbumTitle = ref("");
+const assetNewAlbumDescription = ref("");
+const assetAlbumMessage = ref("");
 const selectedAssets = ref<Set<string>>(new Set());
 const explorerViewMode = ref<"table" | "tile">("tile");
 const albumViewMode = ref<"table" | "tile">("tile");
 const monthFilter = ref("");
+const explorerStorageName = ref(new URLSearchParams(window.location.search).get("storage") ?? "");
+const explorerPageLoading = ref(false);
 const previewCacheStats = ref<PreviewCacheStats | null>(null);
 const previewCache = ref<PreviewCacheEntry[]>([]);
 const jobMaxFiles = ref(-1);
@@ -668,14 +715,19 @@ function recordUILog(level: string, message: unknown, stack = "") {
   }, ...uiLogs.value].slice(0, 1000);
 }
 
-function routeHref(label: string): string {
-  const url = new URL(window.location.href);
-  url.searchParams.set("page", pageSlug(safeRoute(label)));
-  if (safeRoute(label) !== "Asset Detail") {
-    url.searchParams.delete("asset_id");
-    url.searchParams.delete("seek_ms");
+function routePath(params: Record<string, string | number | null | undefined>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined || String(value) === "") continue;
+    query.set(key, String(value));
   }
-  return `${url.pathname}${url.search}${url.hash}`;
+  const serialized = query.toString();
+  const hash = window.location.hash || "";
+  return `${window.location.pathname || "/"}${serialized ? `?${serialized}` : ""}${hash}`;
+}
+
+function routeHref(label: string): string {
+  return routePath({ page: pageSlug(safeRoute(label)) });
 }
 
 function openRouteLink(event: MouseEvent, label: string) {
@@ -692,10 +744,10 @@ function setActive(next: string, updateURL = true) {
   if (route === "Transcripts" && transcriptRows.value.length === 0 && !transcriptLoading.value) {
     void fetchTranscriptsPage(true);
   }
-  if ((route === "Knowledge Base" || route === "Knowledge Graph") && knowledgeFacts.value.length === 0 && knowledgeRelations.value.length === 0) {
+  if ((route === "Knowledge Base" || route === "Knowledge Graph" || route === "LLM Chat") && knowledgeFacts.value.length === 0 && knowledgeRelations.value.length === 0) {
     void loadKnowledgeBase();
   }
-  if (route === "Knowledge Base") {
+  if (route === "Knowledge Base" || route === "LLM Chat") {
     void refreshKnowledgeLLMStatus();
   }
   if (route === "Places" && !placesHierarchy.value && !placesHierarchyLoading.value) {
@@ -709,23 +761,54 @@ function setActive(next: string, updateURL = true) {
       settingsMessage.value = err instanceof Error ? err.message : String(err);
     });
   }
+  if (route === "Tasks" && settings.value === null) {
+    void api.settings().then((payload) => {
+      settings.value = payload;
+      initializePendingConfig(payload);
+    }).catch(() => undefined);
+  }
   if (route !== "Asset Detail") {
     localStorage.setItem("cartolensia.route", route);
   }
   if (updateURL && route !== "Asset Detail") {
-    const url = new URL(window.location.href);
-    url.searchParams.set("page", pageSlug(route));
-    url.searchParams.delete("asset_id");
-    url.searchParams.delete("seek_ms");
-    window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    window.history.pushState({}, "", routePath({ page: pageSlug(route) }));
   }
 }
 
 function assetHref(id: string) {
+  return routePath({ page: "asset-detail", asset_id: id });
+}
+
+function explorerFolderHref(path: string, storage = "") {
   const url = new URL(window.location.href);
-  url.searchParams.set("page", "asset-detail");
-  url.searchParams.set("asset_id", id);
+  url.searchParams.set("page", "explorer");
+  if (path) {
+    url.searchParams.set("path", path);
+  } else {
+    url.searchParams.delete("path");
+  }
+  if (storage) {
+    url.searchParams.set("storage", storage);
+  } else {
+    url.searchParams.delete("storage");
+  }
+  url.searchParams.delete("asset_id");
+  url.searchParams.delete("seek_ms");
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function relativeFolderPath(relativePath: string) {
+  const clean = relativePath.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+  const idx = clean.lastIndexOf("/");
+  return idx > 0 ? clean.slice(0, idx) : "";
+}
+
+function openExplorerFolderLink(event: MouseEvent, path: string, storage = "") {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  void openFolder(path, storage);
 }
 
 function firstAssetLocation(asset: Asset) {
@@ -778,11 +861,16 @@ function openAssetLink(event: MouseEvent, id: string, options: { closeOverlay?: 
 }
 
 window.addEventListener("popstate", () => {
+  const params = new URLSearchParams(window.location.search);
   const page = pageFromQuery() ?? safeRoute(localStorage.getItem("cartolensia.route"));
   active.value = page;
-  const assetID = new URLSearchParams(window.location.search).get("asset_id");
+  const assetID = params.get("asset_id");
   if (page === "Asset Detail" && assetID) {
     void (principal.value ? openAsset(assetID) : openPublicAsset(assetID));
+  } else if (page === "Explorer") {
+    explorerPath.value = params.get("path") ?? "";
+    explorerStorageName.value = params.get("storage") ?? "";
+    void reloadExplorerPage();
   } else if (page === "Heatmap") {
     void refreshHeatmap();
   } else if (page === "Places") {
@@ -791,16 +879,12 @@ window.addEventListener("popstate", () => {
 });
 
 const visibleExplorerRows = computed(() => {
-	const files = asArray(explorer.value?.files);
-	const searchRows = searchResults.value.map((result) => assetToExplorerRow(result.asset)).filter((row): row is ExplorerRow => row !== null);
-	const base = explorerQ.value.trim() ? searchRows : files;
-	if (!monthFilter.value) return base;
-	return base.filter((row) => monthKey(row.mtime) === monthFilter.value);
+	return asArray(explorer.value?.files);
 });
 
 const explorerTotalFiles = computed(() => explorer.value?.file_count ?? visibleExplorerRows.value.length);
 const explorerLoadedFiles = computed(() => asArray(explorer.value?.files).length);
-const explorerHasMoreFiles = computed(() => !explorerQ.value.trim() && explorerLoadedFiles.value < explorerTotalFiles.value);
+const explorerHasMoreFiles = computed(() => explorerLoadedFiles.value < explorerTotalFiles.value);
 
 const searchExplanationByAsset = computed(() => {
 	const explanations = new Map<string, string>();
@@ -1211,10 +1295,12 @@ function monthKey(value?: string): string {
 
 function explorerQueryString(extra: Record<string, string | number> = {}): string {
 	const params = new URLSearchParams();
+  if (explorerStorageName.value) params.set("storage", explorerStorageName.value);
   if (explorerQ.value.trim()) params.set("q", explorerQ.value.trim());
   if (explorerMediaKind.value) params.set("media_kind", explorerMediaKind.value);
   if (explorerHashStatus.value) params.set("hash_status", explorerHashStatus.value);
   if (explorerExtension.value.trim()) params.set("extension", explorerExtension.value.trim());
+  if (monthFilter.value) params.set("month", monthFilter.value);
   if (explorerSort.value) params.set("sort", explorerSort.value);
   for (const [key, value] of Object.entries(extra)) {
     params.set(key, String(value));
@@ -1240,6 +1326,40 @@ function assetToExplorerRow(asset: Asset): ExplorerRow | null {
 
 function searchExplanation(row: ExplorerRow): string {
 	return searchExplanationByAsset.value.get(row.asset_id) ?? "";
+}
+
+async function fetchExplorerIntoState() {
+  explorer.value = await api.explorerFolders(explorerPath.value, explorerQueryString({ limit: explorerPageLimit, offset: 0 }));
+  rows.value = asArray(explorer.value.files);
+  searchResults.value = [];
+  searchWarnings.value = [];
+}
+
+async function reloadExplorerPage() {
+  explorerPageLoading.value = true;
+  error.value = "";
+  try {
+    await fetchExplorerIntoState();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    explorerPageLoading.value = false;
+  }
+}
+
+function applyExplorerFilters() {
+  void reloadExplorerPage();
+}
+
+function clearExplorerFilters() {
+  explorerQ.value = "";
+  explorerMediaKind.value = "";
+  explorerHashStatus.value = "";
+  explorerExtension.value = "";
+  explorerSort.value = "name";
+  monthFilter.value = "";
+  explorerStorageName.value = "";
+  void reloadExplorerPage();
 }
 
 function rowToGallery(row: ExplorerRow): GalleryItem {
@@ -2463,6 +2583,11 @@ const ffprobeAvailable = computed(() => Boolean((transcodingCapabilities.value?.
 const environmentDatabase = computed(() => (environmentUsage.value?.database && typeof environmentUsage.value.database === "object" ? environmentUsage.value.database as { database_name?: string; size_bytes?: number; relations?: Array<{ name: string; size_bytes: number; rows: number }> } : null));
 const environmentDirectoryTotalBytes = computed(() => environmentUsage.value?.directories.reduce((sum, item) => sum + Number(item.bytes ?? 0), 0) ?? 0);
 const knowledgeMode = computed(() => runtimeTextSetting("knowledge.runner_mode", "deterministic"));
+const knowledgeLLMModels = computed(() => {
+  const models = asArray(knowledgeLLMStatus.value?.models).filter(Boolean);
+  const current = knowledgeLLMStatus.value?.model || runtimeTextSetting("knowledge.llm_model", "");
+  return Array.from(new Set([current, ...models].filter(Boolean)));
+});
 const searchPlannerMode = computed(() => runtimeTextSetting("search.runner_mode", "deterministic"));
 
 type KnowledgeGraphNode = {
@@ -2537,6 +2662,58 @@ const knowledgeGraphPreview = computed(() => {
   }
   return { width, height, nodes: nodeList, edges };
 });
+
+const selectedKnowledgeGraphNode = computed(() =>
+  knowledgeGraphPreview.value.nodes.find((node) => node.id === knowledgeGraphSelectedNodeId.value) ?? null
+);
+
+function knowledgeGraphTransform(): string {
+  return `translate(${knowledgeGraphPanX.value} ${knowledgeGraphPanY.value}) scale(${knowledgeGraphZoom.value})`;
+}
+
+function displayKnowledgeGraphLabel(node: KnowledgeGraphNode): boolean {
+  return knowledgeGraphPreview.value.nodes.length <= 24 || node.id === knowledgeGraphSelectedNodeId.value;
+}
+
+function selectKnowledgeGraphNode(node: KnowledgeGraphNode) {
+  knowledgeGraphSelectedNodeId.value = node.id;
+}
+
+function resetKnowledgeGraphView() {
+  knowledgeGraphZoom.value = 1;
+  knowledgeGraphPanX.value = 0;
+  knowledgeGraphPanY.value = 0;
+}
+
+function zoomKnowledgeGraph(delta: number) {
+  const next = Math.max(0.35, Math.min(4, knowledgeGraphZoom.value + delta));
+  knowledgeGraphZoom.value = Number(next.toFixed(2));
+}
+
+function wheelKnowledgeGraph(event: WheelEvent) {
+  zoomKnowledgeGraph(event.deltaY < 0 ? 0.12 : -0.12);
+}
+
+function startKnowledgeGraphPan(event: PointerEvent) {
+  if (event.button !== 0) return;
+  knowledgeGraphDragging.value = true;
+  knowledgeGraphLastPointer = { x: event.clientX, y: event.clientY };
+  (event.currentTarget as SVGElement).setPointerCapture?.(event.pointerId);
+}
+
+function moveKnowledgeGraphPan(event: PointerEvent) {
+  if (!knowledgeGraphDragging.value) return;
+  const dx = event.clientX - knowledgeGraphLastPointer.x;
+  const dy = event.clientY - knowledgeGraphLastPointer.y;
+  knowledgeGraphLastPointer = { x: event.clientX, y: event.clientY };
+  knowledgeGraphPanX.value += dx;
+  knowledgeGraphPanY.value += dy;
+}
+
+function endKnowledgeGraphPan(event: PointerEvent) {
+  knowledgeGraphDragging.value = false;
+  (event.currentTarget as SVGElement).releasePointerCapture?.(event.pointerId);
+}
 
 const groupedTranscodeHardware = computed(() => {
 	const hardware = transcodingCapabilities.value?.hardware ?? {};
@@ -2963,16 +3140,7 @@ async function refresh() {
 	      api.readiness(),
       api.dbExports()
 		]);
-		explorer.value = await api.explorerFolders(explorerPath.value, explorerQueryString({ limit: explorerPageLimit, offset: 0 }));
-		rows.value = asArray(explorer.value.files);
-		if (explorerQ.value.trim()) {
-			const search = await api.search(explorerQ.value.trim(), 100);
-			searchResults.value = asArray(search.results);
-			searchWarnings.value = asArray(search.warnings);
-		} else {
-			searchResults.value = [];
-			searchWarnings.value = [];
-		}
+		await fetchExplorerIntoState();
 		jobs.value = asArray(jobRows);
     jobStats.value = jobStatData;
     storages.value = asArray(storageRows);
@@ -3044,7 +3212,7 @@ async function refresh() {
     initializePendingConfig(settingsPayload);
     dbExports.value = asArray(exportRows);
     await loadVideoTrackVideoOptions();
-    if (principal.value && backendStatus.auth?.mode === "local") {
+    if (settingsTab.value === "auth" && principal.value && backendStatus.auth?.mode === "local") {
       apiTokens.value = await api.tokens().catch(() => []);
     }
   } catch (err) {
@@ -3169,6 +3337,11 @@ async function refreshSettingsTabData(tab = settingsTab.value) {
         rawSettingsText.value = JSON.stringify({ effective: settings.value.effective, pending: pendingConfig.value }, null, 2);
       }
       break;
+    case "auth":
+      if (principal.value && backend.value?.auth?.mode === "local") {
+        apiTokens.value = await api.tokens().catch(() => []);
+      }
+      break;
   }
 }
 
@@ -3187,7 +3360,7 @@ async function refreshSettingsPage() {
   }
   initializePendingConfig(settingsPayload);
   await refreshSettingsTabData(settingsTab.value);
-  if (principal.value && backendStatus.auth?.mode === "local") {
+  if (settingsTab.value === "auth" && principal.value && backendStatus.auth?.mode === "local") {
     apiTokens.value = await api.tokens().catch(() => []);
   }
 }
@@ -3501,6 +3674,82 @@ async function enqueueAIBackfill() {
 	}
 }
 
+async function queueTaskAction(action: string, tasks: string[] = []) {
+  tasksBusy.value = action;
+  tasksMessage.value = "";
+  try {
+    const limit = Number.isFinite(tasksLimit.value) ? Math.trunc(tasksLimit.value) : -1;
+    const batchSize = Math.max(1, Math.trunc(tasksBatchSize.value || 32));
+    let jobLike: Record<string, unknown> | null = null;
+    switch (action) {
+      case "index": {
+        const storage = tasksStorage.value || pipelineStorage();
+        const prefix = tasksPrefix.value.trim();
+        if (!storage) throw new Error("Choose a storage before starting indexing.");
+        const prefixes = prefix ? [prefix] : adapterRelativePrefixes();
+        const validation = validateAdapterRelativePrefixes(prefixes);
+        if (validation) throw new Error(validation);
+        const start = await api.startIndexing({
+          storage,
+          prefixes,
+          max_files: limit,
+          max_bytes: -1,
+          include_extensions: dryRunExtensions.value.split(",").map((item) => item.trim()).filter(Boolean),
+          index_files: true,
+          hash: hashAfterIndex.value,
+          metadata: metadataAfterIndex.value,
+          previews: false,
+          parse_tracks: true,
+          geotag_exif: true,
+          snap_to_tracks: true,
+          refresh_map: true
+        });
+        jobLike = start;
+        tasksMessage.value = `Queued indexing pipeline ${start.pipeline_id} with ${start.queued_jobs.length} stage job(s).`;
+        break;
+      }
+      case "hash":
+        jobLike = await api.startHash({ scope: "unhashed", max_files: limit });
+        tasksMessage.value = `Queued hash job ${(jobLike as Job).id ?? ""}.`;
+        break;
+      case "metadata":
+        jobLike = await api.startMetadataScoped({ max_files: limit, only_missing: false });
+        tasksMessage.value = `Queued metadata enrichment ${(jobLike as Job).id ?? ""}.`;
+        break;
+      case "previews":
+        jobLike = await api.startPreviews(limit);
+        tasksMessage.value = `Queued preview generation ${(jobLike as Job).id ?? ""}.`;
+        break;
+      case "reverse_geocode":
+        jobLike = await api.startReverseGeocode({
+          limit,
+          batch_size: batchSize,
+          online: tasksReverseGeocodeOnline.value,
+          only_missing: true
+        });
+        tasksMessage.value = `Queued reverse geocoding ${(jobLike as Job).id ?? ""}.`;
+        break;
+      case "ai":
+        jobLike = await api.aiBackfill({
+          tasks,
+          limit_per_task: limit,
+          batch_size: batchSize,
+          production_backfill: true
+        });
+        tasksMessage.value = `Queued ${(Array.isArray(jobLike.jobs) ? jobLike.jobs.length : jobLike.task_count) ?? 0} AI backfill job(s).`;
+        break;
+      default:
+        throw new Error(`Unknown task action ${action}`);
+    }
+    await refresh();
+    setActive("Jobs");
+  } catch (err) {
+    tasksMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    tasksBusy.value = "";
+  }
+}
+
 function requestAIModelAction(action: string) {
   if (["classify", "faces", "describe", "safety", "embed", "ocr"].includes(action)) {
     void requestAIJob(action as AIJobKind);
@@ -3725,6 +3974,28 @@ async function extractKnowledgeBatch() {
   }
 }
 
+function formatKnowledgeStreamEvent(event: KnowledgeChatStreamEvent): string {
+  if (event.event === "status" && event.message) return event.message;
+  if (event.event === "token") return event.text ?? "";
+  if (event.event === "tool") {
+    const returned = event.returned !== undefined ? ` · ${event.returned} returned` : "";
+    const total = event.total !== undefined ? ` / ${event.total} total` : "";
+    return `${event.tool ?? "tool"} ${event.status ?? "updated"}${returned}${total}`;
+  }
+  if (event.event === "planner" && event.tokens) return `Planner produced: ${event.tokens.join(" ")}`;
+  if (event.event === "error") return event.error || "Knowledge chat failed.";
+  if (event.event === "final") return "Answer ready.";
+  return event.message || event.status || event.event;
+}
+
+function pushKnowledgeEvent(event: KnowledgeChatStreamEvent) {
+  knowledgeChatEvents.value = [...knowledgeChatEvents.value, event].slice(-80);
+  const text = formatKnowledgeStreamEvent(event);
+  if (text && event.event !== "final" && event.event !== "token") {
+    knowledgeMessage.value = text;
+  }
+}
+
 async function askKnowledgeBase() {
   const message = knowledgeChatInput.value.trim();
   if (!message) {
@@ -3732,15 +4003,148 @@ async function askKnowledgeBase() {
     return;
   }
   knowledgeChatBusy.value = true;
+  knowledgeChatEvents.value = [];
+  knowledgeMessage.value = "Planning with local tools...";
   try {
     await refreshKnowledgeLLMStatus();
-    knowledgeChat.value = await api.knowledgeChat(message, knowledgeChatConversationID.value, 25);
+    knowledgeChat.value = await api.knowledgeChatStream(message, knowledgeChatConversationID.value, 25, [], pushKnowledgeEvent);
     knowledgeChatConversationID.value = knowledgeChat.value.conversation_id ?? knowledgeChatConversationID.value;
     knowledgeMessage.value = `Knowledge chat used ${knowledgeChat.value.tool_calls.length} local tool calls · ${knowledgeChat.value.media.length} media citations.`;
   } catch (err) {
     knowledgeMessage.value = err instanceof Error ? err.message : String(err);
   } finally {
     knowledgeChatBusy.value = false;
+  }
+}
+
+function fileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error(`Unable to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function fileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error(`Unable to read ${file.name}`));
+    reader.readAsText(file);
+  });
+}
+
+function isTextAttachment(file: File): boolean {
+  return file.type.startsWith("text/") || /\.(txt|md|markdown|csv|json|yaml|yml|xml|srt|vtt|log)$/i.test(file.name);
+}
+
+async function addLLMChatFiles(files: FileList | File[]) {
+  const next = [...llmChatAttachments.value];
+  for (const file of Array.from(files).slice(0, 8)) {
+    if (file.type.startsWith("image/")) {
+      if (file.size > 5 * 1024 * 1024) {
+        next.push({ name: file.name, mime: file.type || "application/octet-stream", size_bytes: file.size, text: "Image skipped: attachment is larger than 5 MB." });
+      } else {
+        next.push({ name: file.name, mime: file.type || "image/*", size_bytes: file.size, data_url: await fileAsDataURL(file) });
+      }
+      continue;
+    }
+    if (isTextAttachment(file)) {
+      const text = file.size <= 1024 * 1024 ? await fileAsText(file) : "Text skipped: attachment is larger than 1 MB.";
+      next.push({ name: file.name, mime: file.type || "text/plain", size_bytes: file.size, text });
+      continue;
+    }
+    next.push({
+      name: file.name,
+      mime: file.type || "application/octet-stream",
+      size_bytes: file.size,
+      text: "Binary attachment metadata was provided to the local tools; file content was not uploaded."
+    });
+  }
+  llmChatAttachments.value = next.slice(-8);
+}
+
+function removeLLMChatAttachment(index: number) {
+  llmChatAttachments.value = llmChatAttachments.value.filter((_, idx) => idx !== index);
+}
+
+function triggerLLMChatFilePicker() {
+  llmChatFileInput.value?.click();
+}
+
+async function handleLLMChatFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.files?.length) {
+    await addLLMChatFiles(input.files);
+  }
+  input.value = "";
+}
+
+async function handleLLMChatPaste(event: ClipboardEvent) {
+  const files = event.clipboardData?.files;
+  if (files?.length) {
+    event.preventDefault();
+    await addLLMChatFiles(files);
+  }
+}
+
+async function applyKnowledgeModel() {
+  const model = knowledgeModelDraft.value.trim();
+  if (!model) return;
+  await applyRuntimeSetting("knowledge.llm_model", model);
+  await refreshKnowledgeLLMStatus();
+}
+
+async function sendLLMChat() {
+  const message = llmChatInput.value.trim();
+  if (!message && llmChatAttachments.value.length === 0) return;
+  const attachments = [...llmChatAttachments.value];
+  llmChatMessages.value.push({
+    id: ++llmChatSeq,
+    role: "user",
+    content: message || "Attached files",
+    attachments,
+    created_at: new Date().toISOString()
+  });
+  llmChatInput.value = "";
+  llmChatAttachments.value = [];
+  llmChatBusy.value = true;
+  const assistantMessage: LLMChatMessage = {
+    id: ++llmChatSeq,
+    role: "assistant",
+    content: "Planning local read-only tool calls...",
+    events: [],
+    created_at: new Date().toISOString()
+  };
+  llmChatMessages.value.push(assistantMessage);
+  try {
+    await refreshKnowledgeLLMStatus();
+    let answerStarted = false;
+    const response = await api.knowledgeChatStream(message, knowledgeChatConversationID.value, 25, attachments, (event) => {
+      assistantMessage.events = [...asArray(assistantMessage.events), event].slice(-120);
+      if (event.event === "token" && event.text) {
+        if (!answerStarted) {
+          answerStarted = true;
+          assistantMessage.content = "";
+        }
+        assistantMessage.content = `${assistantMessage.content}${event.text}`;
+      } else if (event.event !== "final") {
+        assistantMessage.content = formatKnowledgeStreamEvent(event);
+      }
+      llmChatMessages.value = [...llmChatMessages.value];
+    });
+    assistantMessage.content = response.answer;
+    assistantMessage.response = response;
+    knowledgeChat.value = response;
+    knowledgeChatConversationID.value = response.conversation_id ?? knowledgeChatConversationID.value;
+    llmChatMessages.value = [...llmChatMessages.value];
+  } catch (err) {
+    assistantMessage.role = "error";
+    assistantMessage.content = err instanceof Error ? err.message : String(err);
+    llmChatMessages.value = [...llmChatMessages.value];
+  } finally {
+    llmChatBusy.value = false;
   }
 }
 
@@ -3768,6 +4172,7 @@ async function runKnowledgeAction(action: KnowledgeAction) {
 async function refreshKnowledgeLLMStatus() {
   try {
     knowledgeLLMStatus.value = await api.knowledgeLLMStatus();
+    knowledgeModelDraft.value = knowledgeLLMStatus.value.model || knowledgeModelDraft.value || runtimeTextSetting("knowledge.llm_model", "");
   } catch (err) {
     knowledgeLLMStatus.value = {
       mode: knowledgeMode.value,
@@ -3779,6 +4184,7 @@ async function refreshKnowledgeLLMStatus() {
       error: err instanceof Error ? err.message : String(err),
       note: "Unable to load local LLM status."
     };
+    knowledgeModelDraft.value = knowledgeLLMStatus.value.model;
   }
 }
 
@@ -4161,10 +4567,48 @@ async function addSelectedToAlbum() {
   await selectAlbum(selectedAlbumId.value);
 }
 
+async function loadCurrentAssetAlbums() {
+  if (!assetDetail.value) return;
+  assetAlbums.value = await api.assetAlbums(assetDetail.value.asset.id);
+}
+
 async function addCurrentAssetToAlbum() {
-  if (!assetDetail.value || !selectedAlbumId.value) return;
-  albumItems.value = await api.addAlbumItems(selectedAlbumId.value, [assetDetail.value.asset.id]);
-  await refresh();
+  if (!assetDetail.value) return;
+  assetAlbumMessage.value = "";
+  let albumID = assetAlbumTargetId.value;
+  try {
+    if (albumID === "__new__") {
+      const title = assetNewAlbumTitle.value.trim();
+      if (!title) {
+        assetAlbumMessage.value = "Enter a new album title first.";
+        return;
+      }
+      const album = await api.createAlbum(title, assetNewAlbumDescription.value.trim());
+      albums.value = [...albums.value, album].sort((a, b) => a.title.localeCompare(b.title));
+      albumID = album.id;
+      assetAlbumTargetId.value = album.id;
+      assetNewAlbumTitle.value = "";
+      assetNewAlbumDescription.value = "";
+    }
+    if (!albumID) return;
+    await api.addAlbumItems(albumID, [assetDetail.value.asset.id]);
+    await loadCurrentAssetAlbums();
+    assetAlbumMessage.value = "Album membership updated.";
+  } catch (err) {
+    assetAlbumMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function removeCurrentAssetFromAlbum(albumID: string) {
+  if (!assetDetail.value) return;
+  assetAlbumMessage.value = "";
+  try {
+    await api.removeAlbumItem(albumID, assetDetail.value.asset.id);
+    await loadCurrentAssetAlbums();
+    assetAlbumMessage.value = "Removed from album.";
+  } catch (err) {
+    assetAlbumMessage.value = err instanceof Error ? err.message : String(err);
+  }
 }
 
 async function removeAlbumItem(assetId: string) {
@@ -4875,11 +5319,26 @@ async function createDBExport() {
   }
 }
 
-async function openFolder(path: string) {
+async function openFolder(path: string, storage = explorerStorageName.value) {
   explorerPath.value = path;
-  monthFilter.value = "";
-  setActive("Explorer");
-  await refresh();
+  explorerStorageName.value = storage;
+  setActive("Explorer", false);
+  const url = new URL(window.location.href);
+  url.searchParams.set("page", "explorer");
+  if (path) {
+    url.searchParams.set("path", path);
+  } else {
+    url.searchParams.delete("path");
+  }
+  if (storage) {
+    url.searchParams.set("storage", storage);
+  } else {
+    url.searchParams.delete("storage");
+  }
+  url.searchParams.delete("asset_id");
+  url.searchParams.delete("seek_ms");
+  window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  await reloadExplorerPage();
 }
 
 async function loadMoreExplorerFiles() {
@@ -4900,7 +5359,7 @@ async function loadAllExplorerFiles() {
   explorerLoadingAll.value = true;
   error.value = "";
   try {
-    while (explorerHasMoreFiles.value && !explorerQ.value.trim()) {
+    while (explorerHasMoreFiles.value) {
       const before = explorerLoadedFiles.value;
       await appendExplorerFiles(explorerBulkPageLimit);
       if (explorerLoadedFiles.value <= before) break;
@@ -4949,6 +5408,9 @@ async function openAsset(id: string, options: { seekMs?: number | null } = {}) {
     const detail = await api.asset(id);
     assetDetail.value = detail;
     assetRelated.value = null;
+    assetAlbums.value = [];
+    assetAlbumTargetId.value = "";
+    assetAlbumMessage.value = "";
     assetAIActionStatus.value = {};
     streamOptions.value = null;
     setActive("Asset Detail", false);
@@ -4967,13 +5429,16 @@ async function openAsset(id: string, options: { seekMs?: number | null } = {}) {
 }
 
 async function hydrateAssetDetailExtras(id: string, mediaKind: string) {
-  const [related, streams] = await Promise.all([
+  const [related, streams, memberships] = await Promise.all([
     api.assetRelated(id).catch(() => null),
-    mediaKind === "video" ? api.streamOptions(id).catch(() => null) : Promise.resolve(null)
+    mediaKind === "video" ? api.streamOptions(id).catch(() => null) : Promise.resolve(null),
+    api.assetAlbums(id).catch((): Album[] => [])
   ]);
   if (assetDetail.value?.asset.id !== id) return;
   assetRelated.value = related;
   streamOptions.value = streams;
+  assetAlbums.value = memberships;
+  assetAlbumMessage.value = "";
 }
 
 async function openPublicAsset(id: string, options: { seekMs?: number | null } = {}) {
@@ -4983,6 +5448,9 @@ async function openPublicAsset(id: string, options: { seekMs?: number | null } =
     assetDetailSeekMs.value = options.seekMs ?? null;
     assetDetail.value = await api.publicAsset(id);
     assetRelated.value = null;
+    assetAlbums.value = [];
+    assetAlbumTargetId.value = "";
+    assetAlbumMessage.value = "";
     assetAIActionStatus.value = {};
     streamOptions.value = null;
     setActive("Asset Detail", false);
@@ -5957,7 +6425,7 @@ onMounted(async () => {
     }
   } else if (active.value === "Transcripts") {
     await fetchTranscriptsPage(true);
-  } else if (active.value === "Knowledge Base" || active.value === "Knowledge Graph") {
+  } else if (active.value === "Knowledge Base" || active.value === "Knowledge Graph" || active.value === "LLM Chat") {
     await loadKnowledgeBase();
   } else if (active.value === "Heatmap") {
     await refreshHeatmap();
@@ -6070,11 +6538,16 @@ onBeforeUnmount(() => {
             </div>
           </header>
           <div class="breadcrumbs">
-            <button v-for="crumb in breadcrumbs" :key="crumb.path" type="button" @click="openFolder(crumb.path)">
+            <a
+              v-for="crumb in breadcrumbs"
+              :key="crumb.path"
+              :href="explorerFolderHref(crumb.path, explorerStorageName)"
+              @click="openExplorerFolderLink($event, crumb.path, explorerStorageName)"
+            >
               {{ crumb.name }}
-            </button>
+            </a>
           </div>
-          <form class="control-grid" @submit.prevent="refresh">
+          <form class="control-grid" @submit.prevent="applyExplorerFilters">
             <label>
               Search
               <input v-model="explorerQ" type="search" placeholder="name or path" />
@@ -6112,12 +6585,19 @@ onBeforeUnmount(() => {
               </select>
             </label>
             <button type="submit">Apply filters</button>
-	            <button type="button" @click="explorerQ = ''; explorerMediaKind = ''; explorerHashStatus = ''; explorerExtension = ''; explorerSort = 'name'; refresh()">
+	            <button type="button" @click="clearExplorerFilters">
 	              Clear filters
 	            </button>
 	          </form>
+          <p v-if="explorerPageLoading" class="muted inline-status">
+            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            Loading indexed folder view...
+          </p>
+          <p v-if="explorerStorageName" class="muted">
+            Showing indexed paths from storage <code>{{ explorerStorageName }}</code>. If the original storage is offline, metadata remains browsable from PostgreSQL.
+          </p>
 	          <div v-if="explorerQ.trim()" class="search-summary">
-	            <strong>Universal search:</strong>
+	            <strong>Explorer filter:</strong>
 	            <span>{{ visibleExplorerRows.length }} results for "{{ explorerQ.trim() }}"</span>
 	            <span v-for="warning in searchWarnings" :key="warning" class="status-badge warn">{{ warning }}</span>
 	          </div>
@@ -6138,9 +6618,9 @@ onBeforeUnmount(() => {
               <tr v-for="folder in explorer?.folders ?? []" :key="folder.path" class="folder-row">
                 <td></td>
                 <td>
-                  <button type="button" class="link-button" @click="openFolder(folder.path)">
+                  <a class="link-button" :href="explorerFolderHref(folder.path, explorerStorageName)" @click="openExplorerFolderLink($event, folder.path, explorerStorageName)">
                     {{ folder.name }}
-                  </button>
+                  </a>
                 </td>
                 <td>folder</td>
                 <td>{{ formatBytes(folder.total_bytes) }}</td>
@@ -6174,10 +6654,10 @@ onBeforeUnmount(() => {
 	              :key="folder.path"
 	              class="asset-tile folder-tile"
 	            >
-	              <button type="button" class="tile-media folder-media" @click="openFolder(folder.path)">
+	              <a class="tile-media folder-media" :href="explorerFolderHref(folder.path, explorerStorageName)" @click="openExplorerFolderLink($event, folder.path, explorerStorageName)">
 	                <i class="bi bi-folder2-open" aria-hidden="true"></i>
-	              </button>
-	              <button type="button" class="tile-title link-button" @click="openFolder(folder.path)">{{ folder.name }}</button>
+	              </a>
+	              <a class="tile-title link-button" :href="explorerFolderHref(folder.path, explorerStorageName)" @click="openExplorerFolderLink($event, folder.path, explorerStorageName)">{{ folder.name }}</a>
 	              <small>{{ folder.file_count }} files · {{ formatBytes(folder.total_bytes) }}</small>
 	              <small>{{ folder.path }}</small>
 	            </article>
@@ -6503,11 +6983,12 @@ onBeforeUnmount(() => {
           <header class="panel-head">
             <h2>{{ assetDetail?.asset.display_name ?? "Asset" }}</h2>
             <div class="actions">
-              <select v-if="albums.length > 0" v-model="selectedAlbumId" aria-label="Target album">
+              <select v-if="assetDetail" v-model="assetAlbumTargetId" aria-label="Target album">
                 <option value="">Choose album...</option>
+                <option value="__new__">New album...</option>
                 <option v-for="album in albums" :key="album.id" :value="album.id">{{ album.title }}</option>
               </select>
-              <button v-if="assetDetail && selectedAlbumId" type="button" @click="addCurrentAssetToAlbum">Add to album</button>
+              <button v-if="assetDetail && assetAlbumTargetId" type="button" @click="addCurrentAssetToAlbum">Add to album</button>
               <button
                 v-if="assetDetail"
                 type="button"
@@ -6518,6 +6999,11 @@ onBeforeUnmount(() => {
               <button type="button" @click="setActive('Explorer')">Back</button>
             </div>
           </header>
+          <div v-if="assetDetail && assetAlbumTargetId === '__new__'" class="inline-editor">
+            <input v-model="assetNewAlbumTitle" type="text" placeholder="New album title" />
+            <input v-model="assetNewAlbumDescription" type="text" placeholder="Description (optional)" />
+          </div>
+          <p v-if="assetAlbumMessage" class="status-line">{{ assetAlbumMessage }}</p>
           <div v-if="assetDetail" class="media-panel">
             <div v-if="assetDetail.asset.media_kind === 'photo'" class="asset-photo-workbench">
               <div class="face-toolbar">
@@ -6757,6 +7243,45 @@ onBeforeUnmount(() => {
               <span v-else>{{ assetDetail.visibility?.public || assetDetail.asset.metadata?.public ? "public" : "private" }}</span>
             </article>
           </div>
+          <section v-if="assetDetail" class="settings-form settings-wide">
+            <div class="section-title">
+              <div>
+                <h3><i class="bi bi-folder-symlink" aria-hidden="true"></i> Storage folders</h3>
+                <p class="muted">Open the indexed folder to inspect neighboring files. Originals remain read-only.</p>
+              </div>
+            </div>
+            <div class="relation-list">
+              <article v-for="location in assetDetail.locations" :key="location.id" class="relation-card compact-relation-card">
+                <strong>{{ location.storage_name }}</strong>
+                <span>{{ relativeFolderPath(location.relative_path) || "storage root" }}</span>
+                <code>{{ location.relative_path }}</code>
+                <a
+                  class="btn btn-sm btn-outline-primary"
+                  :href="explorerFolderHref(relativeFolderPath(location.relative_path), location.storage_name)"
+                  @click="openExplorerFolderLink($event, relativeFolderPath(location.relative_path), location.storage_name)"
+                >
+                  Open containing folder
+                </a>
+              </article>
+            </div>
+          </section>
+          <section v-if="assetDetail" class="settings-form settings-wide">
+            <div class="section-title">
+              <div>
+                <h3><i class="bi bi-collection" aria-hidden="true"></i> Albums</h3>
+                <p class="muted">Manage album membership for this asset without leaving the detail page.</p>
+              </div>
+            </div>
+            <div v-if="assetAlbums.length > 0" class="pill-row">
+              <span v-for="album in assetAlbums" :key="album.id" class="tag-pill album-pill">
+                <button type="button" class="link-button" @click="selectAlbum(album.id); setActive('Albums')">{{ album.title }}</button>
+                <button type="button" class="icon-button mini-icon-button" :aria-label="`Remove from ${album.title}`" @click="removeCurrentAssetFromAlbum(album.id)">
+                  <i class="bi bi-x-lg" aria-hidden="true"></i>
+                </button>
+              </span>
+            </div>
+            <p v-else class="empty-state compact-empty">This asset is not in any album yet.</p>
+          </section>
           <section v-if="assetDetail && assetRelated" class="settings-form settings-wide related-context-panel">
             <div class="section-title">
               <div>
@@ -8747,6 +9272,161 @@ onBeforeUnmount(() => {
           </section>
         </section>
 
+        <section v-else-if="active === 'LLM Chat'" class="panel llm-chat-page">
+          <header class="panel-head">
+            <div>
+              <h2>LLM Chat</h2>
+              <span>Ask Cartolensia with local read-only tools over metadata, OCR, transcripts, captions, tracks, places, and DB views.</span>
+            </div>
+            <button type="button" class="btn btn-outline-secondary" @click="refreshKnowledgeLLMStatus">Check LLM</button>
+          </header>
+          <section class="settings-form chat-settings">
+            <div class="segmented-control compact-segmented" role="group" aria-label="Knowledge runner mode">
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="knowledgeMode === 'deterministic' ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="applyRuntimeSetting('knowledge.runner_mode', 'deterministic')"
+              >
+                Deterministic
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="knowledgeMode === 'local_llm' ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="applyRuntimeSetting('knowledge.runner_mode', 'local_llm')"
+              >
+                Local LLM
+              </button>
+              <span class="muted">Mode: {{ knowledgeMode }}</span>
+            </div>
+            <div class="inline-form-row llm-model-row">
+              <span
+                v-if="knowledgeLLMStatus"
+                :class="['status-badge', knowledgeLLMStatus.configured && knowledgeLLMStatus.reachable ? 'good' : knowledgeLLMStatus.configured ? 'warn' : '']"
+              >
+                {{ knowledgeLLMStatus.provider }} · {{ knowledgeLLMStatus.configured && knowledgeLLMStatus.reachable ? 'ready' : knowledgeLLMStatus.configured ? 'not reachable' : 'not configured' }}
+              </span>
+              <select v-model="knowledgeModelDraft" aria-label="Local LLM model">
+                <option v-for="model in knowledgeLLMModels" :key="model" :value="model">{{ model }}</option>
+                <option v-if="knowledgeLLMModels.length === 0" value="">No discovered model</option>
+              </select>
+              <button type="button" class="btn btn-outline-secondary" :disabled="!knowledgeModelDraft.trim()" @click="applyKnowledgeModel">Use model</button>
+              <span class="muted">{{ knowledgeLLMStatus?.endpoint || 'No endpoint configured' }}</span>
+              <span v-if="knowledgeLLMStatus?.error" class="status-badge warn">{{ knowledgeLLMStatus.error }}</span>
+            </div>
+          </section>
+          <section class="chat-shell">
+            <div class="chat-transcript" aria-live="polite">
+              <article v-if="llmChatMessages.length === 0" class="chat-empty">
+                <strong>Ask for files, places, timelines, captions, OCR text, transcripts, or related assets.</strong>
+                <span>Examples: “find photos near train stations in May 2025”, “что снято рядом с поездом?”, “show videos that should be transcoded”.</span>
+              </article>
+              <article v-for="message in llmChatMessages" :key="message.id" :class="['chat-message', message.role]">
+                <div class="chat-avatar">{{ message.role === 'user' ? 'You' : message.role === 'error' ? 'Error' : message.role === 'tool' ? 'Tool' : 'AI' }}</div>
+                <div class="chat-bubble">
+                  <pre>{{ message.content }}</pre>
+                  <div v-if="message.attachments?.length" class="chat-attachments">
+                    <span v-for="attachment in message.attachments" :key="`${message.id}-${attachment.name}`" class="status-badge">
+                      {{ attachment.name }} · {{ formatBytes(attachment.size_bytes) }}
+                    </span>
+                  </div>
+                  <div v-if="message.response?.media.length || message.response?.facts.length || message.response?.relations.length" class="knowledge-citation-list">
+                    <a
+                      v-for="result in message.response.media.slice(0, 16)"
+                      :key="`chat-page-media-${message.id}-${result.asset.id}`"
+                      class="knowledge-citation"
+                      :href="assetHref(result.asset.id)"
+                      @click="openAssetLink($event, result.asset.id)"
+                    >
+                      {{ result.asset.display_name }}
+                      <small>{{ result.asset.media_kind }} · {{ result.explanation }}</small>
+                    </a>
+                    <a
+                      v-for="fact in message.response.facts.filter((item) => item.asset_id).slice(0, 12)"
+                      :key="`chat-page-fact-${message.id}-${fact.id}`"
+                      class="knowledge-citation"
+                      :href="assetHref(fact.asset_id as string)"
+                      @click="openAssetLink($event, fact.asset_id as string)"
+                    >
+                      {{ fact.subject }}
+                      <small>{{ fact.predicate }} · {{ fact.object }}</small>
+                    </a>
+                    <a
+                      v-for="relation in message.response.relations.filter((item) => item.from_asset_id || item.to_asset_id).slice(0, 12)"
+                      :key="`chat-page-relation-${message.id}-${relation.id}`"
+                      class="knowledge-citation"
+                      :href="assetHref((relation.from_asset_id || relation.to_asset_id) as string)"
+                      @click="openAssetLink($event, (relation.from_asset_id || relation.to_asset_id) as string)"
+                    >
+                      {{ relation.from_entity || relation.from_asset_id || 'entity' }}
+                      <small>{{ relation.relation }} {{ relation.to_entity || relation.to_asset_id || 'entity' }}</small>
+                    </a>
+                  </div>
+                  <details v-if="message.response?.actions?.length" class="chat-actions">
+                    <summary>Suggested actions</summary>
+                    <article v-for="(action, idx) in message.response.actions" :key="`chat-action-${message.id}-${idx}`" class="knowledge-action">
+                      <div>
+                        <strong>{{ action.label || action.action }}</strong>
+                        <small v-if="action.note">{{ action.note }}</small>
+                      </div>
+                      <div class="inline-actions">
+                        <a v-if="action.asset_id" class="btn btn-sm btn-outline-secondary" :href="assetHref(action.asset_id)" @click="openAssetLink($event, action.asset_id)">Open asset</a>
+                        <button type="button" class="btn btn-sm btn-outline-primary" @click="runKnowledgeAction(action)">Review</button>
+                      </div>
+                    </article>
+                  </details>
+                  <details v-if="message.events?.length" class="chat-tool-trace">
+                    <summary>Tool trace · {{ message.events.length }} events</summary>
+                    <div v-for="(event, idx) in message.events" :key="`chat-event-${message.id}-${idx}`" class="tool-event">
+                      <span class="status-badge">{{ event.event }}</span>
+                      <span>{{ formatKnowledgeStreamEvent(event) }}</span>
+                    </div>
+                  </details>
+                </div>
+              </article>
+            </div>
+            <form class="chat-composer" @submit.prevent="sendLLMChat">
+              <div v-if="llmChatAttachments.length" class="chat-attachments pending">
+                <button
+                  v-for="(attachment, idx) in llmChatAttachments"
+                  :key="`pending-attachment-${idx}-${attachment.name}`"
+                  type="button"
+                  class="status-badge attachment-chip"
+                  @click="removeLLMChatAttachment(idx)"
+                >
+                  {{ attachment.name }} · {{ formatBytes(attachment.size_bytes) }} ×
+                </button>
+              </div>
+              <div class="chat-composer-row">
+                <button type="button" class="btn btn-outline-secondary" @click="triggerLLMChatFilePicker">
+                  <i class="bi bi-paperclip" aria-hidden="true"></i>
+                  Attach
+                </button>
+                <input
+                  ref="llmChatFileInput"
+                  class="visually-hidden"
+                  type="file"
+                  multiple
+                  accept="image/*,.txt,.md,.markdown,.csv,.json,.yaml,.yml,.xml,.srt,.vtt,.log"
+                  @change="handleLLMChatFileChange"
+                />
+                <textarea
+                  v-model="llmChatInput"
+                  rows="2"
+                  placeholder="Ask in English or Russian. Paste an image or attach files, then ask Cartolensia to use local tools."
+                  @paste="handleLLMChatPaste"
+                  @keydown.enter.exact.prevent="sendLLMChat"
+                ></textarea>
+                <button type="submit" class="btn btn-primary" :disabled="llmChatBusy || (!llmChatInput.trim() && llmChatAttachments.length === 0)">
+                  {{ llmChatBusy ? 'Working...' : 'Send' }}
+                </button>
+              </div>
+              <p class="muted">Chat uses local read-only APIs and metadata. Attachments are sent only to the configured local Cartolensia server; originals remain immutable.</p>
+            </form>
+          </section>
+        </section>
+
         <section v-else-if="active === 'Knowledge Base'" class="panel knowledge-page">
           <header class="panel-head">
             <div>
@@ -8791,6 +9471,12 @@ onBeforeUnmount(() => {
             <div class="inline-form-row">
               <input v-model="knowledgeChatInput" type="search" placeholder="What was recorded near Lake Ladoga? / Что снято рядом с поездом?" @keyup.enter="askKnowledgeBase" />
               <button type="button" class="btn btn-primary" :disabled="knowledgeChatBusy" @click="askKnowledgeBase">Ask</button>
+            </div>
+            <div v-if="knowledgeChatBusy || knowledgeChatEvents.length" class="tool-event-list">
+              <div v-for="(event, idx) in knowledgeChatEvents.slice(-8)" :key="`knowledge-chat-event-${idx}`" class="tool-event">
+                <span class="status-badge">{{ event.event }}</span>
+                <span>{{ formatKnowledgeStreamEvent(event) }}</span>
+              </div>
             </div>
             <p v-if="knowledgeChat?.note" class="muted">{{ knowledgeChat.note }}</p>
             <article v-if="knowledgeChat" class="knowledge-answer">
@@ -8916,7 +9602,14 @@ onBeforeUnmount(() => {
           </section>
           <section class="knowledge-graph-layout">
             <article class="settings-form">
-              <h3>Graph Preview</h3>
+              <div class="section-title compact-title">
+                <h3>Graph Preview</h3>
+                <div class="btn-group btn-group-sm">
+                  <button type="button" class="btn btn-outline-secondary" @click="zoomKnowledgeGraph(-0.15)">-</button>
+                  <button type="button" class="btn btn-outline-secondary" @click="resetKnowledgeGraphView">Reset</button>
+                  <button type="button" class="btn btn-outline-secondary" @click="zoomKnowledgeGraph(0.15)">+</button>
+                </div>
+              </div>
               <div class="knowledge-graph-preview">
                 <svg
                   v-if="knowledgeGraphPreview.nodes.length"
@@ -8924,29 +9617,48 @@ onBeforeUnmount(() => {
                   :viewBox="`0 0 ${knowledgeGraphPreview.width} ${knowledgeGraphPreview.height}`"
                   role="img"
                   aria-label="Knowledge graph preview"
+                  @wheel.prevent="wheelKnowledgeGraph"
+                  @pointerdown="startKnowledgeGraphPan"
+                  @pointermove="moveKnowledgeGraphPan"
+                  @pointerup="endKnowledgeGraphPan"
+                  @pointercancel="endKnowledgeGraphPan"
                 >
-                  <line
-                    v-for="edge in knowledgeGraphPreview.edges"
-                    :key="`edge-${edge.id}`"
-                    :x1="edge.x1"
-                    :y1="edge.y1"
-                    :x2="edge.x2"
-                    :y2="edge.y2"
-                    class="knowledge-graph-edge-line"
-                  />
-                  <g v-for="node in knowledgeGraphPreview.nodes" :key="node.id" class="knowledge-graph-node">
-                    <a v-if="node.asset_id" :href="assetHref(node.asset_id)" @click="openAssetLink($event, node.asset_id)">
-                      <circle :cx="node.x" :cy="node.y" r="8" :class="node.kind === 'asset' ? 'asset-node' : 'entity-node'" />
-                      <text :x="node.x + 12" :y="node.y + 4">{{ node.label }}</text>
-                    </a>
-                    <template v-else>
-                      <circle :cx="node.x" :cy="node.y" r="6" :class="node.kind === 'asset' ? 'asset-node' : 'entity-node'" />
-                      <text :x="node.x + 10" :y="node.y + 4">{{ node.label }}</text>
-                    </template>
+                  <g :transform="knowledgeGraphTransform()">
+                    <line
+                      v-for="edge in knowledgeGraphPreview.edges"
+                      :key="`edge-${edge.id}`"
+                      :x1="edge.x1"
+                      :y1="edge.y1"
+                      :x2="edge.x2"
+                      :y2="edge.y2"
+                      class="knowledge-graph-edge-line"
+                    />
+                    <g
+                      v-for="node in knowledgeGraphPreview.nodes"
+                      :key="node.id"
+                      :class="['knowledge-graph-node', { selected: node.id === knowledgeGraphSelectedNodeId }]"
+                      @click.stop="selectKnowledgeGraphNode(node)"
+                    >
+                      <title>{{ node.label }}</title>
+                      <circle :cx="node.x" :cy="node.y" :r="node.kind === 'asset' ? 8 : 6" :class="node.kind === 'asset' ? 'asset-node' : 'entity-node'" />
+                      <text v-if="displayKnowledgeGraphLabel(node)" :x="node.x + 12" :y="node.y + 4">{{ node.label }}</text>
+                    </g>
                   </g>
                 </svg>
                 <div v-else class="empty-state">No graph relations match this filter yet.</div>
-                <p class="muted">Preview renders up to 90 current-page relations and 120 nodes. Use filters and pagination for large graphs.</p>
+                <p class="muted">Preview renders up to 90 current-page relations and 120 nodes. Drag to pan, wheel to zoom, select a node for details.</p>
+                <article v-if="selectedKnowledgeGraphNode" class="graph-node-detail">
+                  <strong>{{ selectedKnowledgeGraphNode.label }}</strong>
+                  <span>{{ selectedKnowledgeGraphNode.kind }}</span>
+                  <a
+                    v-if="selectedKnowledgeGraphNode.asset_id"
+                    class="btn btn-sm btn-outline-primary"
+                    :href="assetHref(selectedKnowledgeGraphNode.asset_id)"
+                    @click="openAssetLink($event, selectedKnowledgeGraphNode.asset_id)"
+                  >
+                    Open asset
+                  </a>
+                </article>
               </div>
             </article>
             <article class="settings-form">
@@ -9382,6 +10094,85 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
+        <section v-else-if="active === 'Tasks'" class="panel tasks-page">
+          <header class="panel-head">
+            <div>
+              <h2>Tasks</h2>
+              <span>Start durable background work. Originals are read through configured strict read-only storage; outputs stay in Cartolensia metadata/cache.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" @click="refresh">Refresh status</button>
+          </header>
+          <p v-if="tasksMessage" class="alert">{{ tasksMessage }}</p>
+          <div class="settings-grid">
+            <article class="settings-form settings-wide">
+              <h3><i class="bi bi-sliders" aria-hidden="true"></i> Scope And Limits</h3>
+              <div class="row g-2">
+                <label class="col-md-3">
+                  <span>Storage</span>
+                  <select v-model="tasksStorage" class="form-select">
+                    <option value="">Discovery default</option>
+                    <option v-for="storage in storages" :key="storage.name" :value="storage.name">{{ storage.name }}</option>
+                  </select>
+                </label>
+                <label class="col-md-4">
+                  <span>Prefix</span>
+                  <input v-model="tasksPrefix" class="form-control" placeholder="blank uses Discovery prefix / whole selected storage" />
+                </label>
+                <label class="col-md-2">
+                  <span>Limit</span>
+                  <input v-model.number="tasksLimit" type="number" class="form-control" />
+                  <small>-1 means no file-count limit for normal jobs.</small>
+                </label>
+                <label class="col-md-2">
+                  <span>AI batch size</span>
+                  <input v-model.number="tasksBatchSize" type="number" min="1" max="128" class="form-control" />
+                </label>
+                <label class="col-md-1 form-check form-switch task-switch">
+                  <input v-model="tasksReverseGeocodeOnline" class="form-check-input" type="checkbox" />
+                  <span>Online geocode</span>
+                </label>
+              </div>
+            </article>
+            <article class="settings-form">
+              <h3>Indexing</h3>
+              <button type="button" class="btn btn-primary w-100" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('index')">
+                <span v-if="tasksBusy === 'index'" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                Start discovery/indexing
+              </button>
+              <p class="muted">Uses the bounded folder-worker discovery pipeline and does not run missing-file marking.</p>
+            </article>
+            <article class="settings-form">
+              <h3>Metadata</h3>
+              <div class="button-stack">
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('hash')">Hash unhashed</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('metadata')">Enrich metadata</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('reverse_geocode')">Reverse geocode known locations</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('previews')">Generate previews</button>
+              </div>
+            </article>
+            <article class="settings-form settings-wide">
+              <h3>AI Backfill</h3>
+              <p class="muted">Queues missing scoped AI metadata. Sidecar reads media through Cartolensia read-only URLs and stores only derived metadata.</p>
+              <div class="action-grid compact-actions">
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['classify'])">Classification</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['safety'])">NSFW/Safety</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['describe'])">Captions</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['embed'])">Embeddings</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['faces'])">Face detection</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['ocr'])">OCR</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['audio_features'])">Audio features</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['audio_transcript', 'video_transcript'])">Transcribe audio/video</button>
+                <button type="button" class="btn btn-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai')">Run all missing AI</button>
+              </div>
+            </article>
+            <article class="settings-form settings-wide">
+              <h3>Current Queue</h3>
+              <p>{{ jobStats?.queued ?? 0 }} queued · {{ jobStats?.running ?? 0 }} running · {{ jobStats?.failed ?? 0 }} failed</p>
+              <button type="button" class="btn btn-outline-secondary" @click="setActive('Jobs')">Open Jobs</button>
+            </article>
+          </div>
+        </section>
+
         <section v-else-if="active === 'Settings'" class="panel settings-page">
           <header class="panel-head">
             <h2>Settings</h2>
@@ -9444,7 +10235,7 @@ onBeforeUnmount(() => {
             </article>
           </div>
 
-          <div v-else-if="['indexing', 'metadata', 'preview', 'map', 'gps', 'search', 'transcoding'].includes(settingsTab)" class="settings-grid">
+          <div v-else-if="['indexing', 'discovery', 'metadata', 'preview', 'map', 'gps', 'video-track-player', 'search', 'knowledge', 'transcoding'].includes(settingsTab)" class="settings-grid">
             <article v-if="runtimeSpecsForTab(settingsTab).length > 0" class="settings-form settings-wide">
               <div class="section-title">
                 <div>
@@ -9843,6 +10634,33 @@ onBeforeUnmount(() => {
               <p class="muted">Secrets are referenced by env var or file path only; do not paste passwords into pending YAML.</p>
               <button type="button" @click="savePendingSettings">Save pending YAML</button>
             </article>
+            <form v-if="backend?.auth_mode === 'local' && principal" class="settings-form" @submit.prevent="changePassword">
+              <h3>Password</h3>
+              <input v-model="oldPassword" type="password" autocomplete="current-password" placeholder="Current password" />
+              <input v-model="newPassword" type="password" autocomplete="new-password" placeholder="New password" />
+              <button type="submit">Change Password</button>
+            </form>
+            <form v-if="backend?.auth_mode === 'local' && principal" class="settings-form" @submit.prevent="createToken">
+              <h3>API Tokens</h3>
+              <input v-model="tokenName" type="text" placeholder="Token name" />
+              <input v-model="tokenScopes" type="text" placeholder="Scopes" />
+              <button type="submit">Create Token</button>
+              <code v-if="tokenSecret">{{ tokenSecret }}</code>
+            </form>
+            <article v-if="apiTokens.length > 0" class="settings-form settings-wide">
+              <h3>Active API Tokens</h3>
+              <table>
+                <thead><tr><th>Name</th><th>Scopes</th><th>Expires</th><th>Last Used</th></tr></thead>
+                <tbody>
+                  <tr v-for="token in apiTokens" :key="token.id">
+                    <td>{{ token.name }}</td>
+                    <td>{{ token.scopes.join(", ") }}</td>
+                    <td>{{ token.expires_at ?? "" }}</td>
+                    <td>{{ token.last_used_at ?? "" }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
           </div>
 
           <div v-else-if="settingsTab === 'ai'" class="settings-grid">
@@ -10159,32 +10977,6 @@ onBeforeUnmount(() => {
             </article>
           </div>
 
-          <div class="settings-grid">
-            <form v-if="backend?.auth_mode === 'local' && principal" class="settings-form" @submit.prevent="changePassword">
-              <h3>Password</h3>
-              <input v-model="oldPassword" type="password" autocomplete="current-password" placeholder="Current password" />
-              <input v-model="newPassword" type="password" autocomplete="new-password" placeholder="New password" />
-              <button type="submit">Change Password</button>
-            </form>
-            <form v-if="backend?.auth_mode === 'local' && principal" class="settings-form" @submit.prevent="createToken">
-              <h3>API Tokens</h3>
-              <input v-model="tokenName" type="text" placeholder="Token name" />
-              <input v-model="tokenScopes" type="text" placeholder="Scopes" />
-              <button type="submit">Create Token</button>
-              <code v-if="tokenSecret">{{ tokenSecret }}</code>
-            </form>
-          </div>
-          <table v-if="apiTokens.length > 0">
-            <thead><tr><th>Name</th><th>Scopes</th><th>Expires</th><th>Last Used</th></tr></thead>
-            <tbody>
-              <tr v-for="token in apiTokens" :key="token.id">
-                <td>{{ token.name }}</td>
-                <td>{{ token.scopes.join(", ") }}</td>
-                <td>{{ token.expires_at ?? "" }}</td>
-                <td>{{ token.last_used_at ?? "" }}</td>
-              </tr>
-            </tbody>
-          </table>
         </section>
 
         <section v-else class="panel">
