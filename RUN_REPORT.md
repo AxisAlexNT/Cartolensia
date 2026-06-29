@@ -1,5 +1,36 @@
 # Run Report
 
+## 2026-06-29 Places Pagination And Place Detail UX
+
+### Scope
+
+- Added Places page pagination controls with `Load more` and `Load all`.
+- Added scroll-near-bottom auto-loading fallback for paged lists in addition to `IntersectionObserver`.
+- Added a `GET /api/v1/places/{id}` place detail API.
+- Added a Place Details page with an OpenLayers map, hierarchy chips, coordinate badge, and local geotag statistics.
+- Made Places titles clickable links to Place Details.
+- Made coordinate badges clickable and added an inline map preview for the selected place.
+- Changed the Tasks sidebar icon to Bootstrap Icons `bi-hammer`.
+- Moved page loading status to a bottom loading strip with a Bootstrap spinner and added bottom spinners for incremental file/place loading.
+
+### Verification
+
+Commands run:
+
+- `git diff --check` passed.
+- `gofmt -w internal/server/server.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
+- `npm --prefix webui run build` passed.
+
+### Safety
+
+- No writes to `/mnt/Models/rclone`.
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit.
+- No push.
+
 ## 2026-06-06 Supervised Preflight For Next Long Run
 
 ### Scope

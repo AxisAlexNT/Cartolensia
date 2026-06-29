@@ -53,6 +53,7 @@ import {
   type MonthBucket,
   type OCRBlock,
   type PlaceCacheEntry,
+  type PlaceDetailResponse,
   type PlaceHierarchyEntry,
   type PlaceHierarchyResponse,
   type PlaceProvidersResponse,
@@ -137,6 +138,8 @@ const navPageAliases: Record<string, string> = {
   "photos-on-map": "Heatmap",
   places: "Places",
   place: "Places",
+  "place-details": "Place Details",
+  "place-detail": "Place Details",
   "gps-tracks": "GPS/KML Tracks",
   tracks: "GPS/KML Tracks",
   transcoding: "Transcoding",
@@ -167,7 +170,7 @@ const navPageAliases: Record<string, string> = {
   "video-track-player": "Video Track Player"
 };
 
-const routeLabels = new Set([...nav, "Asset Detail"]);
+const routeLabels = new Set([...nav, "Asset Detail", "Place Details"]);
 const supportedDiscoveryExtensions = [
   "jpg", "jpeg", "png", "heif", "heic",
   "mp4", "mov", "webm", "mkv", "avi", "m4v",
@@ -222,7 +225,7 @@ function navIcon(label: string): string {
     "LLM Chat": "bi-chat-dots",
     "Knowledge Base": "bi-journal-richtext",
     "Knowledge Graph": "bi-diagram-3",
-    Tasks: "bi-play-list",
+    Tasks: "bi-hammer",
     "Geo Align": "bi-crosshair",
     "Video Track Player": "bi-play-btn"
   };
@@ -313,8 +316,15 @@ const placesHierarchyQuery = ref("");
 const placesHierarchyLimit = ref(100);
 const placesHierarchyOffset = ref(0);
 const placesHierarchyLoading = ref(false);
+const placesHierarchyLoadingAll = ref(false);
 const placesHierarchyMessage = ref("");
 const placeProviders = ref<PlaceProvidersResponse | null>(null);
+const placeDetail = ref<PlaceDetailResponse | null>(null);
+const placeDetailLoading = ref(false);
+const placeDetailMessage = ref("");
+const placeDetailMapElement = ref<HTMLDivElement | null>(null);
+const placePreviewEntry = ref<PlaceHierarchyEntry | null>(null);
+const placePreviewMapElement = ref<HTMLDivElement | null>(null);
 const placeDraft = ref<PlaceCacheEntry>({
   name: "",
   display_name: "",
@@ -491,6 +501,10 @@ let mapTileLayer: TileLayer<XYZ> | null = null;
 let mapAssetLayer: VectorLayer<VectorSource> | null = null;
 let mapTrackLayer: VectorLayer<VectorSource> | null = null;
 let mapHeatLayer: HeatmapLayer<FeatureLike, VectorSource> | null = null;
+let placeDetailMap: OLMap | null = null;
+let placeDetailPointLayer: VectorLayer<VectorSource> | null = null;
+let placePreviewMap: OLMap | null = null;
+let placePreviewPointLayer: VectorLayer<VectorSource> | null = null;
 let mapViewportRefreshTimer: number | undefined;
 let mapRefreshInFlight = false;
 let videoTrackMap: OLMap | null = null;
@@ -753,6 +767,9 @@ function setActive(next: string, updateURL = true) {
   if (route === "Places" && !placesHierarchy.value && !placesHierarchyLoading.value) {
     void loadPlacesHierarchy(true);
   }
+  if (route === "Place Details") {
+    void loadPlaceDetailFromRoute();
+  }
   if (route === "Heatmap" && !heatmapData.value) {
     void refreshHeatmap();
   }
@@ -777,6 +794,50 @@ function setActive(next: string, updateURL = true) {
 
 function assetHref(id: string) {
   return routePath({ page: "asset-detail", asset_id: id });
+}
+
+function searchHref(query: string) {
+  return routePath({ page: "search", q: query });
+}
+
+function openSearchLink(event: MouseEvent, query: string) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  universalSearchQ.value = query;
+  setActive("Search", false);
+  window.history.pushState({}, "", searchHref(query));
+  void runUniversalSearch();
+}
+
+function placeSearchQuery(place: PlaceCacheEntry, kind = "") {
+  const name = place.display_name || place.name || place.city || place.region || place.country || "";
+  const token = name.includes(" ") || name.includes(",") ? `place:"${name.replaceAll('"', '\\"')}"` : `place:${name}`;
+  return kind ? `${token} kind:${kind}` : token;
+}
+
+function placeDetailHref(place: PlaceCacheEntry) {
+  if (!place.id) return searchHref(placeSearchQuery(place));
+  return routePath({ page: "place-details", place_id: place.id });
+}
+
+function openPlaceDetailLink(event: MouseEvent, place: PlaceCacheEntry) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  if (!place.id) return;
+  event.preventDefault();
+  setActive("Place Details", false);
+  window.history.pushState({}, "", placeDetailHref(place));
+  void loadPlaceDetail(place.id);
+}
+
+function runSearchFromRouteQuery() {
+  const query = new URLSearchParams(window.location.search).get("q")?.trim() ?? "";
+  if (!query) return;
+  universalSearchQ.value = query;
+  void runUniversalSearch();
 }
 
 function explorerFolderHref(path: string, storage = "") {
@@ -871,10 +932,14 @@ window.addEventListener("popstate", () => {
     explorerPath.value = params.get("path") ?? "";
     explorerStorageName.value = params.get("storage") ?? "";
     void reloadExplorerPage();
+  } else if (page === "Search") {
+    runSearchFromRouteQuery();
   } else if (page === "Heatmap") {
     void refreshHeatmap();
   } else if (page === "Places") {
     void loadPlacesHierarchy(true);
+  } else if (page === "Place Details") {
+    void loadPlaceDetailFromRoute();
   }
 });
 
@@ -4758,15 +4823,159 @@ async function loadPlacesHierarchy(reset = false) {
   }
 }
 
+async function loadAllPlacesHierarchy() {
+  if (placesHierarchyLoadingAll.value) return;
+  placesHierarchyLoadingAll.value = true;
+  try {
+    if (!placesHierarchy.value) {
+      await loadPlacesHierarchy(true);
+    }
+    let guard = 0;
+    while (
+      placesHierarchy.value &&
+      placesHierarchy.value.entries.length < placesHierarchy.value.page.total &&
+      guard < 1000
+    ) {
+      guard += 1;
+      const before = placesHierarchy.value.entries.length;
+      await loadPlacesHierarchy(false);
+      if (!placesHierarchy.value || placesHierarchy.value.entries.length <= before) break;
+    }
+  } finally {
+    placesHierarchyLoadingAll.value = false;
+  }
+}
+
 function placeHierarchyLine(entry: PlaceHierarchyEntry): string {
   const hierarchy = asArray(entry.hierarchy).filter(Boolean);
   return hierarchy.length > 0 ? hierarchy.join(" / ") : (entry.place.display_name || entry.place.name);
 }
 
 function searchPlaceEntry(entry: PlaceHierarchyEntry) {
-  universalSearchQ.value = `place:${entry.place.name}`;
-  setActive("Search");
+  universalSearchQ.value = placeSearchQuery(entry.place);
+  setActive("Search", false);
+  window.history.pushState({}, "", searchHref(universalSearchQ.value));
   void runUniversalSearch();
+}
+
+function placeCoordinateLabel(place: PlaceCacheEntry): string {
+  return `${Number(place.lat).toFixed(5)}, ${Number(place.lon).toFixed(5)}`;
+}
+
+function placeMapHref(place: PlaceCacheEntry) {
+  return routePath({ page: "map", lat: place.lat, lon: place.lon, zoom: 14 });
+}
+
+function togglePlacePreview(entry: PlaceHierarchyEntry) {
+  if (placePreviewEntry.value?.place.id === entry.place.id) {
+    placePreviewEntry.value = null;
+    return;
+  }
+  placePreviewEntry.value = entry;
+  void nextTick(() => renderPlacePreviewMap());
+}
+
+async function loadPlaceDetailFromRoute() {
+  const placeID = new URLSearchParams(window.location.search).get("place_id") ?? "";
+  if (!placeID) {
+    placeDetail.value = null;
+    placeDetailMessage.value = "No place id was provided.";
+    return;
+  }
+  await loadPlaceDetail(placeID);
+}
+
+async function loadPlaceDetail(placeID: string) {
+  placeDetailLoading.value = true;
+  placeDetailMessage.value = "";
+  try {
+    placeDetail.value = await api.place(placeID);
+    await nextTick();
+    renderPlaceDetailMap();
+  } catch (err) {
+    placeDetail.value = null;
+    placeDetailMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    placeDetailLoading.value = false;
+  }
+}
+
+function placeDetailStatRows(detail: PlaceDetailResponse) {
+  return [
+    { key: "all", label: "All files", count: detail.stats.total_assets, query: detail.search_queries.all },
+    { key: "photos", label: "Photos", count: detail.stats.photos, query: detail.search_queries.photos },
+    { key: "videos", label: "Videos", count: detail.stats.videos, query: detail.search_queries.videos },
+    { key: "audio", label: "Audio", count: detail.stats.audio, query: detail.search_queries.audio },
+    { key: "documents", label: "Documents", count: detail.stats.documents, query: detail.search_queries.documents },
+    { key: "tracks", label: "Tracks", count: detail.stats.tracks, query: detail.search_queries.tracks },
+    { key: "other", label: "Other", count: detail.stats.other, query: detail.search_queries.all }
+  ].filter((row) => row.key === "all" || row.count > 0);
+}
+
+function renderPlaceDetailMap() {
+  if (!placeDetail.value) return;
+  const rendered = renderPlacePointMap(placeDetailMapElement.value, placeDetail.value.place, placeDetailMap, placeDetailPointLayer, 13);
+  placeDetailMap = rendered.map;
+  placeDetailPointLayer = rendered.layer;
+}
+
+function renderPlacePreviewMap() {
+  if (!placePreviewEntry.value) return;
+  const rendered = renderPlacePointMap(placePreviewMapElement.value, placePreviewEntry.value.place, placePreviewMap, placePreviewPointLayer, 14);
+  placePreviewMap = rendered.map;
+  placePreviewPointLayer = rendered.layer;
+}
+
+function renderPlacePointMap(
+  target: HTMLDivElement | null,
+  place: PlaceCacheEntry,
+  existingMap: OLMap | null,
+  existingLayer: VectorLayer<VectorSource> | null,
+  zoom: number
+): { map: OLMap | null; layer: VectorLayer<VectorSource> | null } {
+  if (!target || !Number.isFinite(place.lat) || !Number.isFinite(place.lon)) {
+    return { map: existingMap, layer: existingLayer };
+  }
+  const center = fromLonLat([place.lon, place.lat]);
+  const source = new VectorSource({
+    features: [new Feature({ geometry: new Point(center), name: place.display_name || place.name })]
+  });
+  const layer = existingLayer ?? new VectorLayer({ source });
+  layer.setSource(source);
+  layer.setStyle(new Style({
+    image: new CircleStyle({
+      radius: 8,
+      fill: new Fill({ color: "#2f81f7" }),
+      stroke: new Stroke({ color: "#ffffff", width: 2 })
+    })
+  }));
+  layer.setZIndex(20);
+  if (!existingMap) {
+    const tileLayer = createLocalOSMLayer(() => undefined);
+    const map = new OLMap({
+      target,
+      layers: [tileLayer, layer],
+      view: new View({ center, zoom }),
+      controls: defaultControls().extend([new ScaleLine()])
+    });
+    window.setTimeout(() => map.updateSize(), 50);
+    return { map, layer };
+  }
+  if (!existingLayer) existingMap.addLayer(layer);
+  existingMap.setTarget(target);
+  existingMap.getView().setCenter(center);
+  existingMap.getView().setZoom(zoom);
+  window.setTimeout(() => existingMap?.updateSize(), 50);
+  return { map: existingMap, layer };
+}
+
+function destroyPlaceMaps() {
+  placeDetailMap?.setTarget(undefined);
+  placePreviewMap?.setTarget(undefined);
+  placeDetailMap = null;
+  placePreviewMap = null;
+  placeDetailPointLayer = null;
+  placePreviewPointLayer = null;
 }
 
 async function createPlaceFromDraft() {
@@ -6243,6 +6452,14 @@ watch([active, mapData], async () => {
     await nextTick();
     await refreshSelectedTrackMap();
   }
+  if (active.value === "Place Details" && placeDetail.value) {
+    await nextTick();
+    renderPlaceDetailMap();
+  }
+  if (active.value === "Places" && placePreviewEntry.value) {
+    await nextTick();
+    renderPlacePreviewMap();
+  }
   if (active.value === "Geo Align" && geoAlignSession.value) {
     await nextTick();
     await refreshGeoAlignMap();
@@ -6432,6 +6649,10 @@ onMounted(async () => {
     await refreshHeatmap();
   } else if (active.value === "Places") {
     await loadPlacesHierarchy(true);
+  } else if (active.value === "Place Details") {
+    await loadPlaceDetailFromRoute();
+  } else if (active.value === "Search") {
+    runSearchFromRouteQuery();
   }
   await nextTick();
   renderOpenLayers();
@@ -6443,6 +6664,7 @@ onBeforeUnmount(() => {
   stopVideoTrackPlaybackLoop();
   destroyVideoTrackMap();
   destroyGalleryTrackMap();
+  destroyPlaceMaps();
   selectedTrackMap?.setTarget(undefined);
   geoAlignMap?.setTarget(undefined);
   olMap?.setTarget(undefined);
@@ -6486,7 +6708,6 @@ onBeforeUnmount(() => {
       <section class="content">
         <div v-if="error" class="alert">{{ error }}</div>
         <div v-if="backend?.auth?.warning" class="alert">{{ backend.auth.warning }}</div>
-        <div v-if="loading" class="muted">Loading...</div>
 
         <section v-if="backend?.auth_mode === 'local' && !principal && active !== 'Asset Detail'" class="panel">
           <header class="panel-head">
@@ -6590,10 +6811,6 @@ onBeforeUnmount(() => {
 	              Clear filters
 	            </button>
 	          </form>
-          <p v-if="explorerPageLoading" class="muted inline-status">
-            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
-            Loading indexed folder view...
-          </p>
           <p v-if="explorerStorageName" class="muted">
             Showing indexed paths from storage <code>{{ explorerStorageName }}</code>. If the original storage is offline, metadata remains browsable from PostgreSQL.
           </p>
@@ -6702,6 +6919,7 @@ onBeforeUnmount(() => {
           </div>
           <PagedFileControls
             v-if="!explorerQ.trim()"
+            label="files"
             :shown="explorerLoadedFiles"
             :total="explorerTotalFiles"
             :loading="explorerLoadingMore"
@@ -6709,6 +6927,10 @@ onBeforeUnmount(() => {
             @load-more="loadMoreExplorerFiles"
             @load-all="loadAllExplorerFiles"
           />
+          <div v-if="explorerPageLoading" class="bottom-loading-status inline-bottom-status" role="status" aria-live="polite">
+            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            <span>Loading indexed folder view...</span>
+          </div>
         </section>
 
         <section v-else-if="active === 'Discovery'" class="panel">
@@ -8053,7 +8275,12 @@ onBeforeUnmount(() => {
               />
               <button type="button" class="btn btn-primary" :disabled="placesHierarchyLoading" @click="loadPlacesHierarchy(true)">Search</button>
               <button type="button" class="btn btn-outline-secondary" :disabled="placesHierarchyLoading || !placesHierarchy || placesHierarchy.entries.length >= placesHierarchy.page.total" @click="loadPlacesHierarchy(false)">
+                <span v-if="placesHierarchyLoading && !placesHierarchyLoadingAll" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
                 Load more
+              </button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="placesHierarchyLoading || placesHierarchyLoadingAll || !placesHierarchy || placesHierarchy.entries.length >= placesHierarchy.page.total" @click="loadAllPlacesHierarchy">
+                <span v-if="placesHierarchyLoadingAll" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                Load all
               </button>
               <button type="button" class="btn btn-outline-secondary" @click="settingsTab = 'search'; setActive('Settings')">
                 Edit cache
@@ -8098,7 +8325,11 @@ onBeforeUnmount(() => {
             <div v-else class="place-hierarchy-list">
               <article v-for="entry in placesHierarchy.entries" :key="entry.place.id || `${entry.place.provider}-${entry.place.name}`" class="place-hierarchy-card">
                 <div>
-                  <h4>{{ entry.label || entry.place.display_name || entry.place.name }}</h4>
+                  <h4>
+                    <a class="link-button place-title-link" :href="placeDetailHref(entry.place)" @click="openPlaceDetailLink($event, entry.place)">
+                      {{ entry.label || entry.place.display_name || entry.place.name }}
+                    </a>
+                  </h4>
                   <p class="muted">{{ placeHierarchyLine(entry) }}</p>
                   <div class="chip-row">
                     <span class="status-badge">{{ entry.level }}</span>
@@ -8111,14 +8342,98 @@ onBeforeUnmount(() => {
                 <div class="place-hierarchy-meta">
                   <span>{{ entry.asset_count }} asset geotag match{{ entry.asset_count === 1 ? '' : 'es' }}</span>
                   <span>{{ entry.track_count }} overlapping track{{ entry.track_count === 1 ? '' : 's' }}</span>
-                  <small>{{ entry.place.lat.toFixed(5) }}, {{ entry.place.lon.toFixed(5) }}</small>
+                  <a class="coordinate-badge" :href="placeMapHref(entry.place)" @click.prevent="togglePlacePreview(entry)">
+                    <i class="bi bi-geo-alt-fill" aria-hidden="true"></i>
+                    {{ placeCoordinateLabel(entry.place) }}
+                  </a>
                   <button type="button" class="btn btn-sm btn-outline-primary" @click="searchPlaceEntry(entry)">
                     Search media
                   </button>
                 </div>
               </article>
             </div>
+            <section v-if="placePreviewEntry" class="place-map-preview settings-form">
+              <header class="panel-head compact-title">
+                <div>
+                  <h4>{{ placePreviewEntry.label || placePreviewEntry.place.display_name || placePreviewEntry.place.name }}</h4>
+                  <p class="muted">{{ placeCoordinateLabel(placePreviewEntry.place) }}</p>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" @click="placePreviewEntry = null">Close preview</button>
+              </header>
+              <div ref="placePreviewMapElement" class="place-preview-map" aria-label="Place coordinate preview map"></div>
+            </section>
+            <PagedFileControls
+              v-if="placesHierarchy"
+              label="places"
+              :shown="placesHierarchy.entries.length"
+              :total="placesHierarchy.page.total"
+              :loading="placesHierarchyLoading && !placesHierarchyLoadingAll"
+              :loading-all="placesHierarchyLoadingAll"
+              @load-more="loadPlacesHierarchy(false)"
+              @load-all="loadAllPlacesHierarchy"
+            />
           </section>
+        </section>
+
+        <section v-else-if="active === 'Place Details'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>{{ placeDetail?.label || placeDetail?.place.display_name || placeDetail?.place.name || 'Place Details' }}</h2>
+              <span>Cached local place metadata, geotag statistics, and map context.</span>
+            </div>
+            <div class="actions">
+              <a class="btn btn-outline-secondary" :href="routeHref('Places')" @click="openRouteLink($event, 'Places')">
+                Back to Places
+              </a>
+              <button type="button" class="btn btn-outline-primary" :disabled="placeDetailLoading" @click="loadPlaceDetailFromRoute">
+                Refresh
+              </button>
+            </div>
+          </header>
+          <div v-if="placeDetailMessage" class="alert">{{ placeDetailMessage }}</div>
+          <div v-if="placeDetailLoading && !placeDetail" class="bottom-loading-status" role="status" aria-live="polite">
+            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            <span>Loading place details...</span>
+          </div>
+          <template v-if="placeDetail">
+            <section class="place-detail-hero">
+              <div ref="placeDetailMapElement" class="place-detail-map" aria-label="Place detail map"></div>
+              <article class="settings-form">
+                <h3>{{ placeDetail.label || placeDetail.place.display_name || placeDetail.place.name }}</h3>
+                <p class="muted">{{ placeDetail.place.display_name || placeDetail.place.name }}</p>
+                <div class="chip-row">
+                  <span class="status-badge">{{ placeDetail.level }}</span>
+                  <span v-for="part in placeDetail.hierarchy" :key="part" class="status-badge">{{ part }}</span>
+                </div>
+                <p v-if="placeDetail.note" class="muted">{{ placeDetail.note }}</p>
+                <p>
+                  <a class="coordinate-badge" :href="placeMapHref(placeDetail.place)" @click.prevent="renderPlaceDetailMap">
+                    <i class="bi bi-geo-alt-fill" aria-hidden="true"></i>
+                    {{ placeCoordinateLabel(placeDetail.place) }}
+                  </a>
+                </p>
+              </article>
+            </section>
+            <section class="settings-form">
+              <h3><i class="bi bi-bar-chart" aria-hidden="true"></i> Region Statistics</h3>
+              <p class="muted">
+                Counts are based on cached geotags inside the place bbox or {{ placeDetail.radius_m }} m radius.
+                <span v-if="placeDetail.stats.capped">Stats are capped for responsiveness; Search can page through the full result set.</span>
+              </p>
+              <div class="metrics">
+                <a
+                  v-for="row in placeDetailStatRows(placeDetail)"
+                  :key="row.key"
+                  class="metric-link"
+                  :href="searchHref(row.query)"
+                  @click="openSearchLink($event, row.query)"
+                >
+                  <strong>{{ row.count }}</strong>
+                  <span>{{ row.label }}</span>
+                </a>
+              </div>
+            </section>
+          </template>
         </section>
 
         <section v-else-if="active === 'Map'" class="panel">
@@ -10985,6 +11300,10 @@ onBeforeUnmount(() => {
           <p>{{ activePlugin?.description ?? "Plugin surface reserved for the next MVP phase." }}</p>
           <p class="muted">Backend manifest is loaded; feature execution is intentionally stubbed.</p>
         </section>
+        <div v-if="loading" class="bottom-loading-status" role="status" aria-live="polite">
+          <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+          <span>Loading latest Cartolensia data...</span>
+        </div>
       </section>
     </div>
     <div v-if="galleryOpen && galleryCurrent" class="gallery-overlay" role="dialog" aria-modal="true">

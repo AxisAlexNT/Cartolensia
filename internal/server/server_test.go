@@ -864,6 +864,11 @@ func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 		t.Fatalf("place hierarchy status %d body %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/places/"+createdPlace.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Fixture Lab"`) || !strings.Contains(rec.Body.String(), `"stats"`) || !strings.Contains(rec.Body.String(), `"search_queries"`) {
+		t.Fatalf("place detail status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/places/reverse-geocode/start", strings.NewReader(`{"limit":10,"batch_size":5,"online":false}`)))
 	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"kind":"reverse_geocode"`) || !strings.Contains(rec.Body.String(), `"online":false`) {
 		t.Fatalf("reverse geocode start status %d body %s", rec.Code, rec.Body.String())

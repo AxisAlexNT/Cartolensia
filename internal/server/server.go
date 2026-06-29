@@ -2475,21 +2475,30 @@ func (s *Server) handlePlaceByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.Method {
-	case http.MethodPatch:
-		places, err := s.deps.Store.ListPlaces(r.Context(), catalog.PlaceQuery{Limit: 10000})
+	case http.MethodGet:
+		place, err := s.lookupPlaceByID(r.Context(), placeID)
+		if err != nil {
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		detail, err := s.placeDetail(r.Context(), place)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		var existing catalog.PlaceCacheEntry
-		for _, place := range places {
-			if place.ID == placeID {
-				existing = place
-				break
+		writeJSON(w, http.StatusOK, detail)
+	case http.MethodPatch:
+		existing, err := s.lookupPlaceByID(r.Context(), placeID)
+		if err != nil {
+			if errors.Is(err, catalog.ErrNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
 			}
-		}
-		if existing.ID == "" {
-			writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		var patch catalog.PlaceCacheEntry
@@ -2518,6 +2527,127 @@ func (s *Server) handlePlaceByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func (s *Server) lookupPlaceByID(ctx context.Context, placeID string) (catalog.PlaceCacheEntry, error) {
+	const pageSize = 10000
+	for offset := 0; ; offset += pageSize {
+		places, err := s.deps.Store.ListPlaces(ctx, catalog.PlaceQuery{Limit: pageSize, Offset: offset})
+		if err != nil {
+			return catalog.PlaceCacheEntry{}, err
+		}
+		for _, place := range places {
+			if place.ID == placeID {
+				return place, nil
+			}
+		}
+		if len(places) < pageSize {
+			break
+		}
+	}
+	return catalog.PlaceCacheEntry{}, catalog.ErrNotFound
+}
+
+func (s *Server) placeDetail(ctx context.Context, place catalog.PlaceCacheEntry) (map[string]any, error) {
+	const statsLimit = 10000
+	radiusM := runtimeIntSetting("search.reverse_geocode_radius_m", 100)
+	bbox := normalizedPlaceDetailBBox(place, radiusM)
+	geos, err := s.deps.Store.QueryAssetGeo(ctx, catalog.GeoQuery{BBox: &bbox, Limit: statsLimit + 1})
+	if err != nil {
+		return nil, err
+	}
+	capped := len(geos) > statsLimit
+	if capped {
+		geos = geos[:statsLimit]
+	}
+	stats := map[string]any{
+		"total_assets": len(geos),
+		"photos":       0,
+		"videos":       0,
+		"audio":        0,
+		"documents":    0,
+		"tracks":       0,
+		"other":        0,
+		"capped":       capped,
+	}
+	for _, geo := range geos {
+		switch geo.Asset.MediaKind {
+		case "photo":
+			stats["photos"] = stats["photos"].(int) + 1
+		case "video":
+			stats["videos"] = stats["videos"].(int) + 1
+		case "audio":
+			stats["audio"] = stats["audio"].(int) + 1
+		case "document":
+			stats["documents"] = stats["documents"].(int) + 1
+		case "track":
+			stats["tracks"] = stats["tracks"].(int) + 1
+		default:
+			stats["other"] = stats["other"].(int) + 1
+		}
+	}
+	return map[string]any{
+		"place":          place,
+		"level":          placeCacheLevel(place),
+		"label":          placeCacheLabel(place),
+		"hierarchy":      placeCacheHierarchy(place),
+		"radius_m":       radiusM,
+		"stats":          stats,
+		"search_queries": placeDetailSearchQueries(place),
+		"note":           "Statistics are computed from cached Cartolensia geotags inside the place bbox/radius. Capped results avoid expensive full-archive scans.",
+	}, nil
+}
+
+func normalizedPlaceDetailBBox(place catalog.PlaceCacheEntry, radiusM int) catalog.BBox {
+	bbox := place.BBox
+	if bbox.MaxLat > bbox.MinLat && bbox.MaxLon > bbox.MinLon {
+		return bbox
+	}
+	if radiusM <= 0 {
+		radiusM = 100
+	}
+	latDelta := float64(radiusM) / 111320.0
+	cosLat := math.Cos(place.Lat * math.Pi / 180)
+	if math.Abs(cosLat) < 0.01 {
+		cosLat = 0.01
+	}
+	lonDelta := float64(radiusM) / (111320.0 * math.Abs(cosLat))
+	return catalog.BBox{
+		MinLon: clampFloat(place.Lon-lonDelta, -180, 180),
+		MinLat: clampFloat(place.Lat-latDelta, -90, 90),
+		MaxLon: clampFloat(place.Lon+lonDelta, -180, 180),
+		MaxLat: clampFloat(place.Lat+latDelta, -90, 90),
+	}
+}
+
+func placeDetailSearchQueries(place catalog.PlaceCacheEntry) map[string]string {
+	base := placeSearchToken(place)
+	return map[string]string{
+		"all":       base,
+		"photos":    base + " kind:photo",
+		"videos":    base + " kind:video",
+		"audio":     base + " kind:audio",
+		"documents": base + " kind:document",
+		"tracks":    base + " kind:track",
+	}
+}
+
+func placeSearchToken(place catalog.PlaceCacheEntry) string {
+	name := firstNonEmpty(place.DisplayName, place.Name, place.City, place.Region, place.Country)
+	if name == "" {
+		return "place:*"
+	}
+	return "place:" + strconv.Quote(name)
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func decodePlacePayload(r *http.Request) (catalog.PlaceCacheEntry, error) {

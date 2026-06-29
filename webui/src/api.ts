@@ -951,6 +951,26 @@ export type PlaceHierarchyResponse = {
   note?: string;
 };
 
+export type PlaceDetailResponse = {
+  place: PlaceCacheEntry;
+  level: string;
+  label: string;
+  hierarchy: string[];
+  radius_m: number;
+  stats: {
+    total_assets: number;
+    photos: number;
+    videos: number;
+    audio: number;
+    documents: number;
+    tracks: number;
+    other: number;
+    capped?: boolean;
+  };
+  search_queries: Record<string, string>;
+  note?: string;
+};
+
 export type SearchResponse = {
   query: string;
   tokens: string[];
@@ -1736,8 +1756,15 @@ export const api = {
       page: response.page ?? { limit, offset, total: 0 }
     })),
   searchPlaces: () => request<SearchPlacesResponse>("/api/v1/search/places"),
-  places: (q = "") =>
-    request<PlacesResponse>(`/api/v1/places${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
+  places: (q = "", limit?: number, offset?: number) => {
+    const query = new URLSearchParams();
+    if (q.trim()) query.set("q", q.trim());
+    if (limit !== undefined) query.set("limit", String(limit));
+    if (offset !== undefined) query.set("offset", String(offset));
+    return request<PlacesResponse>(`/api/v1/places${query.toString() ? `?${query.toString()}` : ""}`);
+  },
+  place: (id: string) =>
+    request<PlaceDetailResponse>(`/api/v1/places/${encodeURIComponent(id)}`),
   placeProviders: () =>
     request<PlaceProvidersResponse>("/api/v1/places/providers").then((response) => ({
       ...response,
