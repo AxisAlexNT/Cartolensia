@@ -5383,3 +5383,53 @@ Safety confirmation:
 - No missing-file marking.
 - No commit or push.
 - Broad production enrichment should use imported local geodata or a self-hosted/operator-approved Nominatim/Pelias/Photon endpoint instead of bulk-calling shared public providers.
+
+## 2026-06-29 Reverse-Geocode Missing Semantics
+
+### Implemented
+
+- Renamed the Tasks page action from `Reverse geocode known locations` to
+  `Reverse geocode all missing`.
+- Renamed the asset detail action from `Refresh place` to
+  `Perform reverse geocode`.
+- Fixed `/api/v1/places/reverse` so it is now append-only and deduped:
+  - local `place_cache` bbox/nearby matches are returned first;
+  - if the coordinate does not already have a provider-backed reverse-geocode
+    row, Cartolensia calls the configured online provider when enabled;
+  - the provider result is upserted into `place_cache` and merged with the
+    existing local matches;
+  - existing place matches are not removed;
+  - repeated clicks do not create duplicate provider rows once the provider
+    cache entry exists.
+- Fixed the batch `reverse_geocode` worker so `only_missing=true` means
+  "missing a provider-backed reverse-geocode cache row", not merely "missing any
+  broad local seed match." This lets broad seed places such as country/city
+  rows remain visible while still filling detailed OSM/Nominatim-style rows.
+- Fixed the asset detail frontend so omitted runtime settings no longer turn
+  online reverse geocoding off accidentally.
+
+### Validation
+
+- `gofmt -w internal/server/reverse_geocode.go internal/server/server.go internal/server/server_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./cmd/cartolensia`
+- `npm --prefix webui run build`
+- Built `/tmp/cartolensia-reverse-geocode-missing` and deployed it plus the
+  rebuilt WebUI to `rjazhenka`.
+- Remote `systemctl is-active cartolensia` returned `active` and
+  `https://127.0.0.1:18443/api/v1/health` returned `ok`.
+- Remote authenticated `/api/v1/places/providers` still reports
+  `mode=online_cache`, `online_enabled=true`, active provider `nominatim`, URL
+  `https://nominatim.openstreetmap.org`, and minimum interval `1100 ms`.
+- Remote WebUI bundle contains `Reverse geocode all missing` and
+  `Perform reverse geocode`.
+- Remote authenticated cache-only `/api/v1/places/reverse` test for a Yerevan
+  coordinate returned `cached=true`, `source=local_place_cache`, two cached
+  places, and the note that no online geocoder was called.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.

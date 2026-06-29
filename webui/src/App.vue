@@ -4419,7 +4419,8 @@ async function refreshAssetPlaces() {
     error.value = "This asset has no known coordinate to reverse-geocode.";
     return;
   }
-  const online = Boolean(settings.value?.runtime_settings?.["search.online_geocoding"]);
+  const configuredOnline = settings.value?.runtime_settings?.["search.online_geocoding"];
+  const online = configuredOnline === undefined ? true : Boolean(configuredOnline);
   await api.reversePlace(coordinate.lat, coordinate.lon, online);
   assetDetail.value = await api.asset(detail.asset.id);
 }
@@ -7580,7 +7581,7 @@ onBeforeUnmount(() => {
               <h3><i class="bi bi-geo-alt" aria-hidden="true"></i> Places and Coordinates</h3>
               <button type="button" class="btn btn-sm btn-outline-primary" @click="refreshAssetPlaces">
                 <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
-                Refresh place
+                Perform reverse geocode
               </button>
             </div>
             <p class="muted">
@@ -10146,7 +10147,7 @@ onBeforeUnmount(() => {
               <div class="button-stack">
                 <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('hash')">Hash unhashed</button>
                 <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('metadata')">Enrich metadata</button>
-                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('reverse_geocode')">Reverse geocode known locations</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('reverse_geocode')">Reverse geocode all missing</button>
                 <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('previews')">Generate previews</button>
               </div>
             </article>

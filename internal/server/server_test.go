@@ -1693,6 +1693,25 @@ func TestReverseGeocoderProvidersAndLocale(t *testing.T) {
 	}
 }
 
+func TestReverseGeocodeCacheSatisfiedOnlyByProviderBackedEntries(t *testing.T) {
+	localSeed := catalog.PlaceCacheEntry{
+		Provider: "local",
+		Source:   "built_in_seed",
+		Name:     "Armenia",
+	}
+	if reverseGeocodeCacheSatisfied([]catalog.PlaceCacheEntry{localSeed}) {
+		t.Fatalf("coarse local seed should not satisfy missing reverse geocode")
+	}
+	nominatim := catalog.PlaceCacheEntry{
+		Provider: "nominatim:ru,en",
+		Source:   "online_user_triggered_cache",
+		Name:     "Kalinina Street",
+	}
+	if !reverseGeocodeCacheSatisfied([]catalog.PlaceCacheEntry{localSeed, nominatim}) {
+		t.Fatalf("provider-backed reverse geocode should satisfy missing reverse geocode")
+	}
+}
+
 func withRuntimeSettings(t *testing.T, values map[string]any) {
 	t.Helper()
 	runtimeSettings.Lock()

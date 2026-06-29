@@ -329,7 +329,7 @@ Asset detail exposes OCR full text, transcripts, audio features, video frame cap
 - Normal discovery/indexing jobs use `max_files=-1` and `max_bytes=-1` as explicit unlimited sentinels. Real archive storage still requires a named storage and non-root prefix; omitted/zero limits remain invalid for guarded real-archive flows.
 - Dry-run/preview discovery keeps conservative caps and reports that those caps are preview-only.
 - Track rendering now has a shared OpenLayers style path for direction arrows. Runtime setting `gps.track_arrow_interval_m` controls spacing, defaults to `500`, and `0` disables arrows.
-- Reverse geocoding is cache-first. `/api/v1/places/reverse` resolves coordinates against durable `place_cache` bounding boxes before using the configured online provider for cache misses. Online cache-fill is enabled by default, rate-limited, and every provider result is persisted back to `place_cache` for offline reuse.
+- Reverse geocoding is cache-first. `/api/v1/places/reverse` resolves coordinates against durable `place_cache` bounding boxes and nearby centroids, then uses the configured online provider only when no provider-backed reverse-geocode row already covers the coordinate. Broad local seed matches are kept and returned, but they do not block one unique online cache-fill result. Online cache-fill is enabled by default, rate-limited, and every provider result is persisted back to `place_cache` for offline reuse.
 - The current map clustering implementation remains screen-distance based. Persisted zoom-level cluster cache endpoints are still planned; frontend cluster state should continue to replace stale layer data on zoom changes.
 
 ## 2026-06-09 Metadata Context And Timestamp Candidates

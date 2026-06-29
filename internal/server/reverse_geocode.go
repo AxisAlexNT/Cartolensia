@@ -184,8 +184,12 @@ func (s *Server) RunReverseGeocodeJob(ctx context.Context, job *jobs.Job, worker
 			)
 			if len(local) > 0 {
 				matched++
-				processed++
-			} else if payload.Online && runtimeBoolSetting("search.online_geocoding", true) {
+			}
+			needsOnline := payload.Online && runtimeBoolSetting("search.online_geocoding", true)
+			if payload.OnlyMissing && reverseGeocodeCacheSatisfied(local) {
+				needsOnline = false
+			}
+			if needsOnline {
 				place, err := s.reverseGeocodeOnline(ctx, geo.Geo.Lat, geo.Geo.Lon)
 				if err != nil {
 					failed++

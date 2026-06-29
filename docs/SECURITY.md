@@ -119,7 +119,7 @@ NFS, or mounted object-storage view is offline. This health state is diagnostic
 only. It must not trigger metadata deletion, missing-file marking, cache purge,
 or album/search removal by itself.
 
-Universal search uses PostgreSQL/local metadata by default. Place-name matching reads the durable Cartolensia `place_cache`. Reverse geocoding is cache-first and online cache-fill is enabled by default for missing coordinates; provider calls are rate-limited and stored locally before reuse.
+Universal search uses PostgreSQL/local metadata by default. Place-name matching reads the durable Cartolensia `place_cache`. Reverse geocoding is cache-first and online cache-fill is enabled by default for coordinates missing a provider-backed cache row; provider calls are rate-limited and stored locally before reuse.
 
 OCR is a manual AI job/action. OCR text and bounding boxes are metadata records and must not write temporary inputs, OCR cache files, or derived text sidecars into original storage. Missing OCR engines/language packs must be reported as job/worker errors rather than silently falling back to remote services.
 
@@ -240,7 +240,7 @@ The real-peek archive at `/mnt/Models/rclone` remains strict read-only. Do not u
 - Dry-run/preview caps are intentionally retained and labeled as preview-only so operators can inspect a sample without accidentally starting a full scan.
 - The full `Cartolensia-photos` run used `rclone_peek` in `strict_read_only` mode and did not run missing-file marking.
 - Track arrows and reverse-geocoding changes are metadata/UI operations only. They do not modify tracks, photos, or original geotags.
-- `/api/v1/places/reverse` is cache-first. Missing coordinates use the configured online provider when runtime setting `search.online_geocoding=true`; automatic provider results are cached locally and broad public-provider bulk enrichment remains disallowed.
+- `/api/v1/places/reverse` is cache-first. Coordinates that only match broad local seeds may still use the configured online provider when runtime setting `search.online_geocoding=true`; provider results are cached locally, deduped, and broad public-provider bulk enrichment remains disallowed.
 - Component downloads remain provenance-gated. Even with operator approval, the Component Manager refuses silent downloads without a reviewed source URL and records an actionable failed job instead.
 
 ## 2026-06-09 Context/Search Safety Notes

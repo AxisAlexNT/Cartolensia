@@ -714,6 +714,7 @@ Reverse geocoding is local-first and online cache-fill is enabled by default:
 - `GET /api/v1/places/reverse?lat=<lat>&lon=<lon>` searches cached place bounding boxes.
 - `POST /api/v1/places/reverse` accepts JSON with `lat`, `lon`, and optional `online`.
 - Online lookup uses runtime setting `search.online_geocoding=true`, which is the default. Requests that omit `online` use this runtime default; callers may still pass `online=false` for cache-only lookup.
+- The lookup is deduped and append-only. Cartolensia returns any broad local cache matches first, then calls the configured provider only if there is no provider-backed reverse-geocode row for the coordinate. The provider result is upserted into `place_cache` and merged with previous local matches; existing cached places are not removed.
 - Online provider choices are `nominatim`, `nominatim_compatible`, `photon`, `pelias`, and `google`.
 - `GET /api/v1/places/providers` shows provider readiness, locale, policy notes, URL, and whether the Google API key is configured without returning the secret.
 - Provider locale is configured with `search.geocoder_locale` and is sent as `Accept-Language`, `accept-language`, or provider-specific language parameters where supported. Cached rows store the provider and locale, for example `nominatim:ru,en`.

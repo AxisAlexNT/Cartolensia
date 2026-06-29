@@ -2374,34 +2374,43 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 		placesForPoint(req.Lat, req.Lon, placeEntries),
 		nearbyPlacesForPoint(req.Lat, req.Lon, placeEntries, req.RadiusM),
 	)
-	if len(places) > 0 {
+	onlineEnabled := onlineRequested && runtimeBoolSetting("search.online_geocoding", true)
+	if !onlineEnabled || reverseGeocodeCacheSatisfied(places) {
+		note := "Matched existing cached place bbox and/or nearby cached place centroid; no online geocoder was called."
+		if len(places) == 0 {
+			note = "No local cached place contains this coordinate. Online reverse geocoding is disabled for this request or runtime."
+		}
+		if onlineEnabled && reverseGeocodeCacheSatisfied(places) {
+			note = "Matched an existing provider-backed reverse-geocode cache entry; no duplicate online geocoder call was made."
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"lat":      req.Lat,
 			"lon":      req.Lon,
 			"source":   "local_place_cache",
-			"cached":   true,
+			"cached":   len(places) > 0,
 			"places":   places,
 			"radius_m": req.RadiusM,
-			"note":     "Matched existing cached place bbox and/or nearby cached place centroid; no online geocoder was called.",
+			"note":     note,
 			"provider": "local_place_cache",
-		})
-		return
-	}
-	if !onlineRequested || !runtimeBoolSetting("search.online_geocoding", true) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"lat":      req.Lat,
-			"lon":      req.Lon,
-			"source":   "local_place_cache",
-			"cached":   false,
-			"places":   []catalog.PlaceCacheEntry{},
-			"radius_m": req.RadiusM,
-			"provider": runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
-			"note":     "No local cached place contains this coordinate. Online reverse geocoding is disabled for this request or runtime.",
 		})
 		return
 	}
 	place, err := s.reverseGeocodeOnline(r.Context(), req.Lat, req.Lon)
 	if err != nil {
+		if len(places) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"lat":          req.Lat,
+				"lon":          req.Lon,
+				"source":       "local_place_cache",
+				"cached":       true,
+				"places":       places,
+				"radius_m":     req.RadiusM,
+				"provider":     runtimeStringSetting("search.geocoder_provider", "local_place_cache"),
+				"online_error": err.Error(),
+				"note":         "Local cache matched this coordinate, but the configured online geocoder failed while trying to enrich it.",
+			})
+			return
+		}
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -2415,10 +2424,10 @@ func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 		"lon":      req.Lon,
 		"source":   created.Source,
 		"cached":   true,
-		"places":   []catalog.PlaceCacheEntry{created},
+		"places":   mergePlaceMatches(places, []catalog.PlaceCacheEntry{created}),
 		"radius_m": req.RadiusM,
 		"provider": created.Provider,
-		"note":     "User-triggered reverse geocode cached in place_cache.",
+		"note":     "Cache-first reverse geocode appended a unique provider-backed place_cache entry when missing.",
 	})
 }
 
@@ -9048,6 +9057,33 @@ func mergePlaceMatches(groups ...[]catalog.PlaceCacheEntry) []catalog.PlaceCache
 		}
 	}
 	return out
+}
+
+func reverseGeocodeCacheSatisfied(places []catalog.PlaceCacheEntry) bool {
+	for _, place := range places {
+		if isProviderBackedReverseGeocode(place) {
+			return true
+		}
+	}
+	return false
+}
+
+func isProviderBackedReverseGeocode(place catalog.PlaceCacheEntry) bool {
+	provider := strings.ToLower(strings.TrimSpace(place.Provider))
+	if provider != "" {
+		provider = strings.Split(provider, ":")[0]
+		provider = normalizeGeocoderProvider(provider)
+	}
+	source := strings.ToLower(strings.TrimSpace(place.Source))
+	if strings.Contains(source, "online") || strings.Contains(source, "geocoder") || strings.Contains(source, "nominatim") {
+		return true
+	}
+	switch provider {
+	case "nominatim", "nominatim_compatible", "photon", "pelias", "google":
+		return true
+	default:
+		return false
+	}
 }
 
 func placeWithDistance(place catalog.PlaceCacheEntry, distanceM float64, matchKind string) catalog.PlaceCacheEntry {
