@@ -189,7 +189,7 @@ The WebUI is Vue 3 + TypeScript + Vite with no CDN resources. It contains:
 - Storages page;
 - Plugins page and plugin detail health/status surface;
 - Stats page;
-- Settings page with categorized tabs for effective config, runtime preferences, Search/Places cache-only geocoder controls, restart-required YAML settings, schema-based per-plugin settings, cache-scoped DB metadata export, password rotation, and API token management;
+- Settings page with categorized tabs for effective config, runtime preferences, Search/Places cache-first reverse-geocoder controls for local cache, Nominatim-compatible, Photon, Pelias, and opt-in Google providers, restart-required YAML settings, schema-based per-plugin settings, cache-scoped DB metadata export, password rotation, and API token management;
 - Transcoding page with capability inventory, preset management, auto-selection rule drafts, command-template validation, cache-only job planning, metrics status, and cache-scoped HLS session status;
 - Base AI dashboard with native-vs-Docker worker status, GPU policy, model cards, vector fallback status, and visible scoped action/job results;
 - AI Classification page for AI tag/category browsing, predictions, safety candidates, face detections, and vector text search.

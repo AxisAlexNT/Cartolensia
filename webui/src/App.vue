@@ -53,6 +53,7 @@ import {
   type PlaceCacheEntry,
   type PlaceHierarchyEntry,
   type PlaceHierarchyResponse,
+  type PlaceProvidersResponse,
   type PluginManifest,
   type PreviewCacheEntry,
   type PreviewCacheStats,
@@ -280,6 +281,7 @@ const placesHierarchyLimit = ref(100);
 const placesHierarchyOffset = ref(0);
 const placesHierarchyLoading = ref(false);
 const placesHierarchyMessage = ref("");
+const placeProviders = ref<PlaceProvidersResponse | null>(null);
 const placeDraft = ref<PlaceCacheEntry>({
   name: "",
   display_name: "",
@@ -4268,12 +4270,14 @@ function normalizedPlacePayload(place: PlaceCacheEntry, aliasesText?: string): P
 
 async function refreshPlaceCache() {
   try {
-    const [summary, entries] = await Promise.all([
+    const [summary, entries, providers] = await Promise.all([
       api.searchPlaces(),
-      api.places(placeCacheQuery.value)
+      api.places(placeCacheQuery.value),
+      api.placeProviders()
     ]);
     searchPlaceCache.value = summary;
     editablePlaces.value = asArray(entries.places);
+    placeProviders.value = providers;
     placeCacheMessage.value = "Place cache refreshed.";
   } catch (err) {
     placeCacheMessage.value = err instanceof Error ? err.message : String(err);
@@ -4286,7 +4290,11 @@ async function loadPlacesHierarchy(reset = false) {
   placesHierarchyMessage.value = "";
   try {
     const offset = reset ? 0 : placesHierarchyOffset.value;
-    const payload = await api.placesHierarchy(placesHierarchyQuery.value, placesHierarchyLimit.value, offset);
+    const [payload, providers] = await Promise.all([
+      api.placesHierarchy(placesHierarchyQuery.value, placesHierarchyLimit.value, offset),
+      api.placeProviders()
+    ]);
+    placeProviders.value = providers;
     if (reset || !placesHierarchy.value) {
       placesHierarchy.value = payload;
     } else {
@@ -4636,8 +4644,12 @@ const runtimeSettingTabs: Record<string, RuntimeSettingSpec[]> = {
     { key: "search.default_limit", label: "Default search limit", help: "Bounded result count for broad universal searches.", kind: "number" },
     { key: "search.geocoder_mode", label: "Geocoder mode", help: "cache_only is the current safe default.", kind: "text" },
     { key: "search.online_geocoding", label: "Online geocoding enabled", help: "Currently off by default; provider calls must be user-triggered and cached.", kind: "boolean" },
-    { key: "search.geocoder_provider", label: "Geocoder provider", help: "local_place_cache is active now; Nominatim-compatible providers are user-triggered and cached.", kind: "text" },
-    { key: "search.geocoder_provider_url", label: "Geocoder provider URL", help: "Nominatim-compatible base URL used only for explicit reverse-geocode requests.", kind: "text" }
+    { key: "search.geocoder_provider", label: "Geocoder provider", help: "nominatim, nominatim_compatible, photon, pelias, google, or local_place_cache. Online calls are explicit only.", kind: "text" },
+    { key: "search.geocoder_provider_url", label: "Geocoder provider URL", help: "Provider base URL. Use self-hosted OSM providers for large archives. Google uses its official URL unless overridden.", kind: "text" },
+    { key: "search.geocoder_locale", label: "Geocoder locale", help: "Accept-Language/language hint, e.g. en, ru, hy, zh or comma-preferred locales.", kind: "text" },
+    { key: "search.geocoder_user_agent", label: "Geocoder User-Agent", help: "Required by many OSM providers. Include operator contact in production.", kind: "text" },
+    { key: "search.geocoder_contact_email", label: "Geocoder contact email", help: "Optional Nominatim email parameter.", kind: "text" },
+    { key: "search.geocoder_min_interval_ms", label: "Geocoder minimum interval ms", help: "Rate limit for explicit online reverse-geocode requests. Default 1100 ms.", kind: "number" }
   ],
   transcoding: [
     { key: "transcode.session_ttl", label: "Transcode session TTL", help: "Cleanup age for cache-scoped HLS sessions.", kind: "text" }
@@ -7499,7 +7511,7 @@ onBeforeUnmount(() => {
           <header class="panel-head">
             <div>
               <h2>Places</h2>
-              <span>Cached reverse-geocoding hierarchy from local Cartolensia metadata. No online geocoder is called from this page.</span>
+              <span>Cached reverse-geocoding hierarchy from local Cartolensia metadata. Provider calls are opt-in, locale-aware, and cached.</span>
             </div>
             <button type="button" class="btn btn-outline-primary" :disabled="placesHierarchyLoading" @click="loadPlacesHierarchy(true)">
               Refresh places
@@ -7525,8 +7537,30 @@ onBeforeUnmount(() => {
             <div class="metrics">
               <article><strong>{{ placesHierarchy?.page.total ?? 0 }}</strong><span>Cached place rows</span></article>
               <article><strong>{{ placesHierarchy?.radius_m ?? 100 }} m</strong><span>Nearby-match radius</span></article>
-              <article><strong>{{ placesHierarchy?.provider ?? 'local_place_cache' }}</strong><span>Provider</span></article>
+              <article><strong>{{ placeProviders?.active_provider ?? placesHierarchy?.provider ?? 'local_place_cache' }}</strong><span>Configured provider</span></article>
+              <article><strong>{{ placeProviders?.locale || 'provider default' }}</strong><span>Locale</span></article>
               <article><strong>{{ placesHierarchy?.offline ? 'yes' : 'no' }}</strong><span>Offline cache</span></article>
+            </div>
+          </section>
+          <section v-if="placeProviders" class="settings-form">
+            <h3><i class="bi bi-globe2" aria-hidden="true"></i> Reverse-Geocoding Providers</h3>
+            <p class="muted">{{ placeProviders.cache_policy }} {{ placeProviders.bulk_policy }}</p>
+            <div class="component-grid compact-grid">
+              <article v-for="provider in placeProviders.providers" :key="provider.key" class="component-card">
+                <header>
+                  <strong>{{ provider.name }}</strong>
+                  <span class="status-badge" :class="provider.enabled ? 'ok' : provider.configured ? 'warn' : ''">
+                    {{ provider.enabled ? 'enabled' : provider.configured ? 'configured' : 'available' }}
+                  </span>
+                </header>
+                <p class="muted">{{ provider.policy }}</p>
+                <small v-if="provider.url">{{ provider.url }}</small>
+                <small v-if="provider.license">{{ provider.license }}</small>
+                <small v-if="provider.note">{{ provider.note }}</small>
+                <small v-if="provider.key === 'google'">
+                  API key: {{ provider.secret_configured ? 'configured in environment' : `set ${placeProviders.google_secret_source}` }} · cache terms ack: {{ placeProviders.google_cache_ack ? 'set' : 'not set' }}
+                </small>
+              </article>
             </div>
           </section>
           <section class="settings-form">

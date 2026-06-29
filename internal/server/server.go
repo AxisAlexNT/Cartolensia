@@ -270,6 +270,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/knowledge/llm/status", s.handleKnowledgeLLMStatus)
 	s.mux.HandleFunc("/api/v1/search/places", s.handleSearchPlaces)
 	s.mux.HandleFunc("/api/v1/places/hierarchy", s.handlePlaceHierarchy)
+	s.mux.HandleFunc("/api/v1/places/providers", s.handlePlaceProviders)
 	s.mux.HandleFunc("/api/v1/places", s.handlePlaces)
 	s.mux.HandleFunc("/api/v1/places/reverse", s.handlePlaceReverse)
 	s.mux.HandleFunc("/api/v1/places/", s.handlePlaceByID)
@@ -2202,6 +2203,129 @@ func buildPlaceHierarchyTree(entries []catalog.PlaceHierarchyEntry) []map[string
 	return flatten(root.Children)
 }
 
+var geocoderRateLimiter = struct {
+	sync.Mutex
+	lastCall map[string]time.Time
+}{lastCall: map[string]time.Time{}}
+
+type placeProviderStatus struct {
+	Key              string `json:"key"`
+	Name             string `json:"name"`
+	Kind             string `json:"kind"`
+	Configured       bool   `json:"configured"`
+	Enabled          bool   `json:"enabled"`
+	URL              string `json:"url,omitempty"`
+	Locale           string `json:"locale,omitempty"`
+	License          string `json:"license,omitempty"`
+	Policy           string `json:"policy"`
+	Recommended      bool   `json:"recommended,omitempty"`
+	SecretConfigured bool   `json:"secret_configured,omitempty"`
+	Note             string `json:"note,omitempty"`
+}
+
+func (s *Server) handlePlaceProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	provider := normalizeGeocoderProvider(runtimeStringSetting("search.geocoder_provider", "nominatim"))
+	baseURL := strings.TrimRight(runtimeStringSetting("search.geocoder_provider_url", defaultGeocoderURL(provider)), "/")
+	locale := normalizedGeocoderLocale()
+	onlineEnabled := runtimeBoolSetting("search.online_geocoding", false)
+	userAgent := strings.TrimSpace(runtimeStringSetting("search.geocoder_user_agent", "Cartolensia/1.0 self-hosted user-triggered reverse geocoder"))
+	minInterval := runtimeIntSetting("search.geocoder_min_interval_ms", 1100)
+	googleConfigured := strings.TrimSpace(os.Getenv("CARTOLENSIA_GOOGLE_GEOCODING_API_KEY")) != ""
+	googleCacheAcknowledged := googleGeocodingCacheAcknowledged()
+	providers := []placeProviderStatus{
+		{
+			Key:         "local_place_cache",
+			Name:        "Local Cartolensia place cache",
+			Kind:        "local_cache",
+			Configured:  true,
+			Enabled:     true,
+			Locale:      locale,
+			Policy:      "Always available offline. No network calls.",
+			Recommended: true,
+			Note:        "Use this as the default lookup path. Online providers only add cache rows when explicitly requested.",
+		},
+		{
+			Key:         "nominatim",
+			Name:        "OpenStreetMap Nominatim",
+			Kind:        "osm_nominatim",
+			Configured:  provider == "nominatim" && baseURL != "",
+			Enabled:     onlineEnabled && provider == "nominatim",
+			URL:         baseURL,
+			Locale:      locale,
+			License:     "OpenStreetMap/Open Database License data; provider terms apply",
+			Policy:      "User-triggered only, cached, rate-limited. Public OSMF Nominatim is not for bulk reverse-geocoding.",
+			Recommended: true,
+			Note:        fmt.Sprintf("User-Agent configured: %t; minimum interval: %d ms.", userAgent != "", minInterval),
+		},
+		{
+			Key:         "nominatim_compatible",
+			Name:        "Self-hosted Nominatim-compatible endpoint",
+			Kind:        "osm_nominatim",
+			Configured:  provider == "nominatim_compatible" && baseURL != "",
+			Enabled:     onlineEnabled && provider == "nominatim_compatible",
+			URL:         baseURL,
+			Locale:      locale,
+			License:     "Depends on imported geodata and operator deployment",
+			Policy:      "Recommended for large archives. Cartolensia still caches results and avoids automatic bulk public calls.",
+			Recommended: true,
+		},
+		{
+			Key:         "photon",
+			Name:        "Photon-compatible endpoint",
+			Kind:        "osm_photon",
+			Configured:  provider == "photon" && baseURL != "",
+			Enabled:     onlineEnabled && provider == "photon",
+			URL:         baseURL,
+			Locale:      locale,
+			License:     "Depends on endpoint and OSM-derived data",
+			Policy:      "Use a self-hosted or operator-approved endpoint for large batches. Results are cached for offline reuse.",
+			Recommended: true,
+		},
+		{
+			Key:         "pelias",
+			Name:        "Pelias-compatible endpoint",
+			Kind:        "pelias",
+			Configured:  provider == "pelias" && baseURL != "",
+			Enabled:     onlineEnabled && provider == "pelias",
+			URL:         baseURL,
+			Locale:      locale,
+			License:     "Depends on endpoint and imported geodata",
+			Policy:      "Use a self-hosted or operator-approved endpoint for large archives. Results are cached for offline reuse.",
+			Recommended: true,
+		},
+		{
+			Key:              "google",
+			Name:             "Google Geocoding API",
+			Kind:             "google_geocoding",
+			Configured:       provider == "google" && googleConfigured,
+			Enabled:          onlineEnabled && provider == "google" && googleConfigured && googleCacheAcknowledged,
+			URL:              "https://maps.googleapis.com/maps/api/geocode/json",
+			Locale:           locale,
+			License:          "Google Maps Platform terms apply",
+			Policy:           "Opt-in only. API key is read from CARTOLENSIA_GOOGLE_GEOCODING_API_KEY and never returned by the API. Because Google restricts caching/storage, Cartolensia requires CARTOLENSIA_GOOGLE_GEOCODING_CACHE_ACK=I_ACCEPT_GOOGLE_TERMS before caching Google reverse-geocode rows.",
+			SecretConfigured: googleConfigured,
+			Note:             "Prefer self-hosted OSM providers for large offline archives. Google place IDs may be stored indefinitely; broader result storage is terms-bound.",
+		},
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":                 runtimeStringSetting("search.geocoder_mode", "cache_only"),
+		"online_enabled":       onlineEnabled,
+		"active_provider":      provider,
+		"active_provider_url":  baseURL,
+		"locale":               locale,
+		"min_interval_ms":      minInterval,
+		"providers":            providers,
+		"cache_policy":         "Cartolensia always checks local place_cache first and only calls online geocoders from explicit user-triggered reverse-geocode actions.",
+		"bulk_policy":          "Do not bulk-call public geocoders. For large libraries, import local geodata or use a self-hosted Nominatim/Pelias/Photon endpoint.",
+		"google_secret_source": "CARTOLENSIA_GOOGLE_GEOCODING_API_KEY",
+		"google_cache_ack":     googleCacheAcknowledged,
+	})
+}
+
 func (s *Server) handlePlaceReverse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -2470,15 +2594,120 @@ func mergePlacePatch(existing, patch catalog.PlaceCacheEntry) catalog.PlaceCache
 }
 
 func (s *Server) reverseGeocodeOnline(ctx context.Context, lat, lon float64) (catalog.PlaceCacheEntry, error) {
-	provider := strings.TrimSpace(runtimeStringSetting("search.geocoder_provider", "nominatim"))
-	if provider == "" || provider == "local_place_cache" || provider == "none" {
-		provider = "nominatim"
+	provider := normalizeGeocoderProvider(runtimeStringSetting("search.geocoder_provider", "nominatim"))
+	if provider == "local_place_cache" || provider == "none" {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("select an online reverse-geocoding provider before requesting online lookup")
 	}
-	baseURL := strings.TrimRight(runtimeStringSetting("search.geocoder_provider_url", "https://nominatim.openstreetmap.org"), "/")
+	baseURL := strings.TrimRight(runtimeStringSetting("search.geocoder_provider_url", defaultGeocoderURL(provider)), "/")
 	if baseURL == "" {
+		baseURL = defaultGeocoderURL(provider)
+	}
+	if baseURL == "" && provider != "google" {
 		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder provider URL is empty")
 	}
-	endpoint, err := url.Parse(baseURL + "/reverse")
+	locale := normalizedGeocoderLocale()
+	minInterval := runtimeIntSetting("search.geocoder_min_interval_ms", 1100)
+	if minInterval < 0 {
+		minInterval = 0
+	}
+	switch provider {
+	case "nominatim", "nominatim_compatible":
+		if err := waitGeocoderRateLimit(ctx, provider+"|"+baseURL, time.Duration(minInterval)*time.Millisecond); err != nil {
+			return catalog.PlaceCacheEntry{}, err
+		}
+		return s.reverseGeocodeNominatim(ctx, provider, baseURL, lat, lon, locale)
+	case "photon":
+		if err := waitGeocoderRateLimit(ctx, provider+"|"+baseURL, time.Duration(minInterval)*time.Millisecond); err != nil {
+			return catalog.PlaceCacheEntry{}, err
+		}
+		return s.reverseGeocodePhoton(ctx, provider, baseURL, lat, lon, locale)
+	case "pelias":
+		if err := waitGeocoderRateLimit(ctx, provider+"|"+baseURL, time.Duration(minInterval)*time.Millisecond); err != nil {
+			return catalog.PlaceCacheEntry{}, err
+		}
+		return s.reverseGeocodePelias(ctx, provider, baseURL, lat, lon, locale)
+	case "google":
+		if err := waitGeocoderRateLimit(ctx, provider, time.Duration(minInterval)*time.Millisecond); err != nil {
+			return catalog.PlaceCacheEntry{}, err
+		}
+		return s.reverseGeocodeGoogle(ctx, lat, lon, locale)
+	default:
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("unsupported reverse-geocoding provider %q", provider)
+	}
+}
+
+func normalizeGeocoderProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "osm", "openstreetmap", "nominatim":
+		return "nominatim"
+	case "local", "cache", "local_place_cache", "none":
+		return "local_place_cache"
+	case "nominatim-compatible", "nominatim_compatible", "self_hosted_nominatim":
+		return "nominatim_compatible"
+	case "photon", "photon_compatible", "komoot_photon":
+		return "photon"
+	case "pelias", "pelias_compatible":
+		return "pelias"
+	case "google", "google_geocoding", "google_maps":
+		return "google"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
+
+func defaultGeocoderURL(provider string) string {
+	switch normalizeGeocoderProvider(provider) {
+	case "nominatim", "nominatim_compatible":
+		return "https://nominatim.openstreetmap.org"
+	case "google":
+		return "https://maps.googleapis.com/maps/api/geocode/json"
+	default:
+		return ""
+	}
+}
+
+func normalizedGeocoderLocale() string {
+	locale := strings.TrimSpace(runtimeStringSetting("search.geocoder_locale", ""))
+	if locale == "" || strings.EqualFold(locale, "auto") {
+		return ""
+	}
+	return locale
+}
+
+func geocoderProviderWithLocale(provider, locale string) string {
+	provider = normalizeGeocoderProvider(provider)
+	if locale == "" {
+		return provider
+	}
+	return provider + ":" + locale
+}
+
+func waitGeocoderRateLimit(ctx context.Context, key string, interval time.Duration) error {
+	if interval <= 0 {
+		return nil
+	}
+	geocoderRateLimiter.Lock()
+	defer geocoderRateLimiter.Unlock()
+	last := geocoderRateLimiter.lastCall[key]
+	delay := interval - time.Since(last)
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		geocoderRateLimiter.Unlock()
+		select {
+		case <-ctx.Done():
+			geocoderRateLimiter.Lock()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		geocoderRateLimiter.Lock()
+	}
+	geocoderRateLimiter.lastCall[key] = time.Now()
+	return nil
+}
+
+func (s *Server) reverseGeocodeNominatim(ctx context.Context, provider, baseURL string, lat, lon float64, locale string) (catalog.PlaceCacheEntry, error) {
+	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + "/reverse")
 	if err != nil {
 		return catalog.PlaceCacheEntry{}, err
 	}
@@ -2488,12 +2717,18 @@ func (s *Server) reverseGeocodeOnline(ctx context.Context, lat, lon float64) (ca
 	query.Set("lon", strconv.FormatFloat(lon, 'f', 7, 64))
 	query.Set("addressdetails", "1")
 	query.Set("extratags", "1")
+	if locale != "" {
+		query.Set("accept-language", locale)
+	}
+	if email := strings.TrimSpace(runtimeStringSetting("search.geocoder_contact_email", "")); email != "" {
+		query.Set("email", email)
+	}
 	endpoint.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	req, cancel, err := geocoderRequest(ctx, endpoint.String(), locale)
 	if err != nil {
 		return catalog.PlaceCacheEntry{}, err
 	}
-	req.Header.Set("User-Agent", "Cartolensia/1.0 local user-triggered geocoder")
+	defer cancel()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return catalog.PlaceCacheEntry{}, err
@@ -2547,7 +2782,7 @@ func (s *Server) reverseGeocodeOnline(ctx context.Context, lat, lon float64) (ca
 		Name:           name,
 		NormalizedName: strings.Join(strings.Fields(strings.ToLower(name)), " "),
 		Aliases:        aliases,
-		Provider:       provider,
+		Provider:       geocoderProviderWithLocale(provider, locale),
 		DisplayName:    data.DisplayName,
 		Country:        country,
 		Region:         region,
@@ -2558,12 +2793,326 @@ func (s *Server) reverseGeocodeOnline(ctx context.Context, lat, lon float64) (ca
 		BBox:           bbox,
 		Source:         "online_user_triggered_cache",
 		Metadata: map[string]any{
-			"place_id": data.PlaceID,
-			"osm_type": data.OSMType,
-			"osm_id":   data.OSMID,
-			"policy":   "user-triggered online reverse geocode; cached for offline reuse",
+			"provider":   provider,
+			"locale":     locale,
+			"place_id":   data.PlaceID,
+			"osm_type":   data.OSMType,
+			"osm_id":     data.OSMID,
+			"policy":     "user-triggered online reverse geocode; cached for offline reuse; no automatic bulk public geocoder calls",
+			"source_url": strings.TrimRight(baseURL, "/"),
 		},
 	})
+}
+
+func (s *Server) reverseGeocodePhoton(ctx context.Context, provider, baseURL string, lat, lon float64, locale string) (catalog.PlaceCacheEntry, error) {
+	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + "/reverse")
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	query := endpoint.Query()
+	query.Set("lat", strconv.FormatFloat(lat, 'f', 7, 64))
+	query.Set("lon", strconv.FormatFloat(lon, 'f', 7, 64))
+	if locale != "" {
+		query.Set("lang", firstLocaleToken(locale))
+	}
+	endpoint.RawQuery = query.Encode()
+	req, cancel, err := geocoderRequest(ctx, endpoint.String(), locale)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder returned HTTP %d", resp.StatusCode)
+	}
+	var data struct {
+		Features []struct {
+			Properties map[string]any `json:"properties"`
+			BBox       []float64      `json:"bbox"`
+			Geometry   struct {
+				Coordinates []float64 `json:"coordinates"`
+			} `json:"geometry"`
+		} `json:"features"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&data); err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	if len(data.Features) == 0 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder returned no features")
+	}
+	props := data.Features[0].Properties
+	return normalizeFeaturePlace(provider, strings.TrimRight(baseURL, "/"), locale, lat, lon, props, data.Features[0].BBox, data.Features[0].Geometry.Coordinates)
+}
+
+func (s *Server) reverseGeocodePelias(ctx context.Context, provider, baseURL string, lat, lon float64, locale string) (catalog.PlaceCacheEntry, error) {
+	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + "/v1/reverse")
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	query := endpoint.Query()
+	query.Set("point.lat", strconv.FormatFloat(lat, 'f', 7, 64))
+	query.Set("point.lon", strconv.FormatFloat(lon, 'f', 7, 64))
+	if locale != "" {
+		query.Set("lang", firstLocaleToken(locale))
+	}
+	endpoint.RawQuery = query.Encode()
+	req, cancel, err := geocoderRequest(ctx, endpoint.String(), locale)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder returned HTTP %d", resp.StatusCode)
+	}
+	var data struct {
+		Features []struct {
+			Properties map[string]any `json:"properties"`
+			BBox       []float64      `json:"bbox"`
+			Geometry   struct {
+				Coordinates []float64 `json:"coordinates"`
+			} `json:"geometry"`
+		} `json:"features"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&data); err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	if len(data.Features) == 0 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("geocoder returned no features")
+	}
+	props := data.Features[0].Properties
+	return normalizeFeaturePlace(provider, strings.TrimRight(baseURL, "/"), locale, lat, lon, props, data.Features[0].BBox, data.Features[0].Geometry.Coordinates)
+}
+
+func (s *Server) reverseGeocodeGoogle(ctx context.Context, lat, lon float64, locale string) (catalog.PlaceCacheEntry, error) {
+	apiKey := strings.TrimSpace(os.Getenv("CARTOLENSIA_GOOGLE_GEOCODING_API_KEY"))
+	if apiKey == "" {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("google geocoding selected but CARTOLENSIA_GOOGLE_GEOCODING_API_KEY is not configured")
+	}
+	if !googleGeocodingCacheAcknowledged() {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("google geocoding results are not cached by default; review Google Maps Platform terms and set CARTOLENSIA_GOOGLE_GEOCODING_CACHE_ACK=I_ACCEPT_GOOGLE_TERMS to enable this provider")
+	}
+	baseURL := strings.TrimSpace(runtimeStringSetting("search.geocoder_provider_url", defaultGeocoderURL("google")))
+	if baseURL == "" || strings.Contains(baseURL, "nominatim.openstreetmap.org") {
+		baseURL = defaultGeocoderURL("google")
+	}
+	endpoint, err := url.Parse(baseURL)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	query := endpoint.Query()
+	query.Set("latlng", strconv.FormatFloat(lat, 'f', 7, 64)+","+strconv.FormatFloat(lon, 'f', 7, 64))
+	query.Set("key", apiKey)
+	if locale != "" {
+		query.Set("language", firstLocaleToken(locale))
+	}
+	endpoint.RawQuery = query.Encode()
+	req, cancel, err := geocoderRequest(ctx, endpoint.String(), locale)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("google geocoder returned HTTP %d", resp.StatusCode)
+	}
+	var data struct {
+		Status       string `json:"status"`
+		ErrorMessage string `json:"error_message"`
+		Results      []struct {
+			FormattedAddress string   `json:"formatted_address"`
+			PlaceID          string   `json:"place_id"`
+			Types            []string `json:"types"`
+			Geometry         struct {
+				Location struct {
+					Lat float64 `json:"lat"`
+					Lng float64 `json:"lng"`
+				} `json:"location"`
+				Viewport struct {
+					Northeast struct {
+						Lat float64 `json:"lat"`
+						Lng float64 `json:"lng"`
+					} `json:"northeast"`
+					Southwest struct {
+						Lat float64 `json:"lat"`
+						Lng float64 `json:"lng"`
+					} `json:"southwest"`
+				} `json:"viewport"`
+			} `json:"geometry"`
+			AddressComponents []struct {
+				LongName  string   `json:"long_name"`
+				ShortName string   `json:"short_name"`
+				Types     []string `json:"types"`
+			} `json:"address_components"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&data); err != nil {
+		return catalog.PlaceCacheEntry{}, err
+	}
+	if data.Status != "" && data.Status != "OK" {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("google geocoder returned %s: %s", data.Status, data.ErrorMessage)
+	}
+	if len(data.Results) == 0 {
+		return catalog.PlaceCacheEntry{}, fmt.Errorf("google geocoder returned no results")
+	}
+	result := data.Results[0]
+	components := googleAddressComponents(result.AddressComponents)
+	country := firstNonEmpty(components["country"], components["country_short"])
+	region := firstNonEmpty(components["administrative_area_level_1"], components["administrative_area_level_2"])
+	city := firstNonEmpty(components["locality"], components["postal_town"], components["administrative_area_level_3"])
+	road := firstNonEmpty(components["route"], components["street_address"], components["premise"])
+	name := firstNonEmpty(road, city, region, country, result.FormattedAddress)
+	centerLat := firstNonZero(result.Geometry.Location.Lat, lat)
+	centerLon := firstNonZero(result.Geometry.Location.Lng, lon)
+	bbox := catalog.BBox{MinLon: lon - 0.01, MinLat: lat - 0.01, MaxLon: lon + 0.01, MaxLat: lat + 0.01}
+	if result.Geometry.Viewport.Northeast.Lat != 0 || result.Geometry.Viewport.Southwest.Lat != 0 {
+		bbox = catalog.BBox{
+			MinLon: result.Geometry.Viewport.Southwest.Lng,
+			MinLat: result.Geometry.Viewport.Southwest.Lat,
+			MaxLon: result.Geometry.Viewport.Northeast.Lng,
+			MaxLat: result.Geometry.Viewport.Northeast.Lat,
+		}
+	}
+	return normalizePlacePayload(catalog.PlaceCacheEntry{
+		Name:           name,
+		NormalizedName: strings.Join(strings.Fields(strings.ToLower(name)), " "),
+		Aliases:        uniqueStrings(compactStrings([]string{name, result.FormattedAddress, country, region, city, road})),
+		Provider:       geocoderProviderWithLocale("google", locale),
+		DisplayName:    result.FormattedAddress,
+		Country:        country,
+		Region:         region,
+		City:           city,
+		Road:           road,
+		Lat:            centerLat,
+		Lon:            centerLon,
+		BBox:           bbox,
+		Source:         "online_user_triggered_cache",
+		Metadata: map[string]any{
+			"provider":       "google",
+			"locale":         locale,
+			"place_id":       result.PlaceID,
+			"types":          result.Types,
+			"policy":         "Google Maps Platform terms apply; operator is responsible for API-key use, retention, attribution, and allowed caching.",
+			"api_key_source": "CARTOLENSIA_GOOGLE_GEOCODING_API_KEY",
+		},
+	})
+}
+
+func googleGeocodingCacheAcknowledged() bool {
+	return strings.TrimSpace(os.Getenv("CARTOLENSIA_GOOGLE_GEOCODING_CACHE_ACK")) == "I_ACCEPT_GOOGLE_TERMS"
+}
+
+func geocoderRequest(ctx context.Context, endpoint, locale string) (*http.Request, context.CancelFunc, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	req.Header.Set("User-Agent", firstNonEmpty(runtimeStringSetting("search.geocoder_user_agent", ""), "Cartolensia/1.0 self-hosted user-triggered reverse geocoder"))
+	if locale != "" {
+		req.Header.Set("Accept-Language", locale)
+	}
+	return req, cancel, nil
+}
+
+func firstLocaleToken(locale string) string {
+	token := strings.TrimSpace(strings.Split(locale, ",")[0])
+	if idx := strings.Index(token, ";"); idx >= 0 {
+		token = strings.TrimSpace(token[:idx])
+	}
+	return token
+}
+
+func normalizeFeaturePlace(provider, sourceURL, locale string, lat, lon float64, props map[string]any, bboxValues, coordinates []float64) (catalog.PlaceCacheEntry, error) {
+	country := stringFromAny(firstExisting(props, "country", "country_a"))
+	region := stringFromAny(firstExisting(props, "state", "region", "county", "macroregion"))
+	city := stringFromAny(firstExisting(props, "city", "locality", "localadmin", "borough"))
+	road := stringFromAny(firstExisting(props, "street", "road", "name"))
+	displayName := stringFromAny(firstExisting(props, "label", "display_name", "name"))
+	name := firstNonEmpty(stringFromAny(props["name"]), road, city, region, country, displayName)
+	centerLat := lat
+	centerLon := lon
+	if len(coordinates) >= 2 {
+		centerLon = coordinates[0]
+		centerLat = coordinates[1]
+	}
+	bbox := catalog.BBox{MinLon: lon - 0.01, MinLat: lat - 0.01, MaxLon: lon + 0.01, MaxLat: lat + 0.01}
+	if len(bboxValues) >= 4 {
+		bbox = catalog.BBox{MinLon: bboxValues[0], MinLat: bboxValues[1], MaxLon: bboxValues[2], MaxLat: bboxValues[3]}
+	}
+	return normalizePlacePayload(catalog.PlaceCacheEntry{
+		Name:           name,
+		NormalizedName: strings.Join(strings.Fields(strings.ToLower(name)), " "),
+		Aliases:        uniqueStrings(compactStrings([]string{name, displayName, country, region, city, road})),
+		Provider:       geocoderProviderWithLocale(provider, locale),
+		DisplayName:    firstNonEmpty(displayName, strings.Join(compactStrings([]string{road, city, region, country}), ", ")),
+		Country:        country,
+		Region:         region,
+		City:           city,
+		Road:           road,
+		Lat:            centerLat,
+		Lon:            centerLon,
+		BBox:           bbox,
+		Source:         "online_user_triggered_cache",
+		Metadata: map[string]any{
+			"provider":   provider,
+			"locale":     locale,
+			"source_url": sourceURL,
+			"source_id":  firstExisting(props, "id", "gid", "osm_id"),
+			"layer":      firstExisting(props, "layer", "osm_key", "type"),
+			"policy":     "user-triggered online reverse geocode; cached for offline reuse; use self-hosted/operator-approved endpoints for large archives",
+		},
+	})
+}
+
+func firstExisting(values map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			if strings.TrimSpace(stringFromAny(value)) != "" {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
+func googleAddressComponents(components []struct {
+	LongName  string   `json:"long_name"`
+	ShortName string   `json:"short_name"`
+	Types     []string `json:"types"`
+}) map[string]string {
+	out := map[string]string{}
+	for _, component := range components {
+		for _, typ := range component.Types {
+			if strings.TrimSpace(component.LongName) != "" {
+				out[typ] = component.LongName
+			}
+			if strings.TrimSpace(component.ShortName) != "" {
+				out[typ+"_short"] = component.ShortName
+			}
+		}
+	}
+	return out
+}
+
+func firstNonZero(value, fallback float64) float64 {
+	if value != 0 {
+		return value
+	}
+	return fallback
 }
 
 func runtimeStringSetting(key, fallback string) string {

@@ -866,6 +866,35 @@ export type PlacesResponse = {
   note?: string;
 };
 
+export type PlaceProviderStatus = {
+  key: string;
+  name: string;
+  kind: string;
+  configured: boolean;
+  enabled: boolean;
+  url?: string;
+  locale?: string;
+  license?: string;
+  policy: string;
+  recommended?: boolean;
+  secret_configured?: boolean;
+  note?: string;
+};
+
+export type PlaceProvidersResponse = {
+  mode: string;
+  online_enabled: boolean;
+  active_provider: string;
+  active_provider_url: string;
+  locale?: string;
+  min_interval_ms: number;
+  providers: PlaceProviderStatus[];
+  cache_policy: string;
+  bulk_policy: string;
+  google_secret_source: string;
+  google_cache_ack?: boolean;
+};
+
 export type PlaceHierarchyEntry = {
   place: PlaceCacheEntry;
   level: string;
@@ -1618,6 +1647,11 @@ export const api = {
   searchPlaces: () => request<SearchPlacesResponse>("/api/v1/search/places"),
   places: (q = "") =>
     request<PlacesResponse>(`/api/v1/places${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
+  placeProviders: () =>
+    request<PlaceProvidersResponse>("/api/v1/places/providers").then((response) => ({
+      ...response,
+      providers: asArray(response.providers)
+    })),
   placesHierarchy: (q = "", limit = 100, offset = 0) => {
     const query = new URLSearchParams();
     if (q.trim()) query.set("q", q.trim());

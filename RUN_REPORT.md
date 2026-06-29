@@ -5025,3 +5025,53 @@ Safety confirmation:
 - no missing-file marking;
 - no commit;
 - no push.
+
+## 2026-06-29 Reverse-Geocoder Provider Expansion
+
+Implemented this run:
+
+- Added provider-aware reverse geocoding while keeping Cartolensia local/cache-first by default.
+- Added `GET /api/v1/places/providers` to report provider readiness, active provider, active URL, locale, rate limit, policy notes, and redacted Google API-key status.
+- Added provider support for:
+  - local Cartolensia place cache;
+  - OpenStreetMap Nominatim public endpoint;
+  - self-hosted Nominatim-compatible endpoint;
+  - Photon-compatible endpoint;
+  - Pelias-compatible endpoint;
+  - opt-in Google Geocoding API using `CARTOLENSIA_GOOGLE_GEOCODING_API_KEY` without returning the secret. Google caching additionally requires `CARTOLENSIA_GOOGLE_GEOCODING_CACHE_ACK=I_ACCEPT_GOOGLE_TERMS`.
+- Added locale-aware online reverse-geocode calls through `search.geocoder_locale` and cache rows that remember provider+locale, e.g. `nominatim:ru,en`.
+- Added `search.geocoder_user_agent`, `search.geocoder_contact_email`, and `search.geocoder_min_interval_ms` runtime settings.
+- Added per-process geocoder rate limiting. Public geocoder calls remain user-triggered only and are not run as automatic bulk enrichment.
+- Updated the Places page to show provider readiness cards, configured locale, policy notes, and Google secret status.
+- Updated Settings -> Search/Places runtime controls and operations/architecture docs.
+
+Tests run:
+
+- `npm --prefix webui run build`
+- `gofmt -w internal/server/server.go internal/server/settings.go internal/server/server_test.go`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `git diff --check`
+
+Remote deployment/validation:
+
+- Built `/tmp/cartolensia-geocoder` from the verified source tree.
+- Deployed `/tmp/cartolensia-geocoder` to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka.
+- Deployed `webui/dist/` to `/opt/cartolensia/current/webui/dist/`.
+- Restarted only the `cartolensia` service; PostgreSQL, AI sidecar, and original/Samba mounts were not reset or modified.
+- Remote `/api/v1/health` returned `ok`.
+- Authenticated remote `/api/v1/places/providers` returned active provider `nominatim`, `online_enabled=false`, local cache enabled, Nominatim configured, Google key redacted/not configured, and `google_cache_ack=false`.
+- Authenticated remote `/api/v1/places/hierarchy?limit=5` returned `4` cached rows and confirmed the hierarchy endpoint still works after deployment.
+
+Known limitations:
+
+- No bulk online reverse-geocoding was started. For production-scale enrichment, use imported local geodata or a self-hosted Nominatim/Pelias/Photon endpoint.
+- Google support is opt-in and terms-dependent; Cartolensia redacts the API key and refuses to cache Google reverse-geocode rows unless the explicit cache-terms acknowledgement environment variable is present.
+
+Safety confirmation:
+
+- no writes to `/mnt/Models/rclone`;
+- no writes to Samba/originals;
+- no DB reset;
+- no missing-file marking;
+- no commit;
+- no push.

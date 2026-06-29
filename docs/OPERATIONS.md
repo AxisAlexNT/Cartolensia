@@ -714,7 +714,12 @@ Reverse geocoding is local-first and safe by default:
 - `GET /api/v1/places/reverse?lat=<lat>&lon=<lon>` searches cached place bounding boxes.
 - `POST /api/v1/places/reverse` accepts JSON with `lat`, `lon`, and optional `online`.
 - Online lookup requires runtime setting `search.online_geocoding=true` and an explicit `online=true` request.
-- Online providers must be Nominatim-compatible and are configured with `search.geocoder_provider_url`.
+- Online provider choices are `nominatim`, `nominatim_compatible`, `photon`, `pelias`, and `google`.
+- `GET /api/v1/places/providers` shows provider readiness, locale, policy notes, URL, and whether the Google API key is configured without returning the secret.
+- Provider locale is configured with `search.geocoder_locale` and is sent as `Accept-Language`, `accept-language`, or provider-specific language parameters where supported. Cached rows store the provider and locale, for example `nominatim:ru,en`.
+- Nominatim-compatible providers are configured with `search.geocoder_provider_url`; self-hosted Nominatim/Pelias/Photon is recommended for large archives.
+- Public OSMF Nominatim must remain user-triggered, rate-limited, and cached. Do not run public bulk reverse-geocoding jobs.
+- Google Geocoding is opt-in through `search.geocoder_provider=google` plus `CARTOLENSIA_GOOGLE_GEOCODING_API_KEY`. Because Google Maps Platform terms restrict caching/storage beyond place IDs, Cartolensia also requires `CARTOLENSIA_GOOGLE_GEOCODING_CACHE_ACK=I_ACCEPT_GOOGLE_TERMS` before caching Google reverse-geocode rows.
 - Results are cached into `place_cache`; no public API bulk reverse-geocoding is run automatically.
 
 ## Local Production Run On This Machine

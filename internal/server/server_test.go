@@ -1640,6 +1640,72 @@ func TestSettingsAndDBExportStayInCache(t *testing.T) {
 	}
 }
 
+func TestReverseGeocoderProvidersAndLocale(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{
+		Version:      "test",
+		Config:       cfg,
+		Plugins:      plugins.BuiltIns(),
+		Registry:     registry,
+		Store:        catalog.NewMemoryStore(),
+		StoreBackend: "memory",
+	})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/places/providers", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"google_secret_source"`) || strings.Contains(rec.Body.String(), "secret-key") {
+		t.Fatalf("providers status %d body %s", rec.Code, rec.Body.String())
+	}
+	withRuntimeSettings(t, map[string]any{
+		"search.online_geocoding":         true,
+		"search.geocoder_provider":        "nominatim_compatible",
+		"search.geocoder_provider_url":    "http://127.0.0.1:9999/geocoder",
+		"search.geocoder_locale":          "ru,en",
+		"search.geocoder_min_interval_ms": 0,
+	})
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/places/providers", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"active_provider":"nominatim_compatible"`) || !strings.Contains(rec.Body.String(), `"locale":"ru,en"`) {
+		t.Fatalf("providers with locale status %d body %s", rec.Code, rec.Body.String())
+	}
+	place, err := normalizeFeaturePlace("photon", "http://127.0.0.1:9999/geocoder", "ru,en", 59.93428, 30.33510, map[string]any{
+		"name":    "Nevsky Prospect",
+		"country": "Russia",
+		"state":   "Saint Petersburg",
+		"city":    "Saint Petersburg",
+		"street":  "Nevsky Prospect",
+		"label":   "Nevsky Prospect, Saint Petersburg, Russia",
+	}, []float64{30.33, 59.93, 30.34, 59.94}, []float64{30.33510, 59.93428})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if place.Provider != "photon:ru,en" || place.Road != "Nevsky Prospect" || place.Country != "Russia" {
+		t.Fatalf("unexpected normalized provider place: %#v", place)
+	}
+}
+
+func withRuntimeSettings(t *testing.T, values map[string]any) {
+	t.Helper()
+	runtimeSettings.Lock()
+	previous := map[string]any{}
+	for key, value := range values {
+		previous[key] = runtimeSettings.values[key]
+		runtimeSettings.values[key] = value
+	}
+	runtimeSettings.Unlock()
+	t.Cleanup(func() {
+		runtimeSettings.Lock()
+		defer runtimeSettings.Unlock()
+		for key, value := range previous {
+			runtimeSettings.values[key] = value
+		}
+	})
+}
+
 func TestHLSArgsProfilesAndPathSafety(t *testing.T) {
 	dir := t.TempDir()
 	args, err := hlsArgs("h264-low", "/tmp/source.mp4", dir)
