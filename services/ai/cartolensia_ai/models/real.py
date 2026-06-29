@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib.util
 import math
@@ -11,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Any
 
 from cartolensia_ai.config import ServiceConfig
@@ -95,6 +97,15 @@ class RealBackend:
         self._openclip: LoadedModel | None = None
         self._yunet: Any | None = None
         self._asr: LoadedModel | None = None
+        # Most local inference libraries used here keep native process-global
+        # state. In particular, OpenCV DNN, PyTorch CUDA, Transformers, and
+        # CTranslate2 can crash the interpreter when models are loaded or used
+        # concurrently without coordination. Keep the queue dense in the Go
+        # worker, but gate native inference inside this process.
+        self._model_lock = threading.RLock()
+        self._torch_slots = threading.BoundedSemaphore(_env_int("CARTOLENSIA_AI_TORCH_PARALLELISM", 1, 1, 4))
+        self._opencv_lock = threading.Lock()
+        self._asr_slots = threading.BoundedSemaphore(_env_int("CARTOLENSIA_AI_ASR_PARALLELISM", 1, 1, 2))
 
     def _configure_cache_environment(self) -> None:
         self.config.model_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +133,11 @@ class RealBackend:
             "model_dir": str(self.config.model_dir),
             "models": self.models_status(),
             "capabilities": CAPABILITIES,
+            "concurrency": {
+                "torch_parallelism": _env_int("CARTOLENSIA_AI_TORCH_PARALLELISM", 1, 1, 4),
+                "asr_parallelism": _env_int("CARTOLENSIA_AI_ASR_PARALLELISM", 1, 1, 2),
+                "opencv_parallelism": 1,
+            },
         }
 
     def models_status(self) -> dict[str, Any]:
@@ -162,7 +178,7 @@ class RealBackend:
             loaded = self._load_classification()
             torch = _import_torch()
             tensor = loaded.preprocess(image).unsqueeze(0).to(self.device)
-            with torch.no_grad():
+            with self._torch_inference(), torch.no_grad():
                 logits = loaded.model(tensor)
                 probs = torch.nn.functional.softmax(logits[0], dim=0)
                 values, indices = torch.topk(probs, int(request.options.get("top_k", 5) if request.options else 5))
@@ -197,8 +213,9 @@ class RealBackend:
 
             rgb = np.array(image)
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            detector.setInputSize((image.width, image.height))
-            _, faces = detector.detect(bgr)
+            with self._opencv_lock:
+                detector.setInputSize((image.width, image.height))
+                _, faces = detector.detect(bgr)
             found: list[dict[str, Any]] = []
             predictions: list[Prediction] = []
             if faces is not None:
@@ -239,7 +256,7 @@ class RealBackend:
             processor = loaded.preprocess
             inputs = processor(images=image, return_tensors="pt")
             inputs = {key: value.to(self.device) for key, value in inputs.items()}
-            with torch.no_grad():
+            with self._torch_inference(), torch.no_grad():
                 outputs = loaded.model(**inputs)
                 probs = torch.nn.functional.softmax(outputs.logits[0], dim=0)
             id_to_label = getattr(loaded.model.config, "id2label", {}) or {}
@@ -278,7 +295,8 @@ class RealBackend:
             loaded = self._load_caption()
             inputs = loaded.preprocess(images=image, return_tensors="pt")
             inputs = {key: value.to(self.device) for key, value in inputs.items()}
-            output = loaded.model.generate(**inputs, max_new_tokens=32)
+            with self._torch_inference():
+                output = loaded.model.generate(**inputs, max_new_tokens=32)
             caption = loaded.preprocess.decode(output[0], skip_special_tokens=True).strip()
             return InferenceResponse(
                 status="ok",
@@ -299,7 +317,7 @@ class RealBackend:
             loaded = self._load_openclip()
             torch = _import_torch()
             tensor = loaded.preprocess["image"](image).unsqueeze(0).to(self.device)
-            with torch.no_grad():
+            with self._torch_inference(), torch.no_grad():
                 vector = loaded.model.encode_image(tensor)
                 vector = vector / vector.norm(dim=-1, keepdim=True)
             embedding = [float(value) for value in vector[0].detach().cpu().tolist()]
@@ -327,7 +345,7 @@ class RealBackend:
             loaded = self._load_openclip()
             torch = _import_torch()
             tokens = loaded.preprocess["tokenizer"]([request.text]).to(self.device)
-            with torch.no_grad():
+            with self._torch_inference(), torch.no_grad():
                 vector = loaded.model.encode_text(tokens)
                 vector = vector / vector.norm(dim=-1, keepdim=True)
             embedding = [float(value) for value in vector[0].detach().cpu().tolist()]
@@ -458,35 +476,36 @@ class RealBackend:
             }
             if language:
                 kwargs["language"] = language
-            segments_iter, info = whisper_model.transcribe(str(temp_path), **kwargs)
-            segments: list[dict[str, Any]] = []
-            pieces: list[str] = []
-            for index, segment in enumerate(segments_iter):
-                text = str(getattr(segment, "text", "") or "").strip()
-                if not text:
-                    continue
-                start = float(getattr(segment, "start", 0.0) or 0.0)
-                end = float(getattr(segment, "end", start) or start)
-                no_speech = getattr(segment, "no_speech_prob", None)
-                avg_logprob = getattr(segment, "avg_logprob", None)
-                confidence = _segment_confidence(no_speech, avg_logprob)
-                item = {
-                    "index": index,
-                    "start_ms": int(max(0, round(start * 1000))),
-                    "end_ms": int(max(0, round(end * 1000))),
-                    "start_seconds": start,
-                    "end_seconds": end,
-                    "text": text,
-                    "confidence": confidence,
-                    "avg_logprob": avg_logprob,
-                    "no_speech_prob": no_speech,
-                }
-                segments.append(item)
-                pieces.append(text)
-            full_text = "\n".join(pieces).strip()
-            detected_language = str(getattr(info, "language", "") or language or "")
-            language_probability = getattr(info, "language_probability", None)
-            duration = getattr(info, "duration", None)
+            with self._asr_slots:
+                segments_iter, info = whisper_model.transcribe(str(temp_path), **kwargs)
+                segments: list[dict[str, Any]] = []
+                pieces: list[str] = []
+                for index, segment in enumerate(segments_iter):
+                    text = str(getattr(segment, "text", "") or "").strip()
+                    if not text:
+                        continue
+                    start = float(getattr(segment, "start", 0.0) or 0.0)
+                    end = float(getattr(segment, "end", start) or start)
+                    no_speech = getattr(segment, "no_speech_prob", None)
+                    avg_logprob = getattr(segment, "avg_logprob", None)
+                    confidence = _segment_confidence(no_speech, avg_logprob)
+                    item = {
+                        "index": index,
+                        "start_ms": int(max(0, round(start * 1000))),
+                        "end_ms": int(max(0, round(end * 1000))),
+                        "start_seconds": start,
+                        "end_seconds": end,
+                        "text": text,
+                        "confidence": confidence,
+                        "avg_logprob": avg_logprob,
+                        "no_speech_prob": no_speech,
+                    }
+                    segments.append(item)
+                    pieces.append(text)
+                full_text = "\n".join(pieces).strip()
+                detected_language = str(getattr(info, "language", "") or language or "")
+                language_probability = getattr(info, "language_probability", None)
+                duration = getattr(info, "duration", None)
             return InferenceResponse(
                 status="ok",
                 endpoint="transcribe-audio",
@@ -637,135 +656,161 @@ class RealBackend:
             return "cpu"
         return "cpu"
 
+    @contextmanager
+    def _torch_inference(self) -> Any:
+        self._torch_slots.acquire()
+        try:
+            yield
+        finally:
+            self._torch_slots.release()
+
     def _load_classification(self) -> LoadedModel:
         if self._classification is not None:
             return self._classification
-        try:
-            import torchvision.models as models  # type: ignore
-        except Exception as exc:
-            raise MissingModelError("torchvision is not installed") from exc
-        try:
-            if self.config.classifier == "mobilenet_v3_large":
-                weights = models.MobileNet_V3_Large_Weights.DEFAULT
-                model = models.mobilenet_v3_large(weights=weights)
-                name = "mobilenet_v3_large"
-            else:
-                weights = models.EfficientNet_B0_Weights.DEFAULT
-                model = models.efficientnet_b0(weights=weights)
-                name = "efficientnet_b0"
-        except Exception as exc:
-            raise MissingModelError(f"torchvision classification weights unavailable: {exc}") from exc
-        model.eval().to(self.device)
-        self._classification = LoadedModel(
-            name=name,
-            model=model,
-            preprocess=weights.transforms(),
-            metadata={"categories": weights.meta.get("categories", [])},
-        )
-        return self._classification
+        with self._model_lock:
+            if self._classification is not None:
+                return self._classification
+            try:
+                import torchvision.models as models  # type: ignore
+            except Exception as exc:
+                raise MissingModelError("torchvision is not installed") from exc
+            try:
+                if self.config.classifier == "mobilenet_v3_large":
+                    weights = models.MobileNet_V3_Large_Weights.DEFAULT
+                    model = models.mobilenet_v3_large(weights=weights)
+                    name = "mobilenet_v3_large"
+                else:
+                    weights = models.EfficientNet_B0_Weights.DEFAULT
+                    model = models.efficientnet_b0(weights=weights)
+                    name = "efficientnet_b0"
+            except Exception as exc:
+                raise MissingModelError(f"torchvision classification weights unavailable: {exc}") from exc
+            model.eval().to(self.device)
+            self._classification = LoadedModel(
+                name=name,
+                model=model,
+                preprocess=weights.transforms(),
+                metadata={"categories": weights.meta.get("categories", [])},
+            )
+            return self._classification
 
     def _load_yunet(self, image_size: tuple[int, int]) -> Any:
         if self._yunet is not None:
             return self._yunet
-        path = self.config.model_dir / "opencv" / "face_detection_yunet_2023mar.onnx"
-        if not path.exists():
-            raise MissingModelError(f"YuNet model missing at {path}")
-        try:
-            import cv2  # type: ignore
-        except Exception as exc:
-            raise MissingModelError("opencv-python-headless is not installed") from exc
-        self._yunet = cv2.FaceDetectorYN_create(str(path), "", image_size, 0.6, 0.3, 5000)
-        return self._yunet
+        with self._model_lock:
+            if self._yunet is not None:
+                return self._yunet
+            path = self.config.model_dir / "opencv" / "face_detection_yunet_2023mar.onnx"
+            if not path.exists():
+                raise MissingModelError(f"YuNet model missing at {path}")
+            try:
+                import cv2  # type: ignore
+            except Exception as exc:
+                raise MissingModelError("opencv-python-headless is not installed") from exc
+            self._yunet = cv2.FaceDetectorYN_create(str(path), "", image_size, 0.6, 0.3, 5000)
+            return self._yunet
 
     def _load_safety(self) -> LoadedModel:
         if self._safety is not None:
             return self._safety
-        try:
-            from transformers import AutoImageProcessor, AutoModelForImageClassification  # type: ignore
-        except Exception as exc:
-            raise MissingModelError("transformers is not installed") from exc
-        try:
-            model_path = _hf_snapshot_path(self.config.model_dir, self.config.safety_model)
-            processor = AutoImageProcessor.from_pretrained(str(model_path), local_files_only=True)
-            model = AutoModelForImageClassification.from_pretrained(str(model_path), local_files_only=True)
-        except Exception as exc:
-            raise MissingModelError(f"safety model unavailable in local cache: {exc}") from exc
-        model.eval().to(self.device)
-        self._safety = LoadedModel(name=self.config.safety_model, model=model, preprocess=processor)
-        return self._safety
+        with self._model_lock:
+            if self._safety is not None:
+                return self._safety
+            try:
+                from transformers import AutoImageProcessor, AutoModelForImageClassification  # type: ignore
+            except Exception as exc:
+                raise MissingModelError("transformers is not installed") from exc
+            try:
+                model_path = _hf_snapshot_path(self.config.model_dir, self.config.safety_model)
+                processor = AutoImageProcessor.from_pretrained(str(model_path), local_files_only=True)
+                model = AutoModelForImageClassification.from_pretrained(str(model_path), local_files_only=True)
+            except Exception as exc:
+                raise MissingModelError(f"safety model unavailable in local cache: {exc}") from exc
+            model.eval().to(self.device)
+            self._safety = LoadedModel(name=self.config.safety_model, model=model, preprocess=processor)
+            return self._safety
 
     def _load_caption(self) -> LoadedModel:
         if self._caption is not None:
             return self._caption
-        try:
-            from transformers import BlipForConditionalGeneration, BlipProcessor  # type: ignore
-        except Exception as exc:
-            raise MissingModelError("transformers BLIP classes are not installed") from exc
-        try:
-            model_path = _hf_snapshot_path(self.config.model_dir, self.config.caption_model)
-            processor = BlipProcessor.from_pretrained(str(model_path), local_files_only=True)
-            model = BlipForConditionalGeneration.from_pretrained(str(model_path), local_files_only=True)
-        except Exception as exc:
-            raise MissingModelError(f"caption model unavailable in local cache: {exc}") from exc
-        model.eval().to(self.device)
-        self._caption = LoadedModel(name=self.config.caption_model, model=model, preprocess=processor)
-        return self._caption
+        with self._model_lock:
+            if self._caption is not None:
+                return self._caption
+            try:
+                from transformers import BlipForConditionalGeneration, BlipProcessor  # type: ignore
+            except Exception as exc:
+                raise MissingModelError("transformers BLIP classes are not installed") from exc
+            try:
+                model_path = _hf_snapshot_path(self.config.model_dir, self.config.caption_model)
+                processor = BlipProcessor.from_pretrained(str(model_path), local_files_only=True)
+                model = BlipForConditionalGeneration.from_pretrained(str(model_path), local_files_only=True)
+            except Exception as exc:
+                raise MissingModelError(f"caption model unavailable in local cache: {exc}") from exc
+            model.eval().to(self.device)
+            self._caption = LoadedModel(name=self.config.caption_model, model=model, preprocess=processor)
+            return self._caption
 
     def _load_openclip(self) -> LoadedModel:
         if self._openclip is not None:
             return self._openclip
-        try:
-            import open_clip  # type: ignore
-        except Exception as exc:
-            raise MissingModelError("open-clip-torch is not installed") from exc
-        try:
-            snapshot = _openclip_snapshot_path(self.config.model_dir, "laion/CLIP-ViT-B-32-laion2B-s34B-b79K")
-            weights = snapshot / "open_clip_model.safetensors"
-            model, _, preprocess = open_clip.create_model_and_transforms(
-                self.config.openclip_model,
-                pretrained=str(weights),
-                cache_dir=str(self.config.model_dir / "openclip"),
+        with self._model_lock:
+            if self._openclip is not None:
+                return self._openclip
+            try:
+                import open_clip  # type: ignore
+            except Exception as exc:
+                raise MissingModelError("open-clip-torch is not installed") from exc
+            try:
+                snapshot = _openclip_snapshot_path(self.config.model_dir, "laion/CLIP-ViT-B-32-laion2B-s34B-b79K")
+                weights = snapshot / "open_clip_model.safetensors"
+                model, _, preprocess = open_clip.create_model_and_transforms(
+                    self.config.openclip_model,
+                    pretrained=str(weights),
+                    cache_dir=str(self.config.model_dir / "openclip"),
+                )
+            except Exception as exc:
+                raise MissingModelError(f"OpenCLIP model unavailable in local cache: {exc}") from exc
+            tokenizer = open_clip.get_tokenizer(self.config.openclip_model)
+            model.eval().to(self.device)
+            self._openclip = LoadedModel(
+                name=self.config.openclip_pretrained,
+                model=model,
+                preprocess={"image": preprocess, "tokenizer": tokenizer},
             )
-        except Exception as exc:
-            raise MissingModelError(f"OpenCLIP model unavailable in local cache: {exc}") from exc
-        tokenizer = open_clip.get_tokenizer(self.config.openclip_model)
-        model.eval().to(self.device)
-        self._openclip = LoadedModel(
-            name=self.config.openclip_pretrained,
-            model=model,
-            preprocess={"image": preprocess, "tokenizer": tokenizer},
-        )
-        return self._openclip
+            return self._openclip
 
     def _load_asr(self, model_name: str) -> LoadedModel:
         if self._asr is not None and self._asr.name == model_name:
             return self._asr
-        try:
-            from faster_whisper import WhisperModel  # type: ignore
-        except Exception as exc:
-            raise MissingModelError("faster-whisper is not installed in .cartolensia/ai-venv") from exc
-        model_root = self.config.model_dir / "faster-whisper"
-        model_root.mkdir(parents=True, exist_ok=True)
-        device, device_index = _asr_device(self.device)
-        compute_type = "float16" if device == "cuda" else "int8"
-        local_only = bool(os.environ.get("CARTOLENSIA_ASR_LOCAL_ONLY") == "1")
-        try:
-            model = WhisperModel(
-                model_name,
-                device=device,
-                device_index=device_index,
-                compute_type=compute_type,
-                download_root=str(model_root),
-                local_files_only=local_only,
+        with self._model_lock:
+            if self._asr is not None and self._asr.name == model_name:
+                return self._asr
+            try:
+                from faster_whisper import WhisperModel  # type: ignore
+            except Exception as exc:
+                raise MissingModelError("faster-whisper is not installed in .cartolensia/ai-venv") from exc
+            model_root = self.config.model_dir / "faster-whisper"
+            model_root.mkdir(parents=True, exist_ok=True)
+            device, device_index = _asr_device(self.device)
+            compute_type = "float16" if device == "cuda" else "int8"
+            local_only = bool(os.environ.get("CARTOLENSIA_ASR_LOCAL_ONLY") == "1")
+            try:
+                model = WhisperModel(
+                    model_name,
+                    device=device,
+                    device_index=device_index,
+                    compute_type=compute_type,
+                    download_root=str(model_root),
+                    local_files_only=local_only,
+                )
+            except Exception as exc:
+                raise MissingModelError(f"faster-whisper model {model_name!r} is unavailable: {exc}") from exc
+            self._asr = LoadedModel(
+                name=model_name,
+                model=model,
+                metadata={"device": device, "device_index": device_index, "compute_type": compute_type, "download_root": str(model_root)},
             )
-        except Exception as exc:
-            raise MissingModelError(f"faster-whisper model {model_name!r} is unavailable: {exc}") from exc
-        self._asr = LoadedModel(
-            name=model_name,
-            model=model,
-            metadata={"device": device, "device_index": device_index, "compute_type": compute_type, "download_root": str(model_root)},
-        )
-        return self._asr
+            return self._asr
 
 
 class MissingModelError(RuntimeError):
@@ -875,6 +920,14 @@ def _import_optional(module_name: str) -> Any:
     if importlib.util.find_spec(module_name) is None:
         raise MissingModelError(f"Python package {module_name!r} is not installed in the Cartolensia AI environment")
     return __import__(module_name)
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, ""))
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 def _mean_float(values: Any, np: Any) -> float:

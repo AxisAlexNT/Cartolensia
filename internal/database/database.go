@@ -1117,7 +1117,19 @@ func (db *DB) LeaseNextJob(ctx context.Context, workerID string, kinds []string,
 		args = append(args, kinds)
 		query += fmt.Sprintf(" and kind=any($%d)", len(args))
 	}
-	query += ` order by created_at, id for update skip locked limit 1`
+	query += ` order by
+		case kind
+			when 'ai_backfill' then 0
+			when 'metadata_enrich' then 1
+			when 'discovery' then 2
+			when 'hash' then 3
+			when 'geo_snap' then 4
+			when 'reverse_geocode' then 5
+			else 6
+		end,
+		created_at,
+		id
+		for update skip locked limit 1`
 	var jobID string
 	if err := tx.QueryRow(ctx, query, args...).Scan(&jobID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

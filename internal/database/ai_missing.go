@@ -88,7 +88,8 @@ func aiMissingWhere(query catalog.AIMissingQuery) (string, []any, error) {
 	clauses := []string{
 		`a.media_kind=$1`,
 		`not exists(select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task=$2 and (` +
-			`ats.status in ('succeeded', 'skipped') or (` +
+			`ats.status in ('succeeded', 'skipped') or ` +
+			`(ats.status='running' and ats.updated_at > now() - interval '6 hours') or (` +
 			`ats.status='failed' and not (` + aiRetryableTaskFailureSQL("ats") + `)` +
 			`)))`,
 		completionClause,

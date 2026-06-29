@@ -108,6 +108,10 @@ func (s *MemoryStore) UpsertAIAssetTaskStatus(_ context.Context, status AIAssetT
 func (s *MemoryStore) aiAssetTaskCompleteLocked(assetID, task string) bool {
 	if status, ok := s.aiTaskStatuses[assetID+"\x00"+task]; ok && status.Status == "succeeded" {
 		return true
+	} else if ok && status.Status == "skipped" {
+		return true
+	} else if ok && status.Status == "running" && time.Since(status.UpdatedAt) < 6*time.Hour {
+		return true
 	}
 	switch task {
 	case "classify_image", "safety_nsfw", "describe_image", "ocr_image":

@@ -244,7 +244,10 @@ func (s *Server) RunReverseGeocodeJob(ctx context.Context, job *jobs.Job, worker
 	job.Counters.Updated = int64(matched + cached)
 	job.Counters.Errors = int64(failed)
 	jobs.AddLog(job, "info", fmt.Sprintf("reverse geocode finished: processed=%d matched=%d cached=%d failed=%d", processed, matched, cached, failed))
-	return s.deps.Store.UpdateLeasedJob(ctx, *job, workerID)
+	if err := s.deps.Store.UpdateLeasedJob(ctx, *job, workerID); err != nil {
+		return err
+	}
+	return s.deps.Store.CompleteLeasedJob(ctx, *job, workerID)
 }
 
 func validCoordinate(lat, lon float64) bool {

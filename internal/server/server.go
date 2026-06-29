@@ -4643,57 +4643,111 @@ func (s *Server) runAIJobWithMediaURL(ctx context.Context, kind string, req aiJo
 	if mediaURL == nil {
 		mediaURL = func(asset catalog.Asset) string { return s.aiWorkerMediaURL(asset.ID) }
 	}
-	for _, asset := range assets {
-		if !aiSupportsAsset(kind, asset) {
+	parallelism := aiJobParallelism(kind, len(assets))
+	if parallelism <= 1 {
+		for _, asset := range assets {
+			s.runSingleAIAsset(ctx, endpoint, apiPath, kind, req, workerID, asset, mediaURL, &result, nil, onProgress)
+		}
+	} else {
+		var mu sync.Mutex
+		assetCh := make(chan catalog.Asset)
+		var wg sync.WaitGroup
+		for worker := 0; worker < parallelism; worker++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for asset := range assetCh {
+					mu.Lock()
+					if ctx.Err() != nil {
+						mu.Unlock()
+						return
+					}
+					mu.Unlock()
+					s.runSingleAIAsset(ctx, endpoint, apiPath, kind, req, workerID, asset, mediaURL, &result, &mu, onProgress)
+				}
+			}()
+		}
+	sendLoop:
+		for _, asset := range assets {
+			select {
+			case <-ctx.Done():
+				break sendLoop
+			case assetCh <- asset:
+			}
+		}
+		close(assetCh)
+		wg.Wait()
+	}
+	result.Status = "completed"
+	if len(result.Errors) > 0 && result.Processed == 0 {
+		result.Status = "failed"
+	}
+	return result, nil
+}
+
+func (s *Server) runSingleAIAsset(ctx context.Context, endpoint, apiPath, kind string, req aiJobRequest, workerID string, asset catalog.Asset, mediaURL func(catalog.Asset) string, result *aiJobResult, guard *sync.Mutex, onProgress func(aiJobResult)) {
+	update := func(fn func()) {
+		if guard != nil {
+			guard.Lock()
+			defer guard.Unlock()
+		}
+		fn()
+		if onProgress != nil {
+			onProgress(*result)
+		}
+	}
+	if !aiSupportsAsset(kind, asset) {
+		update(func() {
 			result.Skipped++
 			result.SkippedKinds[asset.MediaKind]++
-			if onProgress != nil {
-				onProgress(result)
-			}
-			continue
-		}
-		payload := map[string]any{
-			"asset_id":  asset.ID,
-			"media_url": mediaURL(asset),
-			"options": map[string]any{
-				"safety_threshold": req.SafetyThreshold,
-				"language":         req.Language,
-				"model":            req.Model,
-				"suffix":           assetAISuffix(asset),
-			},
-		}
-		timeout := 3 * time.Minute
-		if kind == "transcribe_audio" {
-			timeout = 45 * time.Minute
-		} else if kind == "analyze_audio" {
-			timeout = 10 * time.Minute
-		}
-		response, err := callAISidecarWithTimeout(ctx, endpoint+apiPath, payload, timeout)
-		if err != nil {
-			result.Errors = append(result.Errors, asset.ID+": "+err.Error())
-			_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, err.Error(), nil)
-			if onProgress != nil {
-				onProgress(result)
-			}
-			continue
-		}
-		if response.Status != "ok" {
-			reason := strings.TrimSpace(response.Reason)
-			if reason == "" {
-				reason = "AI sidecar returned status " + response.Status
-			}
-			result.Errors = append(result.Errors, asset.ID+": "+reason)
-			_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, reason, summarizeAIMetadata(response.Metadata))
-			if onProgress != nil {
-				onProgress(result)
-			}
-			continue
-		}
-		stored, unsafe := s.persistAIResponse(ctx, workerID, kind, asset.ID, response, req)
-		_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "succeeded", stored, "", map[string]any{
-			"model":  aiModelName(response.Metadata, kind),
-			"reason": response.Reason,
 		})
+		return
+	}
+	_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "running", 0, "", map[string]any{
+		"model":  kind,
+		"reason": "AI inference in progress",
+	})
+	payload := map[string]any{
+		"asset_id":  asset.ID,
+		"media_url": mediaURL(asset),
+		"options": map[string]any{
+			"safety_threshold": req.SafetyThreshold,
+			"language":         req.Language,
+			"model":            req.Model,
+			"suffix":           assetAISuffix(asset),
+		},
+	}
+	timeout := 3 * time.Minute
+	if kind == "transcribe_audio" {
+		timeout = 45 * time.Minute
+	} else if kind == "analyze_audio" {
+		timeout = 10 * time.Minute
+	}
+	response, err := callAISidecarWithTimeout(ctx, endpoint+apiPath, payload, timeout)
+	if err != nil {
+		update(func() {
+			result.Errors = append(result.Errors, asset.ID+": "+err.Error())
+		})
+		_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, err.Error(), nil)
+		return
+	}
+	if response.Status != "ok" {
+		reason := strings.TrimSpace(response.Reason)
+		if reason == "" {
+			reason = "AI sidecar returned status " + response.Status
+		}
+		update(func() {
+			result.Errors = append(result.Errors, asset.ID+": "+reason)
+		})
+		_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, reason, summarizeAIMetadata(response.Metadata))
+		return
+	}
+	stored, unsafe := s.persistAIResponse(ctx, workerID, kind, asset.ID, response, req)
+	_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "succeeded", stored, "", map[string]any{
+		"model":  aiModelName(response.Metadata, kind),
+		"reason": response.Reason,
+	})
+	update(func() {
 		result.Processed++
 		result.Stored += stored
 		if unsafe {
@@ -4707,15 +4761,35 @@ func (s *Server) runAIJobWithMediaURL(ctx context.Context, kind string, req aiJo
 			"metadata":     summarizeAIMetadata(response.Metadata),
 			"stored_count": stored,
 		})
-		if onProgress != nil {
-			onProgress(result)
-		}
+	})
+}
+
+func aiJobParallelism(kind string, targets int) int {
+	if targets <= 1 {
+		return 1
 	}
-	result.Status = "completed"
-	if len(result.Errors) > 0 && result.Processed == 0 {
-		result.Status = "failed"
+	fallback := 2
+	switch kind {
+	case "classify_image", "safety_nsfw", "embed_image":
+		fallback = 4
+	case "describe_image":
+		fallback = 2
+	case "detect_faces", "ocr_image", "analyze_audio":
+		fallback = 2
+	case "transcribe_audio":
+		fallback = 1
 	}
-	return result, nil
+	configured := envIntDefault("CARTOLENSIA_AI_JOB_PARALLELISM", runtimeIntSetting("ai.job_parallelism", fallback))
+	if configured <= 0 {
+		configured = fallback
+	}
+	if configured > 16 {
+		configured = 16
+	}
+	if configured > targets {
+		configured = targets
+	}
+	return configured
 }
 
 func (s *Server) markAIAssetTaskStatus(ctx context.Context, assetID, workerID, kind, status string, stored int, errorText string, metadata map[string]any) error {

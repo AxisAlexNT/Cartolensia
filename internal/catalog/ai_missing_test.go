@@ -22,6 +22,9 @@ func TestQueryAIMissingAssetsUsesOutputsAndTaskStatus(t *testing.T) {
 	if _, err := store.UpsertAIAssetTaskStatus(ctx, AIAssetTaskStatus{AssetID: photo2.Asset.ID, Task: "ocr_image", Status: "succeeded"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.UpsertAIAssetTaskStatus(ctx, AIAssetTaskStatus{AssetID: photo3.Asset.ID, Task: "classify_image", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.UpsertAudioFeatures(ctx, AudioFeatures{AssetID: audio.Asset.ID}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +51,14 @@ func TestQueryAIMissingAssetsUsesOutputsAndTaskStatus(t *testing.T) {
 	}
 	if audioPage.Page.Total != 0 {
 		t.Fatalf("expected completed audio to be excluded, got total=%d", audioPage.Page.Total)
+	}
+
+	runningPage, err := store.QueryAIMissingAssets(ctx, AIMissingQuery{Task: "classify_image", MediaKind: "photo", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runningPage.Page.Total != 2 {
+		t.Fatalf("expected recently running classification to be reserved, got total=%d", runningPage.Page.Total)
 	}
 }
 

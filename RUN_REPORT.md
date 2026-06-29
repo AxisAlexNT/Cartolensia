@@ -21,6 +21,45 @@ Commands run:
 - `gofmt -w internal/server/server.go internal/server/server_test.go`
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
 - `npm --prefix webui run build` passed.
+- Built and deployed the refreshed backend/WebUI to rjazhenka as
+  `/opt/cartolensia/releases/local-20260629T200001Z-places-ui`.
+- Verified the remote HTTPS-served WebUI bundle contains `bi-hammer`,
+  `place-title-link`, `coordinate-badge`, and `Place Details`.
+- Restored `config/production-bundle.yaml` into the new remote release from the
+  previous production release after detecting that the overlay copy had omitted
+  this production-local file.
+- Restarted and verified remote `cartolensia-postgres`, `cartolensia-ai`, and
+  `cartolensia` services are active.
+- Remote `https://127.0.0.1:18443/api/v1/health` returned `ok`.
+- Remote AI sidecar `http://127.0.0.1:19090/health` returned `ok` with CUDA,
+  classifier, NSFW, OpenCLIP, BLIP captioning, Tesseract OCR, faster-whisper
+  ASR, and librosa audio-analysis components available/loaded.
+- Remote job table showed active production work:
+  - `6` running `ai_backfill` jobs;
+  - `1` running `hash` job;
+  - `4` running `reverse_geocode` jobs.
+- A second remote job sample confirmed counters were advancing, so the jobs were
+  leased and progressing rather than only displayed as stale running rows.
+- Remote stats at deploy time were approximately `542965` assets, `539125`
+  photos, `33025` videos, and `9563` GPS/KML tracks.
+- Queued root-level, strict-read-only discovery for currently available remote
+  storages through `/api/v1/indexing/start` with `max_files=-1` and missing
+  marking disabled by the server:
+  - `originals`;
+  - `old_compressed_data`;
+  - `old_nokia5228`;
+  - `old_x12_los20`;
+  - `old_ze554kl`.
+- Queued scoped metadata enrichment for the same available storages.
+- Follow-up remote job snapshot showed:
+  - `2` running and `3` queued `discovery` jobs;
+  - `5` queued `metadata_enrich` jobs;
+  - `6` running `ai_backfill` jobs;
+  - `1` running `hash` job;
+  - `1` running and `3` queued `reverse_geocode` jobs.
+- The separate `old_p770` storage root remained unavailable at the configured
+  mount path during this check, so no direct job was queued for that unavailable
+  storage name. Its parent storage remains available and indexed separately.
 
 ### Safety
 
@@ -5406,6 +5445,99 @@ Safety confirmation:
 - Built `/tmp/cartolensia-online-geocoder` and deployed it plus the rebuilt WebUI to `rjazhenka`.
 - Remote `/api/v1/places/providers` now reports `mode=online_cache`, `online_enabled=true`, active provider `nominatim`, URL `https://nominatim.openstreetmap.org`, and minimum interval `1100 ms`.
 - A remote authenticated `/api/v1/places/reverse` call with omitted `online` used the default online cache-fill path and stored one Nominatim result in `place_cache`.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
+## 2026-06-30 Production AI Queue Saturation and Lease Fix
+
+### Implemented
+
+- Investigated why `rjazhenka` GPU was intermittently idle while the archive
+  still had large AI queues.
+- Fixed AI-sidecar concurrency stability in
+  `services/ai/cartolensia_ai/models/real.py`:
+  - serialized unsafe native model loading;
+  - added bounded PyTorch/CUDA inference slots;
+  - added OpenCV YuNet and ASR guards;
+  - kept limits environment-configurable through
+    `CARTOLENSIA_AI_TORCH_PARALLELISM` and
+    `CARTOLENSIA_AI_ASR_PARALLELISM`.
+- Added bounded per-job AI asset parallelism in the Go worker path so large
+  backfill jobs keep multiple sidecar requests in flight without unbounded
+  memory growth.
+- Added `ai.job_parallelism` runtime setting and
+  `CARTOLENSIA_AI_JOB_PARALLELISM` environment override.
+- Added per-asset AI task reservation:
+  - selected assets are marked `running` before the sidecar call;
+  - missing-task queries skip recently running work;
+  - this reduces duplicate processing when multiple AI backfill lanes run.
+- Prioritized job leasing so production workers prefer AI backfill,
+  metadata-enrichment, discovery, hashing, geo snapping, then reverse
+  geocoding.
+- Fixed `reverse_geocode` jobs that updated progress but never completed their
+  leased job row. They now call `CompleteLeasedJob` after final counters/logs,
+  stopping repeated lease recycling.
+
+### Remote Deployment and Validation
+
+- Built `/tmp/cartolensia-reverse-geocode-complete` and deployed it to
+  `/opt/cartolensia/current/bin/cartolensia` on `rjazhenka`.
+- Restarted only the `cartolensia` service; `cartolensia-ai` was left running
+  to keep loaded models resident.
+- Remote services after deployment:
+  - `cartolensia`: active;
+  - `cartolensia-ai`: active;
+  - `cartolensia-postgres`: active;
+  - `https://127.0.0.1:18443/api/v1/health`: `ok`.
+- Remote active work after deployment:
+  - 11 `ai_backfill` lanes running across classify, safety, embed, describe,
+    faces, OCR, video transcript, and related tasks;
+  - discovery, hash, metadata enrichment, and reverse geocoding running;
+  - no new `expired job lease` messages in the latest post-deploy check.
+- Tuned remote AI sidecar concurrency:
+  - backed up `/etc/cartolensia/cartolensia.env`;
+  - changed `CARTOLENSIA_AI_TORCH_PARALLELISM` from `1` to `2`;
+  - restarted only `cartolensia-ai`;
+  - `/health` returned `ok` with `device=cuda`;
+  - sampled after restart with continued AI progress and no sidecar
+    `segv/core/traceback/exception/failed/error` log lines.
+- GPU observation:
+  - sampled at 66% during active classify/safety/embed/describe bursts;
+  - later samples still fluctuate because OCR, ASR, media fetch/decode, Samba
+    I/O, and PostgreSQL writes are not pure CUDA work;
+  - with two CUDA inference slots, progress continued across classify,
+    safety, embeddings, captions, faces, OCR, and transcription lanes.
+
+### Root Cause Notes
+
+- The queue was not finished. It still had hundreds of thousands of pending
+  per-feature targets.
+- GPU idling came from several combined causes:
+  - previous sidecar crashes under mixed concurrent model calls required
+    conservative inference guards;
+  - single-asset sidecar calls underfeed CUDA compared with true batched tensor
+    inference;
+  - Samba reads, image decoding, OCR, ASR, and DB writes create unavoidable
+    non-GPU intervals;
+  - reverse-geocode jobs were being repeatedly re-leased instead of completing,
+    causing worker churn.
+- Current implementation keeps many lanes active safely. Sustained near-100%
+  GPU utilization will require a future batched sidecar API for classify,
+  safety, embeddings, captions, and face detection rather than one HTTP request
+  per asset.
+
+### Validation
+
+- `python3 -m py_compile services/ai/cartolensia_ai/*.py services/ai/cartolensia_ai/models/*.py`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./internal/database ./internal/catalog ./internal/workers`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
 
 ### Safety Notes
 

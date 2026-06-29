@@ -60,6 +60,7 @@ var runtimeSettings = struct {
 	"knowledge.llm_idle_unload_minutes":                 envIntDefault("CARTOLENSIA_KNOWLEDGE_LLM_IDLE_UNLOAD_MINUTES", 5),
 	"knowledge.llm_max_context_items":                   envIntDefault("CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS", 24),
 	"ai.worker_endpoint":                                "http://127.0.0.1:19090",
+	"ai.job_parallelism":                                envIntDefault("CARTOLENSIA_AI_JOB_PARALLELISM", 4),
 	"transcode.session_ttl":                             "2h",
 }}
 
@@ -465,6 +466,7 @@ func runtimeSettingsSchema() []map[string]any {
 		{"tab": "knowledge", "key": "knowledge.llm_idle_unload_minutes", "type": "number", "label": "LLM idle unload minutes", "help": "Used by external runners that support idle unload policies."},
 		{"tab": "knowledge", "key": "knowledge.llm_max_context_items", "type": "number", "label": "LLM max context items", "help": "Caps facts/relations sent to the local LLM."},
 		{"tab": "ai", "key": "ai.worker_endpoint", "type": "text", "label": "AI worker endpoint", "help": "HTTP base URL for local or remote Cartolensia AI sidecar, for example http://ai-node:19090."},
+		{"tab": "ai", "key": "ai.job_parallelism", "type": "number", "label": "AI batch parallelism", "help": "Maximum in-flight sidecar requests per AI backfill batch. Increase on GPU servers; keep bounded for Samba/NAS safety."},
 		{"tab": "transcoding", "key": "transcode.session_ttl", "type": "text", "label": "Transcode session TTL"},
 	}
 }
