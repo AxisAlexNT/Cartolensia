@@ -5453,6 +5453,516 @@ Safety confirmation:
 - No missing-file marking.
 - No commit or push.
 
+## 2026-07-04 Marker CUDA/cuDNN GPU Fix
+
+### Root Cause
+
+- Remote Marker OCR was not reliably GPU-usable because the existing
+  `/var/lib/cartolensia/marker-venv` environment had `torch 2.12.1+cu130`
+  with CUDA 13.0 and cuDNN 9.20. A minimal CUDA convolution failed with
+  `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`, before Marker-specific logic.
+- Copying the venv also exposed a second packaging issue: console entrypoints
+  such as `marker_single` keep absolute shebangs, so the copied executable was
+  still invoking the old broken venv until its entrypoint was corrected.
+
+### Fixed
+
+- Built and validated an isolated remote GPU Marker environment:
+  `/var/lib/cartolensia/marker-venv-cu128-20260704T011311Z`.
+- Installed the official PyTorch CUDA 12.8 stack in the isolated venv:
+  `torch 2.8.0+cu128`, CUDA 12.8, cuDNN 9.10.
+- Validated on `rjazhenka`:
+  - `torch.cuda.is_available()` is true;
+  - device is `NVIDIA GeForce RTX 4060 Ti`;
+  - a CUDA convolution succeeds;
+  - `marker` and `surya` import successfully;
+  - a real Marker OCR conversion on an indexed PDF runs without the cuDNN
+    mismatch.
+- Pointed `/var/lib/cartolensia/marker-venv-gpu` at the validated venv and fixed
+  the cloned `marker_single` shebang to use the GPU venv Python.
+- Stopped the old CPU Marker shards that used `CUDA_VISIBLE_DEVICES=` and
+  `/var/lib/cartolensia/marker-venv/bin/marker_single`.
+- Restarted two document extraction shards with
+  `/var/lib/cartolensia/marker-venv-gpu/bin/marker_single`,
+  `CUDA_VISIBLE_DEVICES=0`, Marker OCR mode, and the existing local LLM summary
+  path.
+- Hardened `scripts/remote/run-document-backfill.py` with
+  `CARTOLENSIA_DOCUMENT_BACKFILL_MARKER_PYTHON` so future GPU Marker runs can
+  invoke Marker through an explicit venv Python instead of relying on
+  relocatable console-script shebangs.
+
+### Remote Status
+
+- Active GPU document workers:
+  - `remote-document-backfill-gpu-0`
+  - `remote-document-backfill-gpu-1`
+- Worker logs:
+  - `/var/lib/cartolensia/logs/document-backfill-marker-gpu-shard0-20260704T012530Z.log`
+  - `/var/lib/cartolensia/logs/document-backfill-marker-gpu-shard1-20260704T012530Z.log`
+- Early live validation showed the RTX 4060 Ti at 100% GPU utilization while
+  Marker OCR was running, with no CUDA/cuDNN/OOM errors in the shard logs.
+- Both GPU shards stored documents successfully after restart. At the final
+  check they were running at `2/1148` and `2/1122`, with an active
+  `marker-venv-gpu` child process and no CUDA/cuDNN/OOM errors in the shard
+  logs.
+
+### Validation
+
+- Remote isolated venv check:
+  - Python 3.12.3
+  - `torch 2.8.0+cu128`
+  - CUDA 12.8
+  - cuDNN 91002
+  - CUDA convolution OK
+  - Marker/Surya imports OK
+- Remote Marker command on a real indexed PDF completed without cuDNN mismatch.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/remote/run-ai-backfill.py scripts/remote/run-document-backfill.py`
+- `git diff --check -- scripts/remote/run-document-backfill.py scripts/remote/run-ai-backfill.py RUN_REPORT.md`
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+- The old CPU Marker venv remains present as a fallback; the GPU venv is
+  isolated under `/var/lib/cartolensia` and only worker metadata/document text
+  is written to PostgreSQL/cache.
+
+## 2026-07-04 PDF Marker OCR and AI Retry Supervision
+
+### Current Production Status
+
+- Remote host: `rjazhenka` via the production HTTPS service.
+- Indexed production DB snapshot during this run:
+  - 627,420 assets;
+  - 422,978 photos;
+  - 28,978 videos;
+  - 7,415 audio assets;
+  - 5,166 GPS/KML/GPX tracks;
+  - 162,883 document assets.
+- PDF coverage audit:
+  - 2,291 PDF assets found;
+  - 147 PDFs have `document_text` rows;
+  - 119 PDFs have local LLM summaries;
+  - 2 PDFs were confirmed extracted through Marker OCR mode at the time of the latest poll;
+  - 145 older rows were extracted by `pdftotext` and are now queued for Marker reprocessing;
+  - 2,144 PDFs still lacked document text at the time of the audit.
+- Reverse geocoding is still running:
+  - latest active job had scanned 51,931 geotagged rows;
+  - 50,794 were updated in that active pass;
+  - prior completed passes covered the full 97,687 geotagged asset set with
+    cached/provider rows where available.
+
+### Implemented
+
+- Added `scripts/remote/run-document-backfill.py`, a production document
+  worker that:
+  - reads document originals through configured read-only storage roots;
+  - writes extracted text/Markdown only to PostgreSQL;
+  - prefers Marker `OCRConverter` in no-LLM mode for PDFs;
+  - falls back to `pdftotext` and `mutool+tesseract` only if Marker cannot
+    produce usable text;
+  - summarizes extracted text through the local Ollama-compatible endpoint
+    (`qwen3:8b`) and stores the summary in `document_text.metadata_json`;
+  - cleans temporary extraction directories under the Cartolensia cache area;
+  - supports deterministic sharding with
+    `CARTOLENSIA_DOCUMENT_BACKFILL_SHARD_COUNT` and
+    `CARTOLENSIA_DOCUMENT_BACKFILL_SHARD_INDEX`.
+- Fixed Marker output parsing for the installed Marker version. It logs
+  `Saved markdown`, but in this deployment produces document JSON plus
+  metadata JSON; the worker now extracts text from Marker JSON safely.
+- Added task filtering to `scripts/remote/run-ai-backfill.py` through
+  `CARTOLENSIA_AI_BACKFILL_TASKS`, allowing separate GPU-oriented,
+  OCR-oriented, and audio/transcript backfill loops.
+- Hardened AI retry selection:
+  - retryable transient failures include sidecar connection failures,
+    timeouts, reset connections, EOFs, and supervised stale-running resets;
+  - terminal corrupt/unsupported inputs remain recorded instead of being
+    retried forever;
+  - attempted IDs are recorded in the worker state so one corrupt batch cannot
+    spin indefinitely.
+
+### Remote Actions
+
+- Deployed the patched `run-ai-backfill.py` and `run-document-backfill.py` to
+  `/opt/cartolensia/current/scripts/remote/` on `rjazhenka`.
+- Marker CUDA mode failed with a CUDNN sublibrary mismatch on this host. The
+  document worker was restarted with `CUDA_VISIBLE_DEVICES=` so Marker uses CPU
+  reliably while the image AI sidecar keeps CUDA available.
+- Replaced the unsharded PDF worker with two disjoint Marker shards:
+  - shard 0 selected 1,158 PDF documents;
+  - shard 1 selected 1,129 PDF documents.
+- Started separate AI loops:
+  - GPU/image loop for classify, safety, captions, embeddings, and faces;
+  - audio/transcript loop for audio feature extraction and ASR;
+  - the existing generic loop continued finishing OCR retries.
+
+### AI Processing Notes
+
+- The current indexed raster set is effectively exhausted for GPU-image work:
+  classify, safety, captions, embeddings, and face detection report no missing
+  retryable assets in the filtered worker.
+- Remaining failed AI rows are mostly terminal inputs:
+  - corrupt/truncated image streams;
+  - decompression-bomb-sized images;
+  - unsupported audio/decoder errors;
+  - media files over the sidecar input size limit;
+  - OCR/Tesseract timeouts on difficult images.
+- OCR and PDF Marker are CPU-heavy. The GPU can be idle while these are active
+  because there is no honest GPU work left in the current retryable image queue.
+  Future newly indexed raster assets will be picked up by the GPU-image loop.
+
+### Validation
+
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/remote/run-ai-backfill.py scripts/remote/run-document-backfill.py`
+- `git diff --check -- scripts/remote/run-document-backfill.py scripts/remote/run-ai-backfill.py`
+- Remote DB audits for:
+  - PDF coverage by extractor;
+  - active/queued jobs;
+  - AI task status counts;
+  - reverse-geocoding progress;
+  - discovery/metadata/hash job history.
+- Remote resource audit before increasing Marker parallelism:
+  - 58 GiB RAM, about 37-44 GiB available during checks;
+  - two Marker CPU workers fit without swap pressure;
+  - root filesystem had about 727 GiB free.
+
+### Known Limitations
+
+- Full Marker OCR for all PDFs will not complete in one short turn on CPU. At
+  observed rates it is a long-running production backfill, now supervised and
+  resumable through two shards.
+- Marker CUDA is disabled until the CUDNN/runtime mismatch is corrected.
+- HEIC/DNG/raw-image AI support is still outside the current raster selector;
+  those formats need a safe decode/convert path before image AI can process
+  them uniformly.
+- Some AI failures are expected to remain because the inputs are corrupt,
+  unsupported, too large for configured sidecar limits, or terminal decoder
+  failures.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
+## 2026-07-03 rjazhenka Missing-Only AI and Reverse-Geocode Supervision
+
+### Implemented / Operated
+
+- Audited the production `rjazhenka` queue and AI sidecar after the GPU appeared
+  idle. The root cause was not a stopped sidecar: most AI-eligible originals
+  already had either a completed task status or a recorded permanent failure, so
+  the remaining selectable queue was small.
+- Confirmed remote services are active:
+  - `cartolensia`
+  - `cartolensia-ai`
+  - `cartolensia-postgres`
+- Confirmed the AI sidecar is reachable on `127.0.0.1:19090`, running in real
+  mode with CUDA and local models/tools available for classification, faces,
+  NSFW, captions, embeddings, OCR, ASR, and audio analysis.
+- Enqueued missing-only scoped AI backfill work for remaining eligible assets:
+  - image classification
+  - NSFW/safety
+  - image captions
+  - image embeddings
+  - face detection
+  - OCR
+  - audio feature extraction
+  - video audio transcription
+- Requeued non-destructive discovery work for the `originals` storage and one
+  optional old-drive storage after stale lease failures. Missing-file marking
+  remained disabled.
+- Enqueued and supervised reverse geocoding for missing place metadata. The job
+  is cache-first and online-enabled according to configured provider settings;
+  provider results are persisted in the local `place_cache`.
+- Triaged repeated audio-analysis sidecar decoder errors as non-retryable after
+  supervised retries, preventing repeated GPU/CPU churn on files that the current
+  decoder stack cannot process reliably.
+- Reset stale `running` task rows from previous worker interruptions to retryable
+  failures, then queued targeted cleanup jobs.
+- Created a minimum viable production backup/export:
+  - `/var/lib/cartolensia/exports/cartolensia-min-backup-20260703T172838Z.tar.zst`
+  - SHA-256:
+    `6c848c47c510bd2f57ee5b25be7bdb4ef3cbe28dd593671ea556b43634332a61`
+  - Contents: PostgreSQL dump, configuration, systemd units, reports.
+  - Excludes: originals/Samba mounts, preview cache, model weights, Python venv,
+    and component caches.
+
+### Current Remote State
+
+- Active jobs at the final check:
+  - `discovery` running for `originals`, progress `23780`.
+  - `reverse_geocode` running, progress `16660`.
+  - `metadata_enrich` running, progress `72000 / 627420`.
+  - `ai_backfill` running for `video_transcript`, progress `27 / 205`.
+- Asset counts:
+  - audio: `7415`
+  - documents: `162883`
+  - photos: `422978`
+  - tracks: `5166`
+  - videos: `28978`
+- AI task status counts at the final check:
+  - `classify_image`: `387666` succeeded, `187` failed.
+  - `describe_image`: `387714` succeeded, `178` failed.
+  - `detect_faces`: `390046` succeeded, `212` failed.
+  - `embed_image`: `387698` succeeded, `252` failed.
+  - `ocr_image`: `390117` succeeded, `430` failed.
+  - `safety_nsfw`: `387654` succeeded, `203` failed.
+  - `analyze_audio`: `3268` succeeded, `163` failed.
+  - `transcribe_audio`: `26225` succeeded, `8443` failed, `1` running.
+- Place cache rows: `3583`.
+- GPU check during the active video-transcription backfill showed the
+  `NVIDIA GeForce RTX 4060 Ti` at `87%` utilization with `929 MiB / 16380 MiB`
+  used. GPU utilization will naturally drop between video/AI batches, during
+  Samba reads, unsupported media skips, reverse geocoding, DB writes, and
+  metadata-only jobs.
+
+### Known Limitations
+
+- Some originals will not receive every AI output because they are unsupported
+  for the given task, too large for configured safety limits, corrupt, silent, or
+  have no decodable audio/video stream. Those cases are recorded as failed or
+  triaged instead of being silently ignored.
+- Sustained near-100% GPU use for image AI still needs future true batch
+  inference in the sidecar. The current production-safe path uses scoped jobs and
+  per-asset sidecar calls, which leaves unavoidable non-GPU gaps for I/O,
+  decoding, OCR/ASR preprocessing, and DB writes.
+
+### Validation
+
+- Remote DB queue was checked directly through the local PostgreSQL socket/port.
+- Remote AI sidecar health was checked through `http://127.0.0.1:19090/health`.
+- Remote backup artifact and checksum were verified with `ls -lh` and the
+  generated `.sha256` file.
+- Remote GPU state was checked with `nvidia-smi`.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+- Backup/export was written only under `/var/lib/cartolensia/exports`.
+
+## 2026-07-03 Rjazhenka Full Processing Queue and Backup
+
+### Remote Supervision
+
+- Checked `rjazhenka` production services over SSH:
+  - `cartolensia`: active
+  - `cartolensia-ai`: active
+  - `cartolensia-postgres`: active
+- Confirmed AI sidecar health at `http://127.0.0.1:19090/health`:
+  - mode: `real`
+  - device: `cuda`
+  - capabilities: classification, faces, NSFW/safety, captions, image/text
+    embeddings, OCR, ASR transcription, and audio feature extraction.
+- Confirmed Tesseract language packs available through the sidecar:
+  English, Russian, Armenian, Chinese simplified/traditional, and OSD.
+
+### Work Queued
+
+- Enqueued missing-only production processing jobs for the strict read-only
+  storages:
+  - discovery: `originals`, `old_compressed_data`, `old_x12_los20`,
+    `old_nokia5228`, `old_p770`, `old_ze554kl`
+  - metadata enrichment: all media kinds, `only_missing=true`, unlimited
+  - reverse geocoding: missing coordinates, local cache first, online provider
+    enabled by configured policy
+  - AI backfills: classification, safety, captions, embeddings, face detection,
+    OCR, audio features, audio transcription, and video-audio transcription
+  - geotag snapping: bounded batch of recent timed tracks
+- Hashing was not queued because the production DB reported `0` unhashed
+  locations at the time of the audit.
+- The worker implementation currently supports these durable job kinds:
+  `discovery`, `discovery_dry_run`, `hash`, `metadata_enrich`, `geo_snap`,
+  `preview_generate`, `reverse_geocode`, and `ai_backfill`. Document/PDF
+  extraction and video-frame captioning have UI/API surfaces in progress but no
+  deployed durable worker in this build, so they were not queued as fake jobs.
+
+### Retry Handling
+
+- Historical AI failures were sampled before retrying.
+- Permanent-looking failures were left intact, including corrupt/truncated
+  images, decompression-bomb-sized images, media-size-limit failures, and audio
+  decode failures.
+- Marked only transient historical failures as retryable, preserving the
+  previous error in `metadata_json.previous_error`, then queued retry jobs:
+  - `classify_image`: 8,560 rows
+  - `describe_image`: 104 rows
+  - `detect_faces`: 222 rows
+  - `embed_image`: 6,882 rows
+  - `ocr_image`: 296 rows
+  - `safety_nsfw`: 138 rows
+  - `transcribe_audio`: 98 rows
+- Current `.ogg` audio-feature failures return the generic sidecar error
+  `AI sidecar returned status error`; these were not force-retired as
+  successful. They need a future sidecar improvement to preserve the real
+  librosa/audioread error as a specific retry/permanent reason.
+
+### Status Snapshot
+
+- Final snapshot at `2026-07-03T17:47:25+04:00`:
+  - running: discovery for `originals`, `old_compressed_data`,
+    `old_x12_los20`, and `old_ze554kl`
+  - running: metadata enrichment
+  - running: AI backfill for `classify`, `embed`, and `ocr`
+  - queued: remaining `geo_snap` jobs and one reverse-geocode job
+  - no recent job failures at the final snapshot
+- Two discovery jobs (`old_compressed_data`, `old_ze554kl`) briefly failed with
+  `job lease is not owned by worker`; both were reset to queued with the same
+  read-only payloads and without inserting duplicates.
+- Coverage counts at the final snapshot:
+  - assets: 627,420
+  - locations: 973,382
+  - AI predictions: 6,187,284
+  - embeddings: 385,072
+  - face detections: 483,497
+  - transcripts: 26,522
+  - audio feature rows: 6,381
+
+### Backup Export
+
+- Created a minimum production backup/export while jobs continued to run:
+  - `/var/lib/cartolensia/exports/cartolensia-min-backup-20260703T131917Z.tar.zst`
+  - size: 4.4 GB
+  - SHA-256:
+    `69e99549210fc7c395f10af9cc403edd3bfb499ed80c2dcfb8cd48e2a7d03056`
+- The backup includes:
+  - PostgreSQL custom-format dump
+  - Cartolensia config directories
+  - systemd unit files
+  - small job and asset summary reports
+- The backup intentionally excludes:
+  - original media and Samba mounts
+  - thumbnails/previews/cache
+  - AI model weights
+  - Python virtual environment
+  - component cache
+
+### Commands Run
+
+- Remote service and AI health checks through
+  `ssh -o BatchMode=yes -o ConnectTimeout=10 rjazhenka-cartolensia`.
+- Remote PostgreSQL queue audits and enqueue SQL through the production
+  PostgreSQL listener on `127.0.0.1:15432`.
+- Remote backup export with `/usr/bin/pg_dump`, `tar --zstd`, and `sha256sum`.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+- All generated backup/export files were written under
+  `/var/lib/cartolensia/exports` on the Cartolensia production host.
+
+## 2026-07-03 Rjazhenka Production Progress Check
+
+### Remote Status
+
+- Checked `rjazhenka` over SSH at `2026-07-03T03:10-03:18+04:00`.
+- `cartolensia` and `cartolensia-postgres` were active.
+- `cartolensia-ai` briefly appeared as `activating` during one health probe, then returned to `active/running`; `systemctl show` reported `NRestarts=2`.
+- AI sidecar logs showed live local requests for:
+  - `POST /transcribe-audio`
+  - `POST /safety-nsfw`
+  - `POST /detect-faces`
+  - health checks returning `200 OK`
+- No newly queued job failed during this check.
+
+### Current Scale Snapshot
+
+- Assets by media kind:
+  - `audio=7441`
+  - `document=274483`
+  - `photo=441024`
+  - `track=5187`
+  - `video=28991`
+- Locations: `973382`, with `222245` still unhashed at the time of the check.
+- GPS tracks: `5143`
+- Track points: `57711077`
+- Asset geotags: `97669`
+- AI records:
+  - `ai_predictions=6264325`
+  - `asset_tags=1140590`
+  - `asset_embeddings=390135`
+  - `face_detections=485368`
+  - `audio_features=6360`
+  - `asset_transcripts=26500`
+  - `asset_transcript_segments=394476`
+- Place cache rows: `3508`
+
+### Jobs Queued
+
+Queued a safe production pass for all configured read-only storages and metadata lanes:
+
+- Discovery jobs, one per storage:
+  - `originals`
+  - `old_compressed_data`
+  - `old_x12_los20`
+  - `old_nokia5228`
+  - `old_p770`
+  - `old_ze554kl`
+- Hash job for unhashed locations.
+- Metadata enrichment job with `only_missing=true`.
+- Reverse-geocode job with `only_missing=true`, `online=true`, and local cache-first behavior.
+- AI backfill jobs:
+  - `classify`
+  - `safety`
+  - `describe`
+  - `embed`
+  - `faces`
+  - `ocr`
+  - `audio_features`
+  - `audio_transcript`
+  - `video_transcript`
+
+A second follow-up AI round was queued for tasks without an active worker so newly indexed assets continue to be picked up while discovery and metadata enrichment are still progressing.
+
+Delayed AI sweep jobs were also scheduled for approximately `+30m`, `+2h`,
+and `+5h` so assets that become eligible later in the ongoing production scan
+are picked up without manual intervention. Each sweep covers:
+
+- `audio_features`
+- `audio_transcript`
+- `classify`
+- `describe`
+- `embed`
+- `faces`
+- `ocr`
+- `safety`
+- `video_transcript`
+
+### Running Work Observed
+
+- Discovery was running for:
+  - `originals`
+  - `old_compressed_data`
+  - `old_x12_los20`
+- `old_nokia5228` and `old_p770` completed with no returned files in this run.
+- `old_ze554kl` completed with `5110` returned files.
+- Hashing was running against the unhashed set.
+- Metadata enrichment was running across the indexed set.
+- Reverse geocoding was running.
+- AI backfills completed or ran depending on currently eligible assets; the latest observed active AI job was `video_transcript`.
+
+### Notes
+
+- The archive is not fully processed yet. Discovery, hashing, metadata enrichment, and reverse geocoding are still in progress.
+- Several AI backfill tasks currently report no eligible targets after the preceding large processing runs. This does not mean the whole archive is done; newly discovered and newly metadata-eligible assets should be picked up by subsequent backfill runs.
+- Some audio feature jobs continue to record errors for files that the Python audio stack cannot decode through the available backends. Those failures are metadata-only and do not modify originals.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
 ## 2026-06-30 Production AI Queue Saturation and Lease Fix
 
 ### Implemented

@@ -54,6 +54,12 @@ STATE_DIR = Path(os.environ.get("CARTOLENSIA_AI_BACKFILL_STATE_DIR", "/var/lib/c
 API_RETRIES = max(1, env_int("CARTOLENSIA_AI_BACKFILL_API_RETRIES", 6))
 API_RETRY_SLEEP_SECONDS = max(1, env_int("CARTOLENSIA_AI_BACKFILL_API_RETRY_SLEEP_SECONDS", 10))
 MAX_PROBE_LIMIT = max(100, env_int("CARTOLENSIA_AI_BACKFILL_MAX_PROBE_LIMIT", 50000))
+RETRY_FAILED_AFTER_HOURS = env_int("CARTOLENSIA_AI_BACKFILL_RETRY_FAILED_AFTER_HOURS", 24)
+TASK_FILTER = {
+    task.strip().lower()
+    for task in os.environ.get("CARTOLENSIA_AI_BACKFILL_TASKS", "").split(",")
+    if task.strip()
+}
 
 
 def log(message: str) -> None:
@@ -179,19 +185,111 @@ def quoted_ids(ids: Iterable[str]) -> str:
     return ", ".join(json.dumps(asset_id) for asset_id in ids)
 
 
+def sql_text_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def retryable_failure_sql(alias: str) -> str:
+    error_expr = f"lower(coalesce({alias}.error, ''))"
+    retryable_fragments = [
+        f"{error_expr} like '%connection refused%'",
+        f"{error_expr} like '%no ai sidecar is reachable%'",
+        f"{error_expr} like '%ai sidecar is not reachable%'",
+        f"{error_expr} like '%client.timeout exceeded%'",
+        f"{error_expr} like '%timed out%'",
+        f"{error_expr} like '%context deadline exceeded%'",
+        f"{error_expr} like '%temporary failure retryable%'",
+        f"{error_expr} like '%temporary failure%'",
+        f"{error_expr} like '%connection reset by peer%'",
+        f"{error_expr} like '%unexpected eof%'",
+        f"{error_expr} = 'ai sidecar returned status error'",
+        f"{error_expr} like '%ai sidecar returned status error%'",
+    ]
+    return "(" + " or ".join(retryable_fragments) + ")"
+
+
+def task_status_filter(task: str) -> str:
+    task_sql = sql_text_literal(task)
+    terminal_filter = (
+        "and not exists ("
+        f"select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task={task_sql} "
+        "and ats.status in ('succeeded', 'skipped')"
+        ")"
+    )
+    non_retryable_failed_filter = (
+        "and not exists ("
+        f"select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task={task_sql} "
+        f"and ats.status='failed' and not {retryable_failure_sql('ats')}"
+        ")"
+    )
+    if RETRY_FAILED_AFTER_HOURS < 0:
+        recent_retryable_failed_filter = (
+            "and not exists ("
+            f"select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task={task_sql} "
+            "and ats.status='failed'"
+            ")"
+        )
+    elif RETRY_FAILED_AFTER_HOURS == 0:
+        recent_retryable_failed_filter = ""
+    else:
+        recent_retryable_failed_filter = (
+            "and not exists ("
+            f"select 1 from ai_asset_task_status ats where ats.asset_id=a.id and ats.task={task_sql} "
+            f"and ats.status='failed' and {retryable_failure_sql('ats')} "
+            f"and ats.updated_at > now() - interval '{RETRY_FAILED_AFTER_HOURS} hours'"
+            ")"
+        )
+    return " ".join([terminal_filter, non_retryable_failed_filter, recent_retryable_failed_filter])
+
+
+IMAGE_EXTENSIONS_SQL = """
+              and exists (
+                    select 1 from asset_locations al
+                    where al.asset_id=a.id
+                      and lower(trim(leading '.' from al.extension)) in ('jpg','jpeg','png','webp','bmp','gif','tif','tiff')
+                  )
+"""
+
+
+OCR_EXTENSIONS_SQL = """
+              and exists (
+                    select 1 from asset_locations al
+                    where al.asset_id=a.id
+                      and lower(trim(leading '.' from al.extension)) in ('jpg','jpeg','png','webp','bmp','tif','tiff')
+                  )
+"""
+
+
+MEDIA_EXTENSION_SQL = """
+              and exists (
+                    select 1 from asset_locations al
+                    where al.asset_id=a.id
+                      and lower(trim(leading '.' from al.extension)) in ({extensions})
+                  )
+"""
+
+
+HAS_AUDIO_STREAM_SQL = """
+              and case
+                    when a.metadata_json ? 'has_audio_stream'
+                    then coalesce((a.metadata_json->>'has_audio_stream')::boolean, false)
+                    else true
+                  end
+"""
+
+
 TASKS = [
     {
         "name": "classify",
         "endpoint": "/api/v1/ai/jobs/classify",
         "batch": PHOTO_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='photo'
-              and not exists (
-                select 1 from ai_predictions p
-                where p.asset_id=a.id and p.task='classify_image'
-              )
+              {task_status_filter("classify_image")}
+              {IMAGE_EXTENSIONS_SQL}
+              and not exists (select 1 from ai_predictions p where p.asset_id=a.id and p.task='classify_image')
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
         """,
@@ -200,14 +298,13 @@ TASKS = [
         "name": "safety",
         "endpoint": "/api/v1/ai/jobs/safety",
         "batch": PHOTO_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='photo'
-              and not exists (
-                select 1 from ai_predictions p
-                where p.asset_id=a.id and p.task='safety_nsfw'
-              )
+              {task_status_filter("safety_nsfw")}
+              {IMAGE_EXTENSIONS_SQL}
+              and not exists (select 1 from ai_predictions p where p.asset_id=a.id and p.task='safety_nsfw')
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
         """,
@@ -216,14 +313,13 @@ TASKS = [
         "name": "caption",
         "endpoint": "/api/v1/ai/jobs/describe",
         "batch": PHOTO_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='photo'
-              and not exists (
-                select 1 from ai_predictions p
-                where p.asset_id=a.id and p.task='describe_image'
-              )
+              {task_status_filter("describe_image")}
+              {IMAGE_EXTENSIONS_SQL}
+              and not exists (select 1 from ai_predictions p where p.asset_id=a.id and p.task='describe_image')
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
         """,
@@ -232,10 +328,12 @@ TASKS = [
         "name": "embed",
         "endpoint": "/api/v1/ai/jobs/embed",
         "batch": PHOTO_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='photo'
+              {task_status_filter("embed_image")}
+              {IMAGE_EXTENSIONS_SQL}
               and not exists (select 1 from asset_embeddings e where e.asset_id=a.id)
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
@@ -245,14 +343,13 @@ TASKS = [
         "name": "ocr",
         "endpoint": "/api/v1/ai/jobs/ocr",
         "batch": OCR_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='photo'
-              and not exists (
-                select 1 from ai_predictions p
-                where p.asset_id=a.id and p.task='ocr_image'
-              )
+              {task_status_filter("ocr_image")}
+              {OCR_EXTENSIONS_SQL}
+              and not exists (select 1 from ai_predictions p where p.asset_id=a.id and p.task='ocr_image')
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
         """,
@@ -261,14 +358,13 @@ TASKS = [
         "name": "faces",
         "endpoint": "/api/v1/ai/jobs/faces",
         "batch": PHOTO_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='photo'
-              and not exists (
-                select 1 from face_detections f
-                where f.asset_id=a.id
-              )
+              {task_status_filter("detect_faces")}
+              {OCR_EXTENSIONS_SQL}
+              and not exists (select 1 from face_detections f where f.asset_id=a.id)
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
         """,
@@ -277,11 +373,14 @@ TASKS = [
         "name": "audio_features",
         "endpoint": "/api/v1/ai/jobs/audio-analyze",
         "batch": AUDIO_BATCH,
-        "sql": """
+        "sql": f"""
             select a.id::text
             from assets a
             where a.media_kind='audio'
-              and not exists (select 1 from audio_features f where f.asset_id=a.id)
+              {task_status_filter("analyze_audio")}
+              {MEDIA_EXTENSION_SQL.format(extensions="'mp3','wav','flac','ogg','oga','opus','m4a','aac','amr','3gp','3gpp','webm'")}
+              {HAS_AUDIO_STREAM_SQL}
+              and not exists (select 1 from audio_features af where af.asset_id=a.id)
             order by coalesce(a.taken_at, a.first_seen_at, a.updated_at), a.id
             limit $LIMIT
         """,
@@ -294,6 +393,9 @@ TASKS = [
             select a.id::text
             from assets a
             where a.media_kind='audio'
+              {task_status_filter("transcribe_audio")}
+              {MEDIA_EXTENSION_SQL.format(extensions="'mp3','wav','flac','ogg','oga','opus','m4a','aac','amr','3gp','3gpp','webm'")}
+              {HAS_AUDIO_STREAM_SQL}
               and not exists (select 1 from asset_transcripts t where t.asset_id=a.id)
               and case
                     when coalesce(a.metadata_json->>'duration_seconds','') ~ '^[0-9]+([.][0-9]+)?$'
@@ -312,6 +414,9 @@ TASKS = [
             select a.id::text
             from assets a
             where a.media_kind='video'
+              {task_status_filter("transcribe_audio")}
+              {MEDIA_EXTENSION_SQL.format(extensions="'mp4','mov','m4v','webm','mkv','avi','3gp','3gpp'")}
+              {HAS_AUDIO_STREAM_SQL}
               and not exists (select 1 from asset_transcripts t where t.asset_id=a.id)
               and case
                     when coalesce(a.metadata_json->>'duration_seconds','') ~ '^[0-9]+([.][0-9]+)?$'
@@ -324,11 +429,28 @@ TASKS = [
     },
 ]
 
+if TASK_FILTER:
+    known_tasks = {str(task["name"]).lower() for task in TASKS}
+    unknown_tasks = sorted(TASK_FILTER - known_tasks)
+    if unknown_tasks:
+        raise SystemExit(
+            "unknown CARTOLENSIA_AI_BACKFILL_TASKS entries: "
+            + ", ".join(unknown_tasks)
+            + "; known tasks are: "
+            + ", ".join(sorted(known_tasks))
+        )
+    TASKS = [task for task in TASKS if str(task["name"]).lower() in TASK_FILTER]
+    if not TASKS:
+        raise SystemExit("CARTOLENSIA_AI_BACKFILL_TASKS selected no tasks")
+
 
 def main() -> int:
     api = API()
     api.login()
-    log(f"AI backfill started against {BASE_URL}; batches are small and missing-work only")
+    log(
+        f"AI backfill started against {BASE_URL}; tasks="
+        f"{','.join(str(task['name']) for task in TASKS)}; batches are missing-work only"
+    )
     iteration = 0
     while True:
         iteration += 1
@@ -351,8 +473,11 @@ def main() -> int:
                 f"processed={result.get('processed')} skipped={result.get('skipped')} "
                 f"stored={result.get('stored')} errors={len(result.get('errors') or [])}"
             )
-            if not (result.get("errors") or []):
-                mark_seen(str(task["name"]), ids)
+            # Mark attempted assets in this driver run even when a subset fails.
+            # This prevents tight loops on corrupt files or long OCR/ASR timeouts.
+            # Durable per-asset task status remains the source of truth for future
+            # retry runs after the operator-configured retry window.
+            mark_seen(str(task["name"]), ids)
             if SLEEP_SECONDS:
                 time.sleep(SLEEP_SECONDS)
         if MAX_ITERATIONS and iteration >= MAX_ITERATIONS:
