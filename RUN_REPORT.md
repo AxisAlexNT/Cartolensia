@@ -5453,6 +5453,74 @@ Safety confirmation:
 - No missing-file marking.
 - No commit or push.
 
+## 2026-07-04 Local Full Offline Bundle Rebuild
+
+### Implemented
+
+- Recreated the deleted local runtime/package roots:
+  - `.cartolensia/models`
+  - `.cartolensia/components`
+  - `.cartolensia/ai-venv`
+  - `.cartolensia/realpeek-cache`
+  - `.cartolensia/exports`
+  - `.cartolensia/runtime`
+  - `dist/release`, `dist/local-full-cache`, `dist/local-full-work`
+- Hardened `scripts/release/build-local-full-tarzst.sh` for private local full bundles:
+  - full 7-Zip package mode remains available through `scripts/release/build-local-full-7z.sh`;
+  - optional FaceNet and Marker packaging are disabled unless explicitly enabled, matching current approval/provenance state;
+  - AI Python environments install with generated constraints matching the selected torch/torchvision versions;
+  - each AI environment runs an import smoke test after installation;
+  - project license and third-party notices are included in the package;
+  - Ollama runtime/model bundling is supported for private local use.
+- Added `config/local-full-tarzst-build.env` as the local full-build configuration.
+- Rebuilt the private local full offline package:
+  - archive: `dist/release/cartolensia-local-full-linux-x86_64-20260704.7z`
+  - checksum: `dist/release/cartolensia-local-full-linux-x86_64-20260704.7z.sha256`
+  - SHA-256: `bb6c2f2564fe3bbbfe16f76b158ab6c39f0d3aa723aceff35b91eb77ac0e2f1d`
+  - compressed size: about `24 GiB`
+  - staged uncompressed size: about `28 GiB`
+- The rebuilt package includes:
+  - Cartolensia backend binary and built WebUI assets;
+  - configs, docs, release helpers, startup/maintenance scripts;
+  - BtbN FFmpeg GPL shared Linux x86_64 build from the configured GitHub release URL;
+  - detected local Tesseract runtime/language data;
+  - local PostgreSQL runtime copied from the host `pg_config` installation;
+  - AI Python environments for `cpu-avx2`, `cpu-avx512`, `nvidia-cu128`, `intel-arc`, and `rocm-radeon`;
+  - reviewed AI model cache: EfficientNet-B0, MobileNetV3 Large, OpenCV YuNet, Falconsai NSFW, BLIP base, OpenCLIP ViT-B/32, and faster-whisper small;
+  - Ollama runtime and local `qwen3:8b` model cache for offline local LLM mode.
+- Patched the Ollama LLM client to send `think:false`, which is required for qwen3-style models to return visible concise answers instead of spending short prompts entirely in the thinking field.
+
+### Validation
+
+- `bash -n scripts/release/build-local-full-tarzst.sh scripts/release/build-local-full-7z.sh scripts/release/check-licenses.sh`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- AI venv import smoke tests for all packaged AI flavors completed during the package build.
+- `bash scripts/release/check-licenses.sh`
+- `7z t dist/release/cartolensia-local-full-linux-x86_64-20260704.7z`
+- `sha256sum -c dist/release/cartolensia-local-full-linux-x86_64-20260704.7z.sha256`
+- Confirmed archive contains:
+  - `components/ollama/bin/ollama`
+  - `models/ollama/manifests/registry.ollama.ai/library/qwen3/8b`
+- Local Ollama smoke test with `qwen3:8b` returned `cartolensia-llm-ok` when called with `think:false`.
+
+### Known Limitations
+
+- This is a private local/offline bundle, not a public redistribution artifact.
+- The BtbN FFmpeg build is GPL-enabled; no `--enable-nonfree` flag was detected by the package check.
+- GPU kernel drivers, Docker GPU runtimes, and host-level device access are not bundled and still must exist on the target host.
+- Ollama and model terms are component/model-specific; the bundle records provenance for private operator use, and public redistribution should be reviewed separately.
+- Offline maps are not bundled in this package.
+- ROCm/Intel AI environment entries are included as best-effort local runtime flavors; target-host GPU driver/runtime support still determines whether those accelerators are usable.
+
+### Safety Notes
+
+- No writes to `/mnt/Models/rclone`, Samba originals, or `/originals`.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
 ## 2026-07-04 Marker CUDA/cuDNN GPU Fix
 
 ### Root Cause

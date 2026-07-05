@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -58,6 +59,13 @@ func TestPostOllamaChat(t *testing.T) {
 	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/api/chat" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("request body is not JSON: %v", err)
+		}
+		if payload["think"] != false {
+			t.Fatalf("Ollama payload must disable thinking mode for qwen-style direct answers: %#v", payload["think"])
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,

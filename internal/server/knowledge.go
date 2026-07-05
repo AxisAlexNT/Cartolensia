@@ -1546,6 +1546,7 @@ func postOllamaChat(ctx context.Context, endpoint, model, prompt string, images 
 	payload := map[string]any{
 		"model":      model,
 		"stream":     onToken != nil,
+		"think":      false,
 		"keep_alive": fmt.Sprintf("%dm", keepAlive),
 		"options": map[string]any{
 			"temperature": 0.1,

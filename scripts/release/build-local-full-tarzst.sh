@@ -28,6 +28,9 @@ INCLUDE_POSTGRES="${CARTOLENSIA_LOCAL_FULL_INCLUDE_POSTGRES:-1}"
 INCLUDE_AI_ENVS="${CARTOLENSIA_LOCAL_FULL_INCLUDE_AI_ENVS:-1}"
 INCLUDE_MODELS="${CARTOLENSIA_LOCAL_FULL_INCLUDE_MODELS:-1}"
 INCLUDE_OFFLINE_MAPS="${CARTOLENSIA_LOCAL_FULL_INCLUDE_OFFLINE_MAPS:-0}"
+INCLUDE_FACENET="${CARTOLENSIA_LOCAL_FULL_INCLUDE_FACENET:-0}"
+INCLUDE_MARKER="${CARTOLENSIA_LOCAL_FULL_INCLUDE_MARKER:-0}"
+INCLUDE_OLLAMA="${CARTOLENSIA_LOCAL_FULL_INCLUDE_OLLAMA:-0}"
 REQUIRE_ALL_AI_FLAVORS="${CARTOLENSIA_LOCAL_FULL_REQUIRE_ALL_AI_FLAVORS:-1}"
 SKIP_PIP_INSTALL="${CARTOLENSIA_LOCAL_FULL_SKIP_PIP_INSTALL:-0}"
 PREPARE_MODELS="${CARTOLENSIA_LOCAL_FULL_PREPARE_MODELS:-1}"
@@ -42,6 +45,9 @@ PYTORCH_ROCM_INDEX_URL="${CARTOLENSIA_PYTORCH_ROCM_INDEX_URL:-}"
 PYTHON_BIN="${CARTOLENSIA_LOCAL_FULL_PYTHON:-python3}"
 AI_FLAVORS="${CARTOLENSIA_LOCAL_FULL_AI_FLAVORS:-cpu-avx2 cpu-avx512 nvidia-cu128 intel-arc rocm-radeon}"
 MODELS_DIR="${CARTOLENSIA_MODELS_DIR:-${ROOT_DIR}/.cartolensia/models}"
+OLLAMA_BIN="${CARTOLENSIA_LOCAL_FULL_OLLAMA_BIN:-$(command -v ollama || true)}"
+OLLAMA_MODELS_DIR="${CARTOLENSIA_LOCAL_FULL_OLLAMA_MODELS_DIR:-${MODELS_DIR}/ollama}"
+OLLAMA_MODEL_NAME="${CARTOLENSIA_LOCAL_FULL_OLLAMA_MODEL:-qwen3:8b}"
 OFFLINE_MAPS_DIR="${CARTOLENSIA_OFFLINE_MAPS_DIR:-}"
 PG_CONFIG="${CARTOLENSIA_PG_CONFIG:-$(command -v pg_config || true)}"
 TESSDATA_DIR="${CARTOLENSIA_TESSDATA_DIR:-}"
@@ -124,7 +130,26 @@ stage_project_files() {
   copy_tree "${ROOT_DIR}/scripts/release" "${STAGE}/scripts/release"
   copy_tree "${ROOT_DIR}/scripts/dist" "${STAGE}/scripts/dist"
   cp "${ROOT_DIR}/README.md" "${STAGE}/README.md"
+  cp "${ROOT_DIR}/LICENSE" "${STAGE}/LICENSE"
+  cp "${ROOT_DIR}/LICENSE" "${STAGE}/licenses/PROJECT-LICENSE.txt"
   cp "${ROOT_DIR}/AGENTS.md" "${STAGE}/docs/AGENTS.md" 2>/dev/null || true
+  {
+    printf '# Third-party notices\n\n'
+    printf 'This private local-full package contains Cartolensia plus operator-selected runtime components.\n'
+    printf 'See `manifest/components-manifest.json` for bundled component provenance and source notes.\n\n'
+    printf 'Important notes:\n\n'
+    printf '- Cartolensia is AGPL-3.0-or-later; see `licenses/PROJECT-LICENSE.txt`.\n'
+    printf '- The bundled BtbN FFmpeg build is GPL-enabled; see `licenses/ffmpeg-version.txt` and `licenses/ffmpeg-provenance.env`.\n'
+    printf '- Tesseract is Apache-2.0; language-data licensing can vary by language pack and source.\n'
+    printf '- Python package licenses are retained in each virtual environment under package `.dist-info` metadata.\n'
+    printf '- AI model provenance is recorded in `manifest/components-manifest.json`; model-license terms remain model-specific.\n'
+    printf '- Local LLM runtimes/models, when included, are operator-selected private-local components; verify model-specific terms before redistribution.\n'
+  } >"${STAGE}/licenses/THIRD_PARTY_NOTICES.md"
+  if have go; then
+    (cd "${ROOT_DIR}" && go list -m all) >"${STAGE}/licenses/go-modules.txt"
+  else
+    printf 'go command unavailable while writing notices\n' >"${STAGE}/licenses/go-modules.txt"
+  fi
   cat >"${STAGE}/config/production-bundle.yaml" <<'YAML'
 http:
   addr: ":18080"
@@ -302,7 +327,6 @@ opencv-python-headless
 transformers
 safetensors
 open-clip-torch
-facenet-pytorch
 faster-whisper
 ctranslate2
 librosa
@@ -315,6 +339,31 @@ scikit-learn
 webrtcvad
 pymupdf
 REQ
+  if [ "${INCLUDE_FACENET}" = "1" ]; then
+    cat >>"${req}" <<'REQ'
+facenet-pytorch
+REQ
+  fi
+  if [ "${INCLUDE_MARKER}" = "1" ]; then
+    cat >>"${req}" <<'REQ'
+marker-pdf
+REQ
+  fi
+}
+
+write_ai_constraints() {
+  local flavor="$1"
+  local env_dir="$2"
+  local constraints="${STAGE}/ai-envs/${flavor}/constraints.txt"
+  "${env_dir}/bin/python" - <<'PY' >"${constraints}"
+from importlib import metadata
+for package in ("torch", "torchvision"):
+    try:
+        print(f"{package}=={metadata.version(package)}")
+    except metadata.PackageNotFoundError:
+        pass
+PY
+  printf '%s\n' "${constraints}"
 }
 
 build_ai_env() {
@@ -333,7 +382,15 @@ build_ai_env() {
   local torch_index
   torch_index="$(torch_index_for_flavor "${flavor}")"
   "${env_dir}/bin/python" -m pip install torch torchvision --index-url "${torch_index}"
-  "${env_dir}/bin/python" -m pip install -r "${STAGE}/ai-envs/${flavor}/requirements-full.txt" --index-url "${PYPI_INDEX_URL}"
+  local constraints
+  constraints="$(write_ai_constraints "${flavor}" "${env_dir}")"
+  "${env_dir}/bin/python" -m pip install -r "${STAGE}/ai-envs/${flavor}/requirements-full.txt" --constraint "${constraints}" --index-url "${PYPI_INDEX_URL}" --extra-index-url "${torch_index}"
+  "${env_dir}/bin/python" - <<'PY'
+import importlib
+for name in ("torch", "torchvision", "fastapi", "uvicorn", "PIL", "cv2", "transformers", "open_clip", "faster_whisper", "librosa", "fitz"):
+    importlib.import_module(name)
+print("ai environment import smoke passed")
+PY
   append_component "ai-env-${flavor}" "AI Python environment ${flavor}" "python" "package licenses recorded by pip metadata" "${PYPI_INDEX_URL}; torch=${torch_index}" "ai-envs/${flavor}/venv"
 }
 
@@ -402,6 +459,33 @@ bundle_offline_maps() {
   append_component "offline-maps" "Operator-provided offline map tiles" "maps" "operator-provided" "operator-provided PMTiles/MBTiles" "components/offline-maps"
 }
 
+bundle_ollama() {
+  if [ "${INCLUDE_OLLAMA}" != "1" ]; then
+    append_component "ollama-runtime" "Ollama local LLM runtime" "llm" "not bundled" "https://ollama.com/" "missing"
+    append_component "ollama-model-${OLLAMA_MODEL_NAME}" "Ollama local LLM model ${OLLAMA_MODEL_NAME}" "llm-model" "not bundled" "ollama://${OLLAMA_MODEL_NAME}" "missing"
+    return 0
+  fi
+  if [ -z "${OLLAMA_BIN}" ] || [ ! -x "${OLLAMA_BIN}" ]; then
+    warn "CARTOLENSIA_LOCAL_FULL_INCLUDE_OLLAMA=1 but no executable Ollama binary was found"
+    append_component "ollama-runtime" "Ollama local LLM runtime" "llm" "missing" "https://ollama.com/" "missing"
+    append_component "ollama-model-${OLLAMA_MODEL_NAME}" "Ollama local LLM model ${OLLAMA_MODEL_NAME}" "llm-model" "missing runtime" "ollama://${OLLAMA_MODEL_NAME}" "missing"
+    return 0
+  fi
+  mkdir -p "${STAGE}/components/ollama/bin"
+  cp -L "${OLLAMA_BIN}" "${STAGE}/components/ollama/bin/ollama"
+  chmod +x "${STAGE}/components/ollama/bin/ollama"
+  "${STAGE}/components/ollama/bin/ollama" --version >"${STAGE}/licenses/ollama-version.txt" 2>&1 || true
+  append_component "ollama-runtime" "Ollama local LLM runtime" "llm" "operator-provided local binary; verify upstream terms before redistribution" "https://ollama.com/" "components/ollama"
+
+  if [ -d "${OLLAMA_MODELS_DIR}" ] && [ -n "$(find "${OLLAMA_MODELS_DIR}" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    copy_tree "${OLLAMA_MODELS_DIR}" "${STAGE}/models/ollama"
+    append_component "ollama-model-${OLLAMA_MODEL_NAME}" "Ollama local LLM model ${OLLAMA_MODEL_NAME}" "llm-model" "model-specific terms; private-local operator bundle" "ollama://${OLLAMA_MODEL_NAME}" "models/ollama"
+  else
+    warn "Ollama model cache is missing or empty: ${OLLAMA_MODELS_DIR}"
+    append_component "ollama-model-${OLLAMA_MODEL_NAME}" "Ollama local LLM model ${OLLAMA_MODEL_NAME}" "llm-model" "missing" "ollama://${OLLAMA_MODEL_NAME}" "missing"
+  fi
+}
+
 write_runtime_scripts() {
   note "writing runtime scripts"
   cat >"${STAGE}/bin/cartolensia-env" <<'SH'
@@ -436,7 +520,8 @@ export CARTOLENSIA_KNOWLEDGE_LLM_MAX_CONTEXT_ITEMS="${CARTOLENSIA_KNOWLEDGE_LLM_
 export CARTOLENSIA_LIBVA_DRIVER_NAME="${CARTOLENSIA_LIBVA_DRIVER_NAME:-radeonsi}"
 export CARTOLENSIA_VDPAU_DRIVER="${CARTOLENSIA_VDPAU_DRIVER:-radeonsi}"
 export CARTOLENSIA_TRANSCODE_PREFERRED_ACCELERATORS="${CARTOLENSIA_TRANSCODE_PREFERRED_ACCELERATORS:-nvidia,vaapi,cpu}"
-export PATH="${ROOT}/components/ffmpeg-btbn/bin:${ROOT}/components/tesseract/bin:${ROOT}/components/postgres/bin:${PATH}"
+export OLLAMA_MODELS="${OLLAMA_MODELS:-${ROOT}/models/ollama}"
+export PATH="${ROOT}/components/ollama/bin:${ROOT}/components/ffmpeg-btbn/bin:${ROOT}/components/tesseract/bin:${ROOT}/components/postgres/bin:${PATH}"
 export LD_LIBRARY_PATH="${ROOT}/components/ffmpeg-btbn/lib:${ROOT}/components/tesseract/lib:${ROOT}/components/postgres/lib:${ROOT}/components/postgres/pkglib:${LD_LIBRARY_PATH:-}"
 export TESSDATA_PREFIX="${TESSDATA_PREFIX:-${ROOT}/components/tesseract/share/tessdata}"
 export CARTOLENSIA_COMPONENT_DIR="${CARTOLENSIA_COMPONENT_DIR:-${ROOT}/components}"
@@ -653,15 +738,19 @@ PROVIDER="${1:-${CARTOLENSIA_KNOWLEDGE_LLM_PROVIDER:-ollama}}"
 MODEL="${2:-${CARTOLENSIA_KNOWLEDGE_LLM_MODEL:-qwen3:8b}}"
 case "${PROVIDER}" in
   ollama)
-    if ! command -v ollama >/dev/null 2>&1; then
-      echo "Ollama is not bundled by default. Install/provide it offline, then rerun this command." >&2
+    OLLAMA_CMD="${ROOT}/components/ollama/bin/ollama"
+    if [ ! -x "${OLLAMA_CMD}" ]; then
+      OLLAMA_CMD="$(command -v ollama || true)"
+    fi
+    if [ -z "${OLLAMA_CMD}" ] || [ ! -x "${OLLAMA_CMD}" ]; then
+      echo "Ollama is not bundled or available on PATH. Provide it offline, then rerun this command." >&2
       exit 1
     fi
     export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
     export OLLAMA_MODELS="${OLLAMA_MODELS:-${ROOT}/models/ollama}"
     mkdir -p "${OLLAMA_MODELS}"
     echo "Starting Ollama on ${OLLAMA_HOST}; model=${MODEL}; models=${OLLAMA_MODELS}" >&2
-    exec ollama serve
+    exec "${OLLAMA_CMD}" serve
     ;;
   vllm)
     PY="${CARTOLENSIA_VLLM_PYTHON:-}"
@@ -784,6 +873,10 @@ write_manifests() {
     printf 'include_ai_envs=%s\n' "${INCLUDE_AI_ENVS}"
     printf 'ai_flavors=%s\n' "${AI_FLAVORS}"
     printf 'include_models=%s\n' "${INCLUDE_MODELS}"
+    printf 'include_facenet=%s\n' "${INCLUDE_FACENET}"
+    printf 'include_marker=%s\n' "${INCLUDE_MARKER}"
+    printf 'include_ollama=%s\n' "${INCLUDE_OLLAMA}"
+    printf 'ollama_model=%s\n' "${OLLAMA_MODEL_NAME}"
     printf 'prepare_models=%s\n' "${PREPARE_MODELS}"
     printf 'safety_originals=package never writes to /originals; configure strict_read_only storage\n'
   } >"${STAGE}/manifest/build-manifest.env"
@@ -842,6 +935,7 @@ main() {
   bundle_ai_envs
   bundle_models
   bundle_offline_maps
+  bundle_ollama
   write_runtime_scripts
   write_manifests
   create_archive
