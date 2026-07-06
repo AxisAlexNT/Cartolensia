@@ -290,6 +290,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/videos/", s.handleVideoByID)
 	s.mux.HandleFunc("/api/v1/audio/analyze/start", s.handleAudioAnalyzeStart)
 	s.mux.HandleFunc("/api/v1/audio/", s.handleAudioByID)
+	s.mux.HandleFunc("/api/v1/documents", s.handleDocuments)
 	s.mux.HandleFunc("/api/v1/transcripts", s.handleTranscripts)
 	s.mux.HandleFunc("/api/v1/transcripts/", s.handleTranscriptByID)
 	s.mux.HandleFunc("/api/v1/geo-align/session", s.handleGeoAlignSessionCreate)
@@ -1567,6 +1568,142 @@ func (s *Server) handleTranscripts(w http.ResponseWriter, r *http.Request) {
 		"total":       len(transcripts),
 		"note":        "Transcripts are Cartolensia metadata only; no ASR sidecars are written beside originals.",
 	})
+}
+
+func (s *Server) handleDocuments(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	extension := strings.Trim(strings.ToLower(r.URL.Query().Get("extension")), ". ")
+	if extension == "" {
+		extension = "pdf"
+	} else if extension == "all" {
+		extension = ""
+	}
+	limit := intQuery(r.URL.Query(), "limit", 100, 1, 500)
+	offset := intQuery(r.URL.Query(), "offset", 0, 0, 1000000)
+	page, err := s.deps.Store.QueryAssets(r.Context(), catalog.AssetQuery{
+		Q:         q,
+		MediaKind: "document",
+		Extension: extension,
+		Limit:     limit,
+		Offset:    offset,
+		Sort:      "taken_at_desc",
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	type documentListItem struct {
+		Asset        catalog.Asset         `json:"asset"`
+		Document     *catalog.DocumentText `json:"document,omitempty"`
+		Title        string                `json:"title"`
+		Description  string                `json:"description"`
+		Summary      string                `json:"summary,omitempty"`
+		Status       string                `json:"status"`
+		Extension    string                `json:"extension,omitempty"`
+		RelativePath string                `json:"relative_path,omitempty"`
+	}
+	rows := make([]documentListItem, 0, len(page.Assets))
+	for _, asset := range page.Assets {
+		item := documentListItem{
+			Asset:        asset,
+			Title:        documentFallbackTitle(asset),
+			Description:  "Document text has not been extracted yet.",
+			Status:       "missing",
+			Extension:    firstLocationExtension(asset),
+			RelativePath: firstLocationPath(asset),
+		}
+		if doc, err := s.deps.Store.GetDocumentText(r.Context(), asset.ID); err == nil {
+			summary := documentSummary(doc)
+			doc.Text = ""
+			doc.Markdown = ""
+			item.Document = &doc
+			item.Title = firstNonEmpty(doc.Title, documentFallbackTitle(asset))
+			item.Summary = summary
+			item.Description = firstNonEmpty(summary, "Document text is extracted, but no LLM summary is stored yet.")
+			item.Status = "parsed"
+		} else if !errors.Is(err, catalog.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		rows = append(rows, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"documents": rows,
+		"page":      page.Page,
+		"note":      "Document rows omit full text and markdown; open Asset Detail for complete extracted content.",
+	})
+}
+
+func documentFallbackTitle(asset catalog.Asset) string {
+	if title := stringMetadataValue(asset.Metadata, "title"); title != "" {
+		return title
+	}
+	if len(asset.Locations) > 0 && strings.TrimSpace(asset.Locations[0].FileName) != "" {
+		return asset.Locations[0].FileName
+	}
+	return asset.DisplayName
+}
+
+func documentSummary(doc catalog.DocumentText) string {
+	for _, key := range []string{"llm_summary", "summary", "description"} {
+		if summary := stringMetadataValue(doc.Metadata, key); summary != "" {
+			return summary
+		}
+	}
+	if text := strings.TrimSpace(doc.Text); text != "" {
+		return truncateRunes(strings.Join(strings.Fields(text), " "), 420)
+	}
+	if markdown := strings.TrimSpace(doc.Markdown); markdown != "" {
+		return truncateRunes(strings.Join(strings.Fields(markdown), " "), 420)
+	}
+	return ""
+}
+
+func firstLocationExtension(asset catalog.Asset) string {
+	if len(asset.Locations) == 0 {
+		return ""
+	}
+	return asset.Locations[0].Extension
+}
+
+func firstLocationPath(asset catalog.Asset) string {
+	if len(asset.Locations) == 0 {
+		return ""
+	}
+	return asset.Locations[0].RelativePath
+}
+
+func stringMetadataValue(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	value, ok := meta[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func truncateRunes(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max]) + "..."
 }
 
 func (s *Server) handleTranscriptByID(w http.ResponseWriter, r *http.Request) {

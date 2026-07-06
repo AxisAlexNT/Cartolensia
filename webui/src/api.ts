@@ -351,6 +351,23 @@ export type DocumentTextRecord = {
   metadata?: Record<string, unknown>;
 };
 
+export type DocumentListItem = {
+  asset: Asset;
+  document?: DocumentTextRecord;
+  title: string;
+  description: string;
+  summary?: string;
+  status: "parsed" | "missing" | string;
+  extension?: string;
+  relative_path?: string;
+};
+
+export type DocumentListPage = {
+  documents: DocumentListItem[];
+  page: { limit: number; offset: number; total: number };
+  note?: string;
+};
+
 export type TrackSummary = {
   track_asset_id: string;
   name: string;
@@ -1546,6 +1563,21 @@ export const api = {
     }),
   aiSummary: () => request<Record<string, unknown>>("/api/v1/ai/summary"),
   aiTags: () => request<Record<string, unknown>>("/api/v1/ai/tags"),
+  documents: (params: { limit?: number; offset?: number; q?: string; extension?: string } = {}) => {
+    const query = new URLSearchParams({
+      limit: String(params.limit ?? 100),
+      offset: String(params.offset ?? 0)
+    });
+    if (params.q?.trim()) query.set("q", params.q.trim());
+    if (params.extension?.trim()) query.set("extension", params.extension.trim());
+    return request<DocumentListPage>(`/api/v1/documents?${query.toString()}`).then((page) => ({
+      ...page,
+      documents: asArray(page.documents).map((item) => ({
+        ...item,
+        asset: normalizeAsset(item.asset)
+      }))
+    }));
+  },
   transcripts: (limit = 200, offset = 0) =>
     request<TranscriptPage>(`/api/v1/transcripts?limit=${limit}&offset=${offset}`).then((page) => ({
       ...page,

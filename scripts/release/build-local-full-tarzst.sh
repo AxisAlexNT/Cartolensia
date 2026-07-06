@@ -138,12 +138,12 @@ stage_project_files() {
     printf 'This private local-full package contains Cartolensia plus operator-selected runtime components.\n'
     printf 'See `manifest/components-manifest.json` for bundled component provenance and source notes.\n\n'
     printf 'Important notes:\n\n'
-    printf '- Cartolensia is AGPL-3.0-or-later; see `licenses/PROJECT-LICENSE.txt`.\n'
-    printf '- The bundled BtbN FFmpeg build is GPL-enabled; see `licenses/ffmpeg-version.txt` and `licenses/ffmpeg-provenance.env`.\n'
-    printf '- Tesseract is Apache-2.0; language-data licensing can vary by language pack and source.\n'
-    printf '- Python package licenses are retained in each virtual environment under package `.dist-info` metadata.\n'
-    printf '- AI model provenance is recorded in `manifest/components-manifest.json`; model-license terms remain model-specific.\n'
-    printf '- Local LLM runtimes/models, when included, are operator-selected private-local components; verify model-specific terms before redistribution.\n'
+    printf '%s\n' '- Cartolensia is AGPL-3.0-or-later; see `licenses/PROJECT-LICENSE.txt`.'
+    printf '%s\n' '- The bundled BtbN FFmpeg build is GPL-enabled; see `licenses/ffmpeg-version.txt` and `licenses/ffmpeg-provenance.env`.'
+    printf '%s\n' '- Tesseract is Apache-2.0; language-data licensing can vary by language pack and source.'
+    printf '%s\n' '- Python package licenses are retained in each virtual environment under package `.dist-info` metadata.'
+    printf '%s\n' '- AI model provenance is recorded in `manifest/components-manifest.json`; model-license terms remain model-specific.'
+    printf '%s\n' '- Local LLM runtimes/models, when included, are operator-selected private-local components; verify model-specific terms before redistribution.'
   } >"${STAGE}/licenses/THIRD_PARTY_NOTICES.md"
   if have go; then
     (cd "${ROOT_DIR}" && go list -m all) >"${STAGE}/licenses/go-modules.txt"

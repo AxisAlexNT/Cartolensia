@@ -5453,6 +5453,138 @@ Safety confirmation:
 - No missing-file marking.
 - No commit or push.
 
+## 2026-07-06 PDF Parsing Page, Scoped Page Loading, And Full Local Offline Bundle
+
+### Implemented
+
+- Added `GET /api/v1/documents` for paginated document/PDF browsing.
+  - Defaults to PDF documents.
+  - Supports `extension=all`, `q`, `limit`, and `offset`.
+  - Returns title, short description/summary, status, extension, path, and
+    asset metadata without returning full document text/Markdown in list views.
+- Added a dedicated WebUI `PDF Parsing` page.
+  - Documents are clickable and open the asset detail page.
+  - Includes search, extension filtering, `Load more`, and `Load all`.
+  - Uses compact document cards with inferred title and summarized description.
+- Reworked page refresh behavior so the frontend loads only the active page by
+  default instead of fetching unrelated Explorer, Map, OCR, captions, jobs, and
+  other state for every route.
+  - Asset detail loading now remains focused on the requested asset.
+  - Background preloading is intentionally limited so the visible page is not
+    blocked by unrelated bulk state.
+- Fixed the full local bundle script so third-party notice generation handles
+  dash-prefixed lines correctly.
+
+### Deployment And Live Validation
+
+- Built a new backend binary and WebUI bundle and deployed them to the current
+  production service release.
+- Restarted the main Cartolensia service; the service reported active.
+- Authenticated API checks passed:
+  - `/api/v1/documents?limit=3` returned HTTP 200 with document rows.
+  - `/api/v1/documents?limit=2&offset=0` and `offset=2` returned paginated rows.
+  - `/api/v1/documents?extension=all&limit=2` returned mixed document rows.
+  - List responses were verified not to include full document text/Markdown.
+- Unauthenticated `/api/v1/documents` returned HTTP 401 as expected.
+
+### Full Local Offline Bundle
+
+- Rebuilt the private local-only full offline 7z distribution from the restored
+  `.cartolensia`/`dist` state.
+- Archive:
+  - `dist/release/cartolensia-local-full-linux-x86_64-20260704.7z`
+  - Size: `24G`
+  - SHA-256 file:
+    `dist/release/cartolensia-local-full-linux-x86_64-20260704.7z.sha256`
+- Bundle contents include the Cartolensia backend, built WebUI, configs,
+  docs/scripts, FFmpeg, Tesseract and language data, PostgreSQL runtime,
+  multiple AI Python runtime profiles, and reviewed local AI model caches.
+- Offline map packs were not bundled because no offline maps directory was
+  configured for this build.
+
+### Validation
+
+- `gofmt -w internal/server/server.go internal/server/server_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `bash scripts/release/check-licenses.sh`
+- `sha256sum -c dist/release/cartolensia-local-full-linux-x86_64-20260704.7z.sha256`
+- `7z t dist/release/cartolensia-local-full-linux-x86_64-20260704.7z`
+
+The 7z integrity test reported `Everything is Ok` with 397,532 files, 41,455
+folders, 52.4 GB unpacked, and 25.1 GB compressed.
+
+### Known Limitations
+
+- The PDF Parsing page currently displays existing extracted document text and
+  LLM/metadata summaries. It does not itself run Marker extraction; document
+  extraction remains a background/task workflow.
+- The full offline bundle intentionally does not include offline map tiles until
+  an operator-provided offline maps directory is configured.
+- `scripts/release/smoke-release.sh` extracts archives to a temporary
+  directory, so it was not used for the 52 GB unpacked full-local archive; the
+  non-writing `7z t` validation was used instead.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+- No production host name, address, hardware serial, credentials, or private
+  storage paths were added to this report.
+
+## 2026-07-06 PDF Parsing Page And Scoped Page Loading
+
+### Implemented
+
+- Added `GET /api/v1/documents` for paged PDF/document browsing.
+  - Defaults to PDFs and supports `extension=all`.
+  - Returns document title, summary/description, status, extension, relative
+    path, and asset link data.
+  - Omits full extracted text and Markdown from list rows so the page does not
+    ship large document bodies; complete content remains on Asset Detail.
+- Added a `PDF Parsing` WebUI page with search, extension filter, paging,
+  `Load more`, `Load all`, status badges, short summaries, and real asset
+  links.
+- Reworked top-level refresh behavior so normal refresh loads only the active
+  page's required data instead of eagerly fetching every page's state.
+  - Asset Detail continues to load the selected asset-specific metadata path.
+  - Page switches still fetch the target page on demand.
+- Added a backend regression test for the document list endpoint and bounded
+  list payload behavior.
+- Deployed the updated backend/WebUI to the production host without writing to
+  originals.
+
+### Validation
+
+- `gofmt -w internal/server/server.go internal/server/server_test.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- Production host:
+  - main service restarted and returned `active`;
+  - authenticated `GET /api/v1/documents?limit=3` returned HTTP 200, 3 rows,
+    and a paged total;
+  - authenticated paging checks for `limit=2`, `offset=0/2`, and
+    `extension=all` returned bounded rows and no full text/Markdown in list
+    payloads.
+
+### Known Limitations
+
+- The new PDF Parsing page shows stored LLM summaries when present; documents
+  without summaries fall back to a short local text/Markdown snippet if the
+  extraction row has one.
+- This run did not alter the document extraction/Marker pipeline itself.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
 ## 2026-07-04 Local Full Offline Bundle Rebuild
 
 ### Implemented

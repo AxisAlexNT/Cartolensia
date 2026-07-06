@@ -30,6 +30,7 @@ import {
   type BackendStatus,
   type ComponentEvent,
   type ComponentRecord,
+  type DocumentListItem,
   type DuplicatePage,
   type EnvironmentUsage,
   type ExplorerRow,
@@ -107,6 +108,7 @@ const nav = [
   "Base AI",
   "AI Classification",
   "OCR",
+  "PDF Parsing",
   "Transcripts",
   "Captions",
   "Face Gallery",
@@ -148,6 +150,10 @@ const navPageAliases: Record<string, string> = {
   ai: "Base AI",
   "ai-classification": "AI Classification",
   ocr: "OCR",
+  pdf: "PDF Parsing",
+  documents: "PDF Parsing",
+  "pdf-parsing": "PDF Parsing",
+  "document-parsing": "PDF Parsing",
   transcripts: "Transcripts",
   transcript: "Transcripts",
   captions: "Captions",
@@ -216,6 +222,7 @@ function navIcon(label: string): string {
     "Base AI": "bi-cpu",
     "AI Classification": "bi-tags",
     OCR: "bi-body-text",
+    "PDF Parsing": "bi-filetype-pdf",
     Transcripts: "bi-file-earmark-text",
     Captions: "bi-chat-square-text",
     "Face Gallery": "bi-person-bounding-box",
@@ -558,6 +565,13 @@ const transcriptLoading = ref(false);
 const transcriptsHasMore = ref(true);
 const transcriptSearchResults = ref<SearchResult[]>([]);
 const transcriptSearchMessage = ref("");
+const documentRows = ref<DocumentListItem[]>([]);
+const documentQuery = ref("");
+const documentExtension = ref("pdf");
+const documentLoading = ref(false);
+const documentsHasMore = ref(true);
+const documentPageTotal = ref(0);
+const documentPageNote = ref("");
 const vectorConfigHighlight = ref(false);
 const vectorStatus = ref<Record<string, unknown> | null>(null);
 const faceClustersPayload = ref<{ clusters: FaceCluster[]; total: number; provisional_note?: string } | null>(null);
@@ -757,6 +771,9 @@ function setActive(next: string, updateURL = true) {
   active.value = route;
   if (route === "Transcripts" && transcriptRows.value.length === 0 && !transcriptLoading.value) {
     void fetchTranscriptsPage(true);
+  }
+  if (route === "PDF Parsing" && documentRows.value.length === 0 && !documentLoading.value) {
+    void fetchDocumentsPage(true);
   }
   if ((route === "Knowledge Base" || route === "Knowledge Graph" || route === "LLM Chat") && knowledgeFacts.value.length === 0 && knowledgeRelations.value.length === 0) {
     void loadKnowledgeBase();
@@ -1093,6 +1110,43 @@ async function fetchTranscriptsPage(reset = false) {
     transcriptsHasMore.value = page.transcripts.length >= page.limit;
   } finally {
     transcriptLoading.value = false;
+  }
+}
+
+async function fetchDocumentsPage(reset = false) {
+  if (documentLoading.value) return;
+  documentLoading.value = true;
+  try {
+    const offset = reset ? 0 : documentRows.value.length;
+    const page = await api.documents({
+      limit: 100,
+      offset,
+      q: documentQuery.value,
+      extension: documentExtension.value
+    });
+    documentPageTotal.value = page.page.total;
+    documentPageNote.value = page.note ?? "";
+    if (reset) {
+      documentRows.value = page.documents;
+    } else {
+      const seen = new Set(documentRows.value.map((item) => item.asset.id));
+      documentRows.value = [
+        ...documentRows.value,
+        ...page.documents.filter((item) => !seen.has(item.asset.id))
+      ];
+    }
+    documentsHasMore.value = documentRows.value.length < page.page.total && page.documents.length > 0;
+  } finally {
+    documentLoading.value = false;
+  }
+}
+
+async function loadAllDocuments() {
+  let guard = 0;
+  while (documentsHasMore.value && guard < 1000) {
+    guard += 1;
+    await fetchDocumentsPage(false);
+    await nextTick();
   }
 }
 
@@ -3132,158 +3186,152 @@ async function refresh() {
       return;
     }
     publicAssets.value = [];
-    if (active.value === "Settings") {
-      await refreshSettingsPage();
-      return;
-    }
-    const [
-      jobRows,
-      jobStatData,
-      storageRows,
-      pluginRows,
-      statData,
-      duplicateData,
-      monthData,
-      backendStatus,
-      trackRows,
-      geojson,
-      mapStatusData,
-      albumRows,
-      previewStatus,
-      previewEntries,
-	      transcodeCaps,
-	      presetRows,
-	      metricsStatus,
-	      tileSourceRows,
-	      ai,
-	      aiWorkerRows,
-	      vector,
-	      aiSummaryPayload,
-	      aiTagsPayload,
-	      aiPredictionsPayload,
-	      aiFacesPayload,
-	      aiSafetyData,
-	      faceClusterPayload,
-	      settingsPayload,
-	      componentStatusPayload,
-	      placeCachePayload,
-	      editablePlacePayload,
-	      readinessPayload,
-	      exportRows
-    ] = await Promise.all([
-      fetchVisibleJobs(),
-      api.jobStats(),
-      api.storages(),
-      api.plugins(),
-      api.stats(),
-      api.duplicates(),
-      api.assetMonths(),
-      api.status(),
-      api.gpsTracks({ limit: trackPageSize, offset: 0, q: trackSearchQ.value.trim(), sort: "time_desc" }),
-      api.map(mapQuery()),
-      api.mapStatus(),
-      api.albums(),
-      api.previewStatus(),
-      api.previewCache(),
-      api.transcodingCapabilities(),
-      api.transcodingPresets(),
-	      api.transcodingMetricsStatus(),
-	      api.tileSources(),
-	      api.aiStatus(),
-	      api.aiWorkers(),
-	      api.vectorStatus(),
-	      api.aiSummary(),
-	      api.aiTags(),
-	      api.aiPredictions(aiPredictionLimit.value, 0, activePredictionQueryFilter(), activePredictionTaskFilter()),
-	      api.aiFaces(aiFaceLimit.value, 0, ""),
-	      api.aiSafety(),
-	      api.faceClusters(),
-	      api.settings(),
-	      api.componentStatus(),
-	      api.searchPlaces(),
-	      api.places(placeCacheQuery.value),
-	      api.readiness(),
-      api.dbExports()
-		]);
-		await fetchExplorerIntoState();
-		jobs.value = asArray(jobRows);
-    jobStats.value = jobStatData;
-    storages.value = asArray(storageRows);
-    plugins.value = asArray(pluginRows);
-    if (!selectedPluginSettingsId.value && plugins.value.length > 0) {
-      selectedPluginSettingsId.value = plugins.value[0].id;
-    }
-    await Promise.all(plugins.value.map(async (plugin) => {
-      if (pluginSettingText.value[plugin.id]) return;
-      const payload = await api.pluginSettings(plugin.id).catch(() => ({ settings: {} }));
-      pluginSettingText.value[plugin.id] = JSON.stringify((payload.settings ?? {}) as Record<string, unknown>, null, 2);
-    }));
-    stats.value = statData;
-    if (active.value === "Stats") {
-      environmentUsage.value = await api.environmentUsage().catch(() => null);
-    }
-    duplicatePage.value = duplicateData;
-    backendMonthBuckets.value = asArray(monthData);
-    backend.value = backendStatus;
-    tracks.value = asArray(trackRows);
-    tracksHasMore.value = tracks.value.length >= trackPageSize;
-    videoTrackTrackOptions.value = tracks.value;
-    if (videoTrackSelectedTracks.value.length === 0 && videoTrackSession.value?.track_ids?.length) {
-      videoTrackSelectedTracks.value = tracks.value.filter((track) =>
-        videoTrackSession.value?.track_ids.includes(track.track_asset_id)
-      );
-      videoTrackIds.value = videoTrackSelectedTracks.value.map((track) => track.track_asset_id).join(", ");
-    }
-    mapData.value = geojson;
-    mapStatus.value = mapStatusData;
-    albums.value = asArray(albumRows);
-    previewCacheStats.value = previewStatus.stats;
-    previewCache.value = asArray(previewEntries);
-    tileSources.value = asArray(tileSourceRows);
-    if (selectedAlbumId.value && !albums.value.some((album) => album.id === selectedAlbumId.value)) {
-      selectedAlbumId.value = "";
-      albumItems.value = null;
-    }
-    if (mapAlbumId.value && !albums.value.some((album) => album.id === mapAlbumId.value)) {
-      mapAlbumId.value = "";
-    }
-    if (selectedAlbumId.value) {
-      albumItems.value = await api.albumItems(selectedAlbumId.value).catch(() => null);
-    }
-    await refreshIndexingStatus();
-	    transcodingCapabilities.value = transcodeCaps;
-	    transcodePresets.value = asArray(presetRows);
-	    transcodeMetricsPayload.value = metricsStatus;
-	    aiStatus.value = ai;
-	    aiWorkers.value = aiWorkerRows;
-	    vectorStatus.value = vector;
-	    aiSummary.value = aiSummaryPayload;
-	    aiTagPayload.value = aiTagsPayload;
-	    aiPredictionPayload.value = aiPredictionsPayload;
-	    aiFacePayload.value = aiFacesPayload;
-	    aiSafetyPayload.value = aiSafetyData;
-    faceClustersPayload.value = faceClusterPayload;
-    settings.value = settingsPayload;
-    if (dryRunExtensions.value === supportedDiscoveryExtensions) {
-      const configuredExtensions = String(settingsPayload.runtime_settings?.["indexing.supported_extensions"] ?? "");
-      if (configuredExtensions.trim()) dryRunExtensions.value = configuredExtensions;
-    }
-    components.value = asArray(componentStatusPayload.components);
-    componentRoot.value = componentStatusPayload.root;
-    componentCounts.value = componentStatusPayload.counts ?? {};
-    readiness.value = readinessPayload;
-    searchPlaceCache.value = placeCachePayload;
-    editablePlaces.value = asArray(editablePlacePayload.places);
-    initializePendingConfig(settingsPayload);
-    dbExports.value = asArray(exportRows);
-    await loadVideoTrackVideoOptions();
-    if (settingsTab.value === "auth" && principal.value && backendStatus.auth?.mode === "local") {
-      apiTokens.value = await api.tokens().catch(() => []);
-    }
+    backend.value = await api.status().catch(() => backend.value);
+    await refreshActivePage();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     loading.value = false;
+  }
+}
+
+async function refreshActivePage() {
+  switch (active.value) {
+    case "Explorer": {
+      const [storageRows, monthData] = await Promise.all([
+        storages.value.length ? Promise.resolve(storages.value) : api.storages(),
+        api.assetMonths().catch(() => backendMonthBuckets.value)
+      ]);
+      storages.value = asArray(storageRows);
+      backendMonthBuckets.value = asArray(monthData);
+      await fetchExplorerIntoState();
+      break;
+    }
+    case "Discovery":
+      [storages.value, settings.value, jobs.value, jobStats.value] = await Promise.all([
+        api.storages(),
+        api.settings(),
+        fetchVisibleJobs(),
+        api.jobStats()
+      ]);
+      if (settings.value) {
+        initializePendingConfig(settings.value);
+      }
+      await refreshIndexingStatus();
+      break;
+    case "Jobs":
+      [jobs.value, jobStats.value] = await Promise.all([fetchVisibleJobs(), api.jobStats()]);
+      break;
+    case "Metadata":
+      stats.value = await api.stats();
+      break;
+    case "Storages":
+      storages.value = await api.storages();
+      break;
+    case "Plugins":
+      plugins.value = await api.plugins();
+      if (!selectedPluginSettingsId.value && plugins.value.length > 0) {
+        selectedPluginSettingsId.value = plugins.value[0].id;
+      }
+      break;
+    case "Stats":
+      [stats.value, environmentUsage.value] = await Promise.all([
+        api.stats(),
+        api.environmentUsage().catch(() => environmentUsage.value)
+      ]);
+      break;
+    case "Duplicates":
+      duplicatePage.value = await api.duplicates();
+      break;
+    case "Settings":
+      await refreshSettingsPage();
+      break;
+    case "Albums":
+      albums.value = await api.albums();
+      if (selectedAlbumId.value) {
+        albumItems.value = await api.albumItems(selectedAlbumId.value).catch(() => null);
+      }
+      break;
+    case "Map":
+      await refreshMap();
+      break;
+    case "Heatmap":
+      await refreshHeatmap();
+      break;
+    case "Places":
+      await loadPlacesHierarchy(true);
+      break;
+    case "Place Details":
+      await loadPlaceDetailFromRoute();
+      break;
+    case "GPS/KML Tracks":
+      await fetchTracksPage(true);
+      break;
+    case "Transcoding":
+      [transcodingCapabilities.value, transcodePresets.value, transcodeMetricsPayload.value] = await Promise.all([
+        api.transcodingCapabilities(),
+        api.transcodingPresets(),
+        api.transcodingMetricsStatus()
+      ]);
+      break;
+    case "Base AI":
+      [aiStatus.value, aiWorkers.value, vectorStatus.value, aiSummary.value, jobs.value] = await Promise.all([
+        api.aiStatus(),
+        api.aiWorkers(),
+        api.vectorStatus(),
+        api.aiSummary(),
+        fetchVisibleJobs()
+      ]);
+      break;
+    case "AI Classification":
+      [aiStatus.value, aiSummary.value, aiTagPayload.value, aiSafetyPayload.value] = await Promise.all([
+        api.aiStatus(),
+        api.aiSummary(),
+        api.aiTags(),
+        api.aiSafety()
+      ]);
+      await refreshAILists();
+      break;
+    case "OCR":
+      aiPredictionPayload.value = await api.aiPredictions(aiPredictionLimit.value, 0, activePredictionQueryFilter(), activePredictionTaskFilter());
+      break;
+    case "PDF Parsing":
+      await fetchDocumentsPage(true);
+      break;
+    case "Transcripts":
+      await fetchTranscriptsPage(true);
+      break;
+    case "Captions":
+      aiPredictionPayload.value = await api.aiPredictions(aiPredictionLimit.value, 0, activePredictionQueryFilter(), activePredictionTaskFilter());
+      break;
+    case "Face Gallery":
+      await refreshFaceClusters();
+      break;
+    case "Safety Review":
+      [aiStatus.value, aiSafetyPayload.value] = await Promise.all([api.aiStatus(), api.aiSafety()]);
+      break;
+    case "Search":
+      runSearchFromRouteQuery();
+      break;
+    case "LLM Chat":
+    case "Knowledge Base":
+    case "Knowledge Graph":
+      await Promise.all([loadKnowledgeBase(), refreshKnowledgeLLMStatus()]);
+      break;
+    case "Tasks":
+      [jobs.value, jobStats.value, settings.value] = await Promise.all([
+        fetchVisibleJobs(),
+        api.jobStats(),
+        settings.value ? Promise.resolve(settings.value) : api.settings()
+      ]);
+      if (settings.value) initializePendingConfig(settings.value);
+      break;
+    case "Geo Align":
+      await refreshGeoAlignMap();
+      break;
+    case "Video Track Player":
+      await Promise.all([loadVideoTrackVideoOptions(), fetchTracksPage(true)]);
+      break;
   }
 }
 
@@ -6641,18 +6689,6 @@ onMounted(async () => {
     } else {
       await openPublicAsset(assetID);
     }
-  } else if (active.value === "Transcripts") {
-    await fetchTranscriptsPage(true);
-  } else if (active.value === "Knowledge Base" || active.value === "Knowledge Graph" || active.value === "LLM Chat") {
-    await loadKnowledgeBase();
-  } else if (active.value === "Heatmap") {
-    await refreshHeatmap();
-  } else if (active.value === "Places") {
-    await loadPlacesHierarchy(true);
-  } else if (active.value === "Place Details") {
-    await loadPlaceDetailFromRoute();
-  } else if (active.value === "Search") {
-    runSearchFromRouteQuery();
   }
   await nextTick();
   renderOpenLayers();
@@ -9226,6 +9262,71 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
           </article>
+        </section>
+
+        <section v-else-if="active === 'PDF Parsing'" class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>PDF Parsing</h2>
+              <span>Browse PDF/document extraction records. Full text and Markdown load only from Asset Detail.</span>
+            </div>
+            <button type="button" class="btn btn-outline-primary" @click="setActive('Tasks')">
+              <i class="bi bi-filetype-pdf" aria-hidden="true"></i>
+              Open Tasks
+            </button>
+          </header>
+          <div class="list-toolbar">
+            <div class="input-group">
+              <input
+                v-model="documentQuery"
+                class="form-control"
+                type="search"
+                placeholder="Search PDF title, filename, path..."
+                @keyup.enter="fetchDocumentsPage(true)"
+              />
+              <select v-model="documentExtension" class="form-select compact-select" aria-label="Document extension">
+                <option value="pdf">PDF</option>
+                <option value="txt">TXT</option>
+                <option value="md">Markdown</option>
+                <option value="all">All documents</option>
+              </select>
+              <button type="button" class="btn btn-primary" :disabled="documentLoading" @click="fetchDocumentsPage(true)">Search</button>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn btn-sm btn-outline-primary" :disabled="documentLoading" @click="fetchDocumentsPage(true)">Refresh</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="documentLoading || !documentsHasMore" @click="fetchDocumentsPage(false)">Load more</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="documentLoading || !documentsHasMore" @click="loadAllDocuments">Load all</button>
+            </div>
+          </div>
+          <p class="muted">
+            {{ documentRows.length }} loaded<span v-if="documentPageTotal"> of {{ documentPageTotal }}</span>.
+            {{ documentPageNote }}
+          </p>
+          <div v-if="documentRows.length === 0 && !documentLoading" class="empty-state">
+            No PDF/document records match this filter. Run document extraction from Tasks or an Asset Detail page.
+          </div>
+          <div v-else class="document-list">
+            <article v-for="item in documentRows" :key="item.asset.id" class="document-card">
+              <div class="document-card-main">
+                <a class="document-title" :href="assetHref(item.asset.id)" @click="openAssetLink($event, item.asset.id)">
+                  {{ item.title || assetName(item.asset) }}
+                </a>
+                <p>{{ item.description }}</p>
+                <small class="muted">{{ item.relative_path || item.asset.display_name }}</small>
+              </div>
+              <div class="document-card-meta">
+                <span class="status-badge" :class="item.status === 'parsed' ? 'ok' : 'warn'">{{ item.status }}</span>
+                <span v-if="item.document?.page_count" class="chip">{{ item.document.page_count }} pages</span>
+                <span v-if="item.document?.engine" class="chip">{{ item.document.engine }}</span>
+                <span v-if="item.extension" class="chip">{{ item.extension }}</span>
+                <a class="btn btn-sm btn-outline-secondary" :href="assetHref(item.asset.id)" @click="openAssetLink($event, item.asset.id)">Open asset</a>
+              </div>
+            </article>
+          </div>
+          <p v-if="documentLoading" class="loading-tail">
+            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            Loading documents...
+          </p>
         </section>
 
         <section v-else-if="active === 'Transcripts'" class="panel">

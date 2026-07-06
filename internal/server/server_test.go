@@ -94,6 +94,33 @@ func TestDiscoveryHashAndMediaEndpoints(t *testing.T) {
 		t.Fatalf("unexpected filtered assets: %#v", filteredAssets)
 	}
 	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/documents?extension=all&limit=1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("documents status %d body %s", rec.Code, rec.Body.String())
+	}
+	var documentsPage struct {
+		Documents []struct {
+			Asset       catalog.Asset         `json:"asset"`
+			Document    *catalog.DocumentText `json:"document"`
+			Title       string                `json:"title"`
+			Description string                `json:"description"`
+			Status      string                `json:"status"`
+		} `json:"documents"`
+		Page catalog.Page `json:"page"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &documentsPage); err != nil {
+		t.Fatal(err)
+	}
+	if documentsPage.Page.Total != 1 || len(documentsPage.Documents) != 1 {
+		t.Fatalf("unexpected documents page: %#v", documentsPage.Page)
+	}
+	if documentsPage.Documents[0].Asset.MediaKind != "document" || documentsPage.Documents[0].Title == "" || documentsPage.Documents[0].Description == "" {
+		t.Fatalf("unexpected document row: %#v", documentsPage.Documents[0])
+	}
+	if documentsPage.Documents[0].Document != nil && (documentsPage.Documents[0].Document.Text != "" || documentsPage.Documents[0].Document.Markdown != "") {
+		t.Fatalf("document list must not include full text or markdown: %#v", documentsPage.Documents[0].Document)
+	}
+	rec = httptest.NewRecorder()
 	headOriginal := httptest.NewRequest(http.MethodHead, "/api/v1/media/"+filteredAssets[0].ID+"/original", nil)
 	srv.ServeHTTP(rec, headOriginal)
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") == "" {
