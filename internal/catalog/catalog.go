@@ -186,6 +186,46 @@ type DocumentText struct {
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
+type MusicMIDITranscription struct {
+	ID              string         `json:"id"`
+	AssetID         string         `json:"asset_id"`
+	SourceKind      string         `json:"source_kind"`
+	Provider        string         `json:"provider"`
+	Model           string         `json:"model,omitempty"`
+	Status          string         `json:"status"`
+	MIDICachePath   string         `json:"midi_cache_path,omitempty"`
+	DurationSeconds *float64       `json:"duration_seconds,omitempty"`
+	NoteCount       int            `json:"note_count"`
+	InstrumentCount int            `json:"instrument_count"`
+	Instruments     []string       `json:"instruments,omitempty"`
+	Summary         string         `json:"summary,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+type MusicStem struct {
+	Name            string         `json:"name"`
+	CachePath       string         `json:"cache_path,omitempty"`
+	MIME            string         `json:"mime,omitempty"`
+	DurationSeconds *float64       `json:"duration_seconds,omitempty"`
+	SizeBytes       int64          `json:"size_bytes,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+type MusicStemSet struct {
+	ID         string         `json:"id"`
+	AssetID    string         `json:"asset_id"`
+	SourceKind string         `json:"source_kind"`
+	Provider   string         `json:"provider"`
+	Model      string         `json:"model,omitempty"`
+	Status     string         `json:"status"`
+	StemSet    string         `json:"stem_set"`
+	OutputDir  string         `json:"output_dir,omitempty"`
+	Stems      []MusicStem    `json:"stems,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
 type Page struct {
 	Limit  int `json:"limit"`
 	Offset int `json:"offset"`
@@ -814,6 +854,10 @@ type Store interface {
 	ListVideoFrameCaptions(context.Context, string, int) ([]VideoFrameCaption, error)
 	UpsertDocumentText(context.Context, DocumentText) (DocumentText, error)
 	GetDocumentText(context.Context, string) (DocumentText, error)
+	UpsertMusicMIDITranscription(context.Context, MusicMIDITranscription) (MusicMIDITranscription, error)
+	ListMusicMIDITranscriptions(context.Context, string, int) ([]MusicMIDITranscription, error)
+	UpsertMusicStemSet(context.Context, MusicStemSet) (MusicStemSet, error)
+	ListMusicStemSets(context.Context, string, int) ([]MusicStemSet, error)
 	UpsertComponent(context.Context, Component) (Component, error)
 	ListComponents(context.Context, ComponentQuery) ([]Component, error)
 	GetComponent(context.Context, string) (Component, error)
@@ -858,6 +902,8 @@ type MemoryStore struct {
 	audioFeatures    map[string]AudioFeatures
 	frameCaptions    map[string][]VideoFrameCaption
 	documentText     map[string]DocumentText
+	midiTranscripts  map[string][]MusicMIDITranscription
+	musicStemSets    map[string][]MusicStemSet
 	aiTaskStatuses   map[string]AIAssetTaskStatus
 	components       map[string]Component
 	componentEvents  map[string][]ComponentEvent
@@ -889,6 +935,8 @@ func NewMemoryStore() *MemoryStore {
 		audioFeatures:    make(map[string]AudioFeatures),
 		frameCaptions:    make(map[string][]VideoFrameCaption),
 		documentText:     make(map[string]DocumentText),
+		midiTranscripts:  make(map[string][]MusicMIDITranscription),
+		musicStemSets:    make(map[string][]MusicStemSet),
 		aiTaskStatuses:   make(map[string]AIAssetTaskStatus),
 		components:       make(map[string]Component),
 		componentEvents:  make(map[string][]ComponentEvent),

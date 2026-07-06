@@ -70,6 +70,31 @@ The tar.zst builder also accepts:
 - `CARTOLENSIA_PYTORCH_ROCM_INDEX_URL`
 - `CARTOLENSIA_LOCAL_FULL_PREPARE_MODELS`
 - `CARTOLENSIA_LOCAL_FULL_SKIP_PIP_INSTALL`
+- `CARTOLENSIA_LOCAL_FULL_INCLUDE_MUSIC`
+- `CARTOLENSIA_LOCAL_FULL_REQUIRE_MUSIC`
+- `CARTOLENSIA_LOCAL_FULL_TRY_BASIC_PITCH`
+
+`CARTOLENSIA_LOCAL_FULL_INCLUDE_MUSIC=1` adds best-effort music analysis
+packages to each AI environment. Demucs plus MIDI summary readers
+(`pretty_midi`, `mido`) are installed when compatible. Basic Pitch is attempted
+only when the selected Python version is compatible with its upstream package
+range; Python 3.12 builds record it as a missing optional component unless the
+operator provides a reviewed compatible archive. Set
+`CARTOLENSIA_LOCAL_FULL_REQUIRE_MUSIC=1` only for controlled build hosts where
+music packages must be present or the package should fail.
+
+To produce a private 7-Zip full bundle from the same configuration:
+
+```bash
+bash scripts/release/build-local-full-7z.sh config/local-full-tarzst-build.env
+```
+
+The 7-Zip wrapper writes:
+
+```text
+dist/release/cartolensia-local-full-linux-x86_64-<version>.7z
+dist/release/cartolensia-local-full-linux-x86_64-<version>.7z.sha256
+```
 
 Build modes:
 

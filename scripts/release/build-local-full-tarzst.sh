@@ -31,6 +31,9 @@ INCLUDE_OFFLINE_MAPS="${CARTOLENSIA_LOCAL_FULL_INCLUDE_OFFLINE_MAPS:-0}"
 INCLUDE_FACENET="${CARTOLENSIA_LOCAL_FULL_INCLUDE_FACENET:-0}"
 INCLUDE_MARKER="${CARTOLENSIA_LOCAL_FULL_INCLUDE_MARKER:-0}"
 INCLUDE_OLLAMA="${CARTOLENSIA_LOCAL_FULL_INCLUDE_OLLAMA:-0}"
+INCLUDE_MUSIC="${CARTOLENSIA_LOCAL_FULL_INCLUDE_MUSIC:-1}"
+REQUIRE_MUSIC="${CARTOLENSIA_LOCAL_FULL_REQUIRE_MUSIC:-0}"
+TRY_BASIC_PITCH="${CARTOLENSIA_LOCAL_FULL_TRY_BASIC_PITCH:-1}"
 REQUIRE_ALL_AI_FLAVORS="${CARTOLENSIA_LOCAL_FULL_REQUIRE_ALL_AI_FLAVORS:-1}"
 SKIP_PIP_INSTALL="${CARTOLENSIA_LOCAL_FULL_SKIP_PIP_INSTALL:-0}"
 PREPARE_MODELS="${CARTOLENSIA_LOCAL_FULL_PREPARE_MODELS:-1}"
@@ -351,6 +354,25 @@ REQ
   fi
 }
 
+write_music_requirements() {
+  local flavor="$1"
+  local req="${STAGE}/ai-envs/${flavor}/requirements-music.txt"
+  mkdir -p "$(dirname "${req}")"
+  cat >"${req}" <<'REQ'
+# Optional music-analysis packages. These are intentionally installed after the
+# core sidecar environment so a resolver conflict cannot break AI startup.
+demucs
+pretty_midi
+mido
+REQ
+  cat >"${STAGE}/ai-envs/${flavor}/requirements-music-basic-pitch.txt" <<'REQ'
+# Basic Pitch currently supports Python 3.7-3.11 upstream. On Python 3.12+
+# this install is best-effort and may need an operator-provided component
+# archive built with Python 3.11.
+basic-pitch
+REQ
+}
+
 write_ai_constraints() {
   local flavor="$1"
   local env_dir="$2"
@@ -391,7 +413,80 @@ for name in ("torch", "torchvision", "fastapi", "uvicorn", "PIL", "cv2", "transf
     importlib.import_module(name)
 print("ai environment import smoke passed")
 PY
+  install_optional_music_packages "${flavor}" "${env_dir}" "${constraints}" "${torch_index}"
   append_component "ai-env-${flavor}" "AI Python environment ${flavor}" "python" "package licenses recorded by pip metadata" "${PYPI_INDEX_URL}; torch=${torch_index}" "ai-envs/${flavor}/venv"
+}
+
+install_optional_music_packages() {
+  local flavor="$1"
+  local env_dir="$2"
+  local constraints="$3"
+  local torch_index="$4"
+  write_music_requirements "${flavor}"
+  if [ "${INCLUDE_MUSIC}" != "1" ]; then
+    append_component "music-demucs-${flavor}" "Demucs music stem separation for ${flavor}" "music" "not bundled" "https://github.com/facebookresearch/demucs" "missing"
+    append_component "music-basic-pitch-${flavor}" "Basic Pitch music-to-MIDI for ${flavor}" "music" "not bundled" "https://github.com/spotify/basic-pitch" "missing"
+    return 0
+  fi
+
+  local music_failed=0
+  note "installing optional music packages for ${flavor}: demucs, pretty_midi, mido"
+  if "${env_dir}/bin/python" -m pip install -r "${STAGE}/ai-envs/${flavor}/requirements-music.txt" --constraint "${constraints}" --index-url "${PYPI_INDEX_URL}" --extra-index-url "${torch_index}"; then
+    if "${env_dir}/bin/python" - <<'PY'
+import importlib
+for name in ("demucs", "pretty_midi", "mido"):
+    importlib.import_module(name)
+print("optional music stem/MIDI summary imports passed")
+PY
+    then
+      append_component "music-demucs-${flavor}" "Demucs music stem separation for ${flavor}" "music" "MIT package; verify model checkpoint terms in the local manifest" "https://github.com/facebookresearch/demucs" "ai-envs/${flavor}/venv"
+    else
+      music_failed=1
+      append_component "music-demucs-${flavor}" "Demucs music stem separation for ${flavor}" "music" "import failed" "https://github.com/facebookresearch/demucs" "missing"
+    fi
+  else
+    music_failed=1
+    warn "optional Demucs music packages failed for ${flavor}; core AI environment remains usable"
+    append_component "music-demucs-${flavor}" "Demucs music stem separation for ${flavor}" "music" "install failed" "https://github.com/facebookresearch/demucs" "missing"
+  fi
+
+  local py_minor
+  py_minor="$("${env_dir}/bin/python" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+  if [ "${TRY_BASIC_PITCH}" = "1" ] && "${env_dir}/bin/python" - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info < (3, 12) else 1)
+PY
+  then
+    note "installing optional Basic Pitch music-to-MIDI for ${flavor}"
+    if "${env_dir}/bin/python" -m pip install -r "${STAGE}/ai-envs/${flavor}/requirements-music-basic-pitch.txt" --constraint "${constraints}" --index-url "${PYPI_INDEX_URL}" --extra-index-url "${torch_index}"; then
+      if "${env_dir}/bin/python" - <<'PY'
+import importlib
+importlib.import_module("basic_pitch")
+print("optional Basic Pitch import passed")
+PY
+      then
+        append_component "music-basic-pitch-${flavor}" "Basic Pitch music-to-MIDI for ${flavor}" "music" "Apache-2.0 project; verify installed package metadata" "https://github.com/spotify/basic-pitch" "ai-envs/${flavor}/venv"
+      else
+        music_failed=1
+        append_component "music-basic-pitch-${flavor}" "Basic Pitch music-to-MIDI for ${flavor}" "music" "import failed" "https://github.com/spotify/basic-pitch" "missing"
+      fi
+    else
+      music_failed=1
+      warn "optional Basic Pitch install failed for ${flavor}; provide a reviewed Python 3.11 component archive if needed"
+      append_component "music-basic-pitch-${flavor}" "Basic Pitch music-to-MIDI for ${flavor}" "music" "install failed; Python ${py_minor}" "https://github.com/spotify/basic-pitch" "missing"
+    fi
+  else
+    warn "skipping Basic Pitch for ${flavor}: Python ${py_minor} is outside the upstream-supported 3.7-3.11 range or TRY_BASIC_PITCH=0"
+    append_component "music-basic-pitch-${flavor}" "Basic Pitch music-to-MIDI for ${flavor}" "music" "not bundled; Python ${py_minor} outside upstream-supported 3.7-3.11 range" "https://github.com/spotify/basic-pitch" "missing"
+  fi
+
+  if [ "${music_failed}" = "1" ] && [ "${REQUIRE_MUSIC}" = "1" ]; then
+    die "one or more optional music packages failed for ${flavor}; set CARTOLENSIA_LOCAL_FULL_REQUIRE_MUSIC=0 for best-effort bundles"
+  fi
 }
 
 bundle_ai_envs() {

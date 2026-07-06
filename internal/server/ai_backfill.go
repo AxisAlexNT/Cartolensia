@@ -61,6 +61,8 @@ func aiBackfillTaskSpecs() []aiBackfillTaskSpec {
 		{Task: "audio_features", Kind: "analyze_audio", MediaKind: "audio"},
 		{Task: "audio_transcript", Kind: "transcribe_audio", MediaKind: "audio"},
 		{Task: "video_transcript", Kind: "transcribe_audio", MediaKind: "video"},
+		{Task: "music_midi_audio", Kind: "music_midi", MediaKind: "audio"},
+		{Task: "music_midi_video", Kind: "music_midi", MediaKind: "video"},
 	}
 }
 
@@ -109,9 +111,9 @@ func (s *Server) handleAIBackfillStart(w http.ResponseWriter, r *http.Request) {
 			StartedAt:          now,
 		}
 		switch spec.Task {
-		case "audio_transcript":
+		case "audio_transcript", "music_midi_audio":
 			payload.MaxDurationSeconds = req.MaxAudioSeconds
-		case "video_transcript":
+		case "video_transcript", "music_midi_video":
 			payload.MaxDurationSeconds = req.MaxVideoSeconds
 		}
 		job, err := s.deps.Store.EnqueueJob(r.Context(), jobs.New("ai_backfill", payload))

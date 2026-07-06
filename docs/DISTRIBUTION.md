@@ -131,6 +131,19 @@ dist/release/cartolensia-...-full.tar.zst
 dist/release/cartolensia-...-full.tar.zst.sha256
 ```
 
+For a private 7-Zip bundle, run:
+
+```bash
+bash scripts/release/build-local-full-7z.sh config/local-full-tarzst-build.env
+```
+
+The 7-Zip wrapper emits:
+
+```text
+dist/release/cartolensia-local-full-linux-x86_64-<version>.7z
+dist/release/cartolensia-local-full-linux-x86_64-<version>.7z.sha256
+```
+
 Extract on the target host:
 
 ```bash
@@ -354,13 +367,15 @@ Audio/document/ASR features are component-managed in offline packages.
 
 - FFmpeg/FFprobe are required for rich audio/video metadata and are listed in the component manifest when bundled.
 - Tesseract and tessdata language packs are required for OCR and are listed individually.
-- faster-whisper, ctranslate2, librosa/scipy, Marker/PDF tooling, and any advanced video/genre models are optional payloads. Bundle them only after license/provenance review.
+- faster-whisper, ctranslate2, librosa/scipy, Basic Pitch, Demucs, Marker/PDF tooling, and any advanced video/genre/music models are optional payloads. Bundle them only after license/provenance review.
 - ASR and document models must be stored under package-local component/model/runtime directories, never under original media roots.
-- Offline packages should expose missing ASR/Marker/genre components as actionable Component Manager states if they are not bundled.
-- Current ASR/audio component keys are `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, and `audio-soundfile`.
+- Offline packages should expose missing ASR/Marker/genre/music components as actionable Component Manager states if they are not bundled.
+- Current ASR/audio/music component keys are `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, `audio-soundfile`, `music-basic-pitch`, `music-demucs`, and optional future `music-mt3`.
 - `faster-whisper-small` can be bundled only when model weight provenance has been reviewed and the package manifest records the source cache path under `.cartolensia/models/faster-whisper`.
 - PyMuPDF is AGPL-3.0-or-later and is tracked as `document-pymupdf`; include it only when the release package and notices satisfy its terms.
 - Audio feature labels are currently heuristic when no reviewed genre model is bundled; do not advertise offline packages as having a production genre classifier unless a reviewed model is included.
+- Basic Pitch MIDI outputs are compact enough for selected and broad backfill jobs. Demucs stem outputs are large and should be kept on-demand or limited to selected assets/albums, with cache cleanup policy documented for the target installation.
+- The local-full package builder installs music packages after the core AI sidecar environment. Demucs is best-effort and does not block the core bundle by default. Basic Pitch is best-effort because the upstream package currently targets Python 3.7-3.11; on Python 3.12+ the bundle records `music-basic-pitch` as missing unless the operator provides a reviewed compatible component archive.
 
 The current Linux package flow can include the application, WebUI, OCR/media tools, PostgreSQL runtime, Python runtime, and reviewed model cache. It does not bundle host GPU drivers, public map data, online geocoders, or unreviewed model weights.
 Production containers should use the shipped compose file plus a user-provided `.env.production` or shell environment. The app should remain in `strict_read_only` mode for the archive storage unless a separate tested write path exists.
@@ -371,7 +386,7 @@ The live real-peek environment currently has the core multimedia stack available
 
 - FFmpeg/FFprobe system tools;
 - Tesseract plus English, Russian, Armenian, Simplified Chinese, and Traditional Chinese tessdata;
-- Python AI runtime with PyTorch/torchvision, OpenCV YuNet, Falconsai NSFW, OpenCLIP, BLIP, faster-whisper small, CTranslate2, librosa, SoundFile, and PyMuPDF.
+- Python AI runtime with PyTorch/torchvision, OpenCV YuNet, Falconsai NSFW, OpenCLIP, BLIP, faster-whisper small, CTranslate2, librosa, SoundFile, PyMuPDF, and optionally reviewed Basic Pitch/Demucs music packages.
 
 For an offline target machine, place reviewed component payloads under the extracted package's `.cartolensia/components` and `.cartolensia/models` directories, or provide paths through Settings -> Components after launch. Do not place tools, model weights, OCR data, ASR models, or Python environments under the original media root.
 
@@ -380,6 +395,9 @@ The following optional components are intentionally not bundled/downloaded until
 - `vmaf`: current FFmpeg lacks `libvmaf`; bundle only a reviewed libvmaf/FFmpeg component and record its flags.
 - `asr-model-medium`: optional quality upgrade over installed faster-whisper small.
 - `mobilenetv3-large`: optional classifier fallback weights; EfficientNet-B0 is the active classifier.
+- `music-basic-pitch`: optional music-to-MIDI provider; on Python 3.12+ prefer a reviewed Python 3.11 component archive until upstream package compatibility changes.
+- `music-demucs`: on-demand stem separation package and model weights; include only with provenance review because output cache can grow quickly.
+- `music-mt3`: optional future multi-instrument transcription provider; not required for the default Basic Pitch MIDI path.
 
 For a self-sufficient offline package, include:
 

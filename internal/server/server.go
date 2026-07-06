@@ -325,6 +325,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ai/jobs/ocr", s.handleAIJobRequest("ocr_image"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/transcribe", s.handleAIJobRequest("transcribe_audio"))
 	s.mux.HandleFunc("/api/v1/ai/jobs/audio-analyze", s.handleAIJobRequest("analyze_audio"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/music-midi", s.handleAIJobRequest("music_midi"))
+	s.mux.HandleFunc("/api/v1/ai/jobs/music-stems", s.handleAIJobRequest("music_stems"))
 	s.mux.HandleFunc("/api/v1/ai/predictions", s.handleAIPredictions)
 	s.mux.HandleFunc("/api/v1/ai/safety/", s.handleAISafetyByAsset)
 	s.mux.HandleFunc("/api/v1/faces/clusters", s.handleFaceClusters)
@@ -3867,6 +3869,25 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "features": features})
+		case "music", "midi":
+			midi, err := s.deps.Store.ListMusicMIDITranscriptions(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 20, 100))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			stems, err := s.deps.Store.ListMusicStemSets(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 20, 100))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "midi": midi, "stems": stems})
+		case "stems":
+			stems, err := s.deps.Store.ListMusicStemSets(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 20, 100))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "stems": stems, "total": len(stems)})
 		case "frame-captions", "video-analysis":
 			captions, err := s.deps.Store.ListVideoFrameCaptions(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 200, 1000))
 			if err != nil {
@@ -4694,6 +4715,10 @@ func aiJobAuditTimeout(kind string, req aiJobRequest) time.Duration {
 		return 8 * time.Hour
 	case "analyze_audio":
 		return 4 * time.Hour
+	case "music_midi":
+		return 6 * time.Hour
+	case "music_stems":
+		return 12 * time.Hour
 	default:
 		return 2 * time.Hour
 	}
@@ -4859,6 +4884,10 @@ func (s *Server) runSingleAIAsset(ctx context.Context, endpoint, apiPath, kind s
 		timeout = 45 * time.Minute
 	} else if kind == "analyze_audio" {
 		timeout = 10 * time.Minute
+	} else if kind == "music_midi" {
+		timeout = 30 * time.Minute
+	} else if kind == "music_stems" {
+		timeout = 2 * time.Hour
 	}
 	response, err := callAISidecarWithTimeout(ctx, endpoint+apiPath, payload, timeout)
 	if err != nil {
@@ -4913,7 +4942,7 @@ func aiJobParallelism(kind string, targets int) int {
 		fallback = 2
 	case "detect_faces", "ocr_image", "analyze_audio":
 		fallback = 2
-	case "transcribe_audio":
+	case "transcribe_audio", "music_midi", "music_stems":
 		fallback = 1
 	}
 	configured := envIntDefault("CARTOLENSIA_AI_JOB_PARALLELISM", runtimeIntSetting("ai.job_parallelism", fallback))
@@ -5074,6 +5103,10 @@ func aiSidecarPath(kind string) string {
 		return "/transcribe-audio"
 	case "analyze_audio":
 		return "/analyze-audio"
+	case "music_midi":
+		return "/music-to-midi"
+	case "music_stems":
+		return "/separate-music"
 	default:
 		return ""
 	}
@@ -5087,6 +5120,8 @@ func aiSupportedMediaKinds(kind string) []string {
 		return []string{"audio", "video"}
 	case "analyze_audio":
 		return []string{"audio"}
+	case "music_midi", "music_stems":
+		return []string{"audio", "video"}
 	default:
 		return nil
 	}
@@ -5100,6 +5135,8 @@ func aiSupportsAsset(kind string, asset catalog.Asset) bool {
 		return (asset.MediaKind == "audio" || asset.MediaKind == "video") && assetHasAISupportedExtension(kind, asset)
 	case "analyze_audio":
 		return asset.MediaKind == "audio" && assetHasAISupportedExtension(kind, asset)
+	case "music_midi", "music_stems":
+		return (asset.MediaKind == "audio" || asset.MediaKind == "video") && assetHasAISupportedExtension(kind, asset)
 	default:
 		return false
 	}
@@ -5135,6 +5172,11 @@ func aiSupportedAssetExtensions(kind, mediaKind string) []string {
 		}
 		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
 	case "analyze_audio":
+		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
+	case "music_midi", "music_stems":
+		if mediaKind == "video" {
+			return []string{"mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp", "3gpp"}
+		}
 		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
 	default:
 		return nil
@@ -5453,6 +5495,105 @@ func (s *Server) persistAIResponse(ctx context.Context, workerID, kind, assetID 
 			Metadata:         metadata,
 		}
 		if _, err := s.deps.Store.UpsertAudioFeatures(ctx, features); err == nil {
+			stored++
+		}
+	case "music_midi":
+		asset, err := s.deps.Store.GetAsset(ctx, assetID)
+		sourceKind := "audio"
+		if err == nil && asset.MediaKind == "video" {
+			sourceKind = "video_audio"
+		}
+		metadata := summarizeAIMetadata(response.Metadata)
+		provider := firstNonEmpty(stringFromAny(response.Metadata["provider"]), "basic-pitch")
+		model := firstNonEmpty(modelName, stringFromAny(response.Metadata["model"]), "basic_pitch")
+		instruments := stringSliceFromAny(response.Metadata["instruments"])
+		if len(instruments) == 0 {
+			instruments = stringSliceFromAny(response.Metadata["instrument_names"])
+		}
+		noteCount := int(floatFromAny(response.Metadata["note_count"]))
+		instrumentCount := int(floatFromAny(response.Metadata["instrument_count"]))
+		if instrumentCount == 0 && len(instruments) > 0 {
+			instrumentCount = len(instruments)
+		}
+		summary := strings.TrimSpace(stringFromAny(response.Metadata["summary"]))
+		if summary == "" {
+			summary = fmt.Sprintf("%d MIDI note(s)", noteCount)
+			if instrumentCount > 0 {
+				summary += fmt.Sprintf(" across %d instrument/channel group(s)", instrumentCount)
+			}
+		}
+		if _, err := s.deps.Store.UpsertMusicMIDITranscription(ctx, catalog.MusicMIDITranscription{
+			AssetID:         assetID,
+			SourceKind:      sourceKind,
+			Provider:        provider,
+			Model:           model,
+			Status:          firstNonEmpty(stringFromAny(response.Metadata["status"]), "succeeded"),
+			MIDICachePath:   stringFromAny(response.Metadata["midi_cache_path"]),
+			DurationSeconds: floatPtrFromOptionalAny(response.Metadata["duration_seconds"]),
+			NoteCount:       noteCount,
+			InstrumentCount: instrumentCount,
+			Instruments:     instruments,
+			Summary:         summary,
+			Metadata:        metadata,
+		}); err == nil {
+			stored++
+		}
+		if _, err := s.deps.Store.UpsertAssetTag(ctx, catalog.AssetTag{
+			AssetID:  assetID,
+			Tag:      "music:midi_available",
+			Source:   "music_midi",
+			Metadata: map[string]any{"provider": provider, "model": model, "note_count": noteCount},
+		}); err == nil {
+			stored++
+		}
+	case "music_stems":
+		asset, err := s.deps.Store.GetAsset(ctx, assetID)
+		sourceKind := "audio"
+		if err == nil && asset.MediaKind == "video" {
+			sourceKind = "video_audio"
+		}
+		metadata := summarizeAIMetadata(response.Metadata)
+		provider := firstNonEmpty(stringFromAny(response.Metadata["provider"]), "demucs")
+		model := firstNonEmpty(modelName, stringFromAny(response.Metadata["model"]), "htdemucs")
+		stemItems, _ := response.Metadata["stems"].([]any)
+		stems := make([]catalog.MusicStem, 0, len(stemItems))
+		for _, raw := range stemItems {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name := strings.TrimSpace(stringFromAny(item["name"]))
+			if name == "" {
+				continue
+			}
+			stems = append(stems, catalog.MusicStem{
+				Name:            name,
+				CachePath:       stringFromAny(item["cache_path"]),
+				MIME:            firstNonEmpty(stringFromAny(item["mime"]), "audio/wav"),
+				DurationSeconds: floatPtrFromOptionalAny(item["duration_seconds"]),
+				SizeBytes:       int64FromAny(item["size_bytes"]),
+				Metadata:        summarizeAIMetadata(item),
+			})
+		}
+		if _, err := s.deps.Store.UpsertMusicStemSet(ctx, catalog.MusicStemSet{
+			AssetID:    assetID,
+			SourceKind: sourceKind,
+			Provider:   provider,
+			Model:      model,
+			Status:     firstNonEmpty(stringFromAny(response.Metadata["status"]), "succeeded"),
+			StemSet:    firstNonEmpty(stringFromAny(response.Metadata["stem_set"]), "vocals_drums_bass_other"),
+			OutputDir:  stringFromAny(response.Metadata["output_dir"]),
+			Stems:      stems,
+			Metadata:   metadata,
+		}); err == nil {
+			stored++
+		}
+		if _, err := s.deps.Store.UpsertAssetTag(ctx, catalog.AssetTag{
+			AssetID:  assetID,
+			Tag:      "music:stems_available",
+			Source:   "music_stems",
+			Metadata: map[string]any{"provider": provider, "model": model, "stems": len(stems)},
+		}); err == nil {
 			stored++
 		}
 	}
@@ -6926,7 +7067,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 	hints := transcoding.AcceleratorHints()
 	endpoint := aiWorkerEndpoint()
 	localStatus, localHealth := aiWorkerHealth(ctx, endpoint+"/health")
-	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text", "ocr_image", "transcribe_audio", "analyze_audio"}
+	localCapabilities := []string{"classify_image", "detect_faces", "safety_nsfw", "describe_image", "embed_image", "embed_text", "ocr_image", "transcribe_audio", "analyze_audio", "music_midi", "music_stems"}
 	localDevice := ""
 	localModels := map[string]any{}
 	if caps, ok := localHealth["capabilities"].(map[string]any); ok {
@@ -6961,7 +7102,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"profile":      "cpu",
 			"configured":   false,
 			"status":       "not_configured",
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio", "music_midi", "music_stems"},
 			"endpoint":     "",
 		},
 		{
@@ -6972,7 +7113,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"available":      hints["docker_nvidia_runtime"],
 			"native_gpu":     hints["nvidia_smi"],
 			"docker_runtime": hints["docker_nvidia_runtime"],
-			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
+			"capabilities":   []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio", "music_midi", "music_stems"},
 			"endpoint":       "",
 			"note":           "optional Docker NVIDIA profile; native CUDA is represented by ai-local",
 		},
@@ -6982,7 +7123,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"configured":   false,
 			"status":       "not_configured",
 			"available":    hints["dev_dri"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio", "music_midi", "music_stems"},
 			"endpoint":     "",
 		},
 		{
@@ -6991,7 +7132,7 @@ func aiWorkerProfiles(ctx context.Context) []map[string]any {
 			"configured":   false,
 			"status":       "not_configured",
 			"available":    hints["dev_dri"],
-			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"},
+			"capabilities": []string{"classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio", "music_midi", "music_stems"},
 			"endpoint":     "",
 		},
 	}
@@ -7771,6 +7912,12 @@ func (s *Server) assetDetail(ctx context.Context, asset catalog.Asset) map[strin
 	if audioFeatures, err := s.deps.Store.GetAudioFeatures(ctx, asset.ID); err == nil {
 		detail["audio_features"] = audioFeatures
 	}
+	if midi, err := s.deps.Store.ListMusicMIDITranscriptions(ctx, asset.ID, 20); err == nil {
+		detail["music_midi"] = midi
+	}
+	if stems, err := s.deps.Store.ListMusicStemSets(ctx, asset.ID, 20); err == nil {
+		detail["music_stems"] = stems
+	}
 	if frameCaptions, err := s.deps.Store.ListVideoFrameCaptions(ctx, asset.ID, 200); err == nil {
 		detail["frame_captions"] = frameCaptions
 	}
@@ -7786,6 +7933,8 @@ func (s *Server) assetAIRecord(ctx context.Context, asset catalog.Asset) map[str
 	tags, _ := s.deps.Store.ListAssetTags(ctx, asset.ID)
 	faces, _ := s.deps.Store.ListFaceDetections(ctx, asset.ID)
 	embeddings, _ := s.deps.Store.ListAssetEmbeddings(ctx, asset.ID)
+	midi, _ := s.deps.Store.ListMusicMIDITranscriptions(ctx, asset.ID, 20)
+	stems, _ := s.deps.Store.ListMusicStemSets(ctx, asset.ID, 20)
 	ocrBlocks := ocrBlocksFromPredictions(predictions)
 	return map[string]any{
 		"asset_id":        asset.ID,
@@ -7798,6 +7947,8 @@ func (s *Server) assetAIRecord(ctx context.Context, asset catalog.Asset) map[str
 		"faces":           faces,
 		"safety":          s.safetyRecordsFrom(predictions, tags),
 		"embeddings":      summarizeAssetEmbeddings(embeddings),
+		"music_midi":      midi,
+		"music_stems":     stems,
 		"generated_truth": "AI/OCR/caption outputs are local predictions or suggestions, not ground truth.",
 	}
 }

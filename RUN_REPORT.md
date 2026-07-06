@@ -1,5 +1,99 @@
 # Run Report
 
+## 2026-07-06 Music MIDI And Stem Separation
+
+### Scope
+
+- Added optional music analysis support for audio files and video audio tracks.
+- Added normalized PostgreSQL metadata tables for:
+  - `asset_midi_transcriptions`;
+  - `asset_music_stems`.
+- Added AI sidecar endpoints:
+  - `POST /music-to-midi` for Basic Pitch-compatible MIDI transcription;
+  - `POST /separate-music` for Demucs-compatible vocal/instrument stem separation.
+- Added backend AI job endpoints:
+  - `POST /api/v1/ai/jobs/music-midi`;
+  - `POST /api/v1/ai/jobs/music-stems`.
+- Added asset inspection endpoints:
+  - `GET /api/v1/assets/{id}/music`;
+  - `GET /api/v1/assets/{id}/midi`;
+  - `GET /api/v1/assets/{id}/stems`.
+- Added Component Manager records for:
+  - `music-basic-pitch`;
+  - `music-demucs`;
+  - future optional `music-mt3`.
+- Added asset detail actions and result panels for MIDI transcription and music stems.
+- Added Tasks page action for broad music-to-MIDI backfill across audio/video media.
+- Kept stem separation on-demand only because it can create large cache outputs.
+
+### Verification
+
+Commands run:
+
+- `python -m py_compile services/ai/cartolensia_ai/config.py services/ai/cartolensia_ai/server.py services/ai/cartolensia_ai/models/real.py services/ai/cartolensia_ai/models/dummy.py` passed.
+- `gofmt -w $(find internal cmd -name '*.go' -print)`
+- `bash -n scripts/release/build-local-full-tarzst.sh` passed.
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
+- `go test ./...` passed.
+- `npm --prefix webui run build` passed.
+- `git diff --check` passed.
+- `bash scripts/release/check-licenses.sh` passed.
+- `bash scripts/release/smoke-release.sh` passed.
+- `7z t dist/release/cartolensia-local-full-linux-x86_64-20260706.7z` passed.
+- `sha256sum -c dist/release/cartolensia-local-full-linux-x86_64-20260706.7z.sha256` passed.
+
+Local full distribution built and validated:
+
+- Archive: `dist/release/cartolensia-local-full-linux-x86_64-20260706.7z`
+- Size: 24 GiB
+- Expanded payload size reported by `7z t`: 52,552,138,384 bytes
+- SHA-256: `d1805e63e2e9315b042ca6391bffa6e0f975c1aaf43e78a19ea01e59bc9c355f`
+- The private local bundle includes the backend, built WebUI, docs/configs/scripts,
+  reviewed FFmpeg package, PostgreSQL binaries, AI model cache, and AI
+  environments for CPU/CUDA-style deployment profiles according to
+  `config/local-full-tarzst-build.env`.
+- Demucs, `pretty_midi`, and `mido` installed successfully in the built AI
+  environments tested by the package builder. Basic Pitch was recorded as a
+  missing optional component for Python 3.12 builds because upstream package
+  compatibility currently targets Python 3.7-3.11.
+
+Remote deployment validation:
+
+- Built a new backend binary and deployed a staged hardlink-based release with
+  the rebuilt WebUI, migrations, and updated AI sidecar source.
+- Switched the production release symlink and restarted `cartolensia` and
+  `cartolensia-ai`; both services returned `active`, and
+  `/api/v1/health` returned `ok`.
+- Remote sidecar `/health` reports the new `music_midi` and `music_stems`
+  capabilities.
+- Remote sidecar smoke calls to `/music-to-midi` and `/separate-music` returned
+  structured `model_missing` responses because the remote Python 3.12 AI venv
+  does not currently contain Basic Pitch or Demucs. The built local full archive
+  does include Demucs/`pretty_midi`/`mido` in the generated AI environments that
+  passed package-builder smoke checks; Basic Pitch remains a Python-version
+  compatibility caveat.
+
+Added tests:
+
+- MIDI and stem persistence through the server AI response path.
+- `music_midi` missing-work query behavior for video assets.
+
+### Known Limitations
+
+- Basic Pitch, Demucs, and future MT3 weights/runtime are optional component-managed dependencies. They are not auto-downloaded at startup.
+- The current MIDI provider is Basic Pitch, which is a practical licensed baseline for polyphonic music-to-MIDI. Full orchestral/electronic multi-instrument transcription remains a future optional MT3-style provider because those models are heavier and need separate provenance review.
+- Demucs stem separation is implemented as a selected/on-demand action, not automatic backfill, to avoid uncontrolled cache growth.
+- Runtime outputs are written only under the configured Cartolensia cache directory and stored as metadata in PostgreSQL; originals are never modified.
+
+### Safety
+
+- No writes to `/mnt/Models/rclone`.
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit.
+- No push.
+
 ## 2026-06-29 Places Pagination And Place Detail UX
 
 ### Scope

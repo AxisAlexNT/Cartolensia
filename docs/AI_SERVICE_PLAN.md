@@ -16,7 +16,7 @@ The sidecar now supports both dummy/no-model mode and approved local inference m
 
 - Native entrypoint: `python -m cartolensia_ai.server --host 127.0.0.1 --port 19090`.
 - Docker entrypoint: `python -m cartolensia_ai.server --host 0.0.0.0 --port 8090`.
-- Implemented endpoints: `/health`, `/capabilities`, `/classify-image`, `/detect-faces`, `/safety-nsfw`, `/describe-image`, `/embed-image`, `/embed-text`.
+- Implemented endpoints: `/health`, `/capabilities`, `/classify-image`, `/detect-faces`, `/safety-nsfw`, `/describe-image`, `/embed-image`, `/embed-text`, `/ocr-image`, `/transcribe-audio`, `/analyze-audio`, `/music-to-midi`, and `/separate-music`.
 - Implemented local model backends:
   - torchvision EfficientNet-B0 classifier with MobileNetV3 fallback;
   - OpenCV YuNet face detector;
@@ -25,6 +25,10 @@ The sidecar now supports both dummy/no-model mode and approved local inference m
   - BLIP base captioning.
 - Backend jobs persist `asset_tags`, `ai_predictions`, `face_detections`, and `asset_embeddings`.
 - Vector search uses a local JSON/PostgreSQL vector fallback with brute-force cosine search for small local collections.
+- Music analysis is split into two explicit workflows:
+  - `music_midi` uses Basic Pitch when installed to produce compact MIDI metadata under the Cartolensia cache root. It can be queued as a missing-metadata backfill for audio and video assets.
+  - `music_stems` uses Demucs when installed to produce vocals/drums/bass/other-style pseudo-stems under the Cartolensia cache root. It is intentionally on-demand from asset detail because stem WAV/FLAC outputs can be large.
+  - MT3 is tracked as a future optional multi-instrument transcription provider, not a default dependency.
 
 All model files and caches are repo-local under `.cartolensia/models`; the sidecar accepts only localhost media URLs or safe local temporary/cache paths. No remote inference API is used.
 

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from typing import Any
@@ -30,6 +31,8 @@ CAPABILITIES = [
     "ocr_image",
     "transcribe_audio",
     "analyze_audio",
+    "music_midi",
+    "music_stems",
 ]
 
 DEFAULT_OCR_LANGUAGES = ["eng", "rus", "hye", "chi_sim", "chi_tra"]
@@ -106,9 +109,11 @@ class RealBackend:
         self._torch_slots = threading.BoundedSemaphore(_env_int("CARTOLENSIA_AI_TORCH_PARALLELISM", 1, 1, 4))
         self._opencv_lock = threading.Lock()
         self._asr_slots = threading.BoundedSemaphore(_env_int("CARTOLENSIA_AI_ASR_PARALLELISM", 1, 1, 2))
+        self._music_slots = threading.BoundedSemaphore(_env_int("CARTOLENSIA_AI_MUSIC_PARALLELISM", 1, 1, 2))
 
     def _configure_cache_environment(self) -> None:
         self.config.model_dir.mkdir(parents=True, exist_ok=True)
+        self.config.cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("TORCH_HOME", str(self.config.model_dir / "torch"))
         os.environ.setdefault("HF_HOME", str(self.config.model_dir / "huggingface"))
         os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(self.config.model_dir / "huggingface" / "hub"))
@@ -131,11 +136,13 @@ class RealBackend:
             "backend": "real",
             "device": self._device or self.config.device,
             "model_dir": str(self.config.model_dir),
+            "cache_dir": str(self.config.cache_dir),
             "models": self.models_status(),
             "capabilities": CAPABILITIES,
             "concurrency": {
                 "torch_parallelism": _env_int("CARTOLENSIA_AI_TORCH_PARALLELISM", 1, 1, 4),
                 "asr_parallelism": _env_int("CARTOLENSIA_AI_ASR_PARALLELISM", 1, 1, 2),
+                "music_parallelism": _env_int("CARTOLENSIA_AI_MUSIC_PARALLELISM", 1, 1, 2),
                 "opencv_parallelism": 1,
             },
         }
@@ -170,6 +177,8 @@ class RealBackend:
             "ocr": _tesseract_status(),
             "asr": _asr_status(self.config.model_dir, self._asr is not None),
             "audio_analysis": _audio_analysis_status(),
+            "music_midi": _music_midi_status(self.config.cache_dir),
+            "music_stems": _music_stems_status(self.config.cache_dir),
         }
 
     def classify_image(self, request: ImageRequest) -> InferenceResponse:
@@ -637,6 +646,158 @@ class RealBackend:
                 except Exception:
                     pass
 
+    def music_to_midi(self, request: MediaRequest) -> InferenceResponse:
+        temp_path: Path | None = None
+        should_delete = False
+        try:
+            if importlib.util.find_spec("basic_pitch") is None:
+                raise MissingModelError("basic-pitch is not installed in the Cartolensia AI environment")
+            from basic_pitch.inference import predict_and_save  # type: ignore
+
+            suffix = str((request.options or {}).get("suffix") or ".media")
+            temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
+            output_dir = _music_output_dir(self.config.cache_dir, "music-midi", request.asset_id)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            with self._music_slots:
+                try:
+                    predict_and_save(
+                        [str(temp_path)],
+                        str(output_dir),
+                        save_midi=True,
+                        sonify_midi=False,
+                        save_model_outputs=False,
+                        save_notes=False,
+                    )
+                except TypeError:
+                    predict_and_save([str(temp_path)], str(output_dir), True, False, False, False)
+            midi_files = sorted(output_dir.rglob("*.mid")) + sorted(output_dir.rglob("*.midi"))
+            if not midi_files:
+                raise RuntimeError("basic-pitch completed but did not produce a MIDI file")
+            midi_path = midi_files[0]
+            summary = _midi_summary(midi_path)
+            instruments = summary.get("instruments") or ["pitch_contours"]
+            note_count = int(summary.get("note_count") or 0)
+            return InferenceResponse(
+                status="ok",
+                endpoint="music-to-midi",
+                predictions=[
+                    Prediction(label="music:midi_available", confidence=None, metadata={"provider": "basic_pitch", "note_count": note_count}),
+                    *[
+                        Prediction(label=f"music:instrument:{instrument}", confidence=None, metadata={"provider": "basic_pitch"})
+                        for instrument in instruments
+                    ],
+                ],
+                metadata={
+                    "asset_id": request.asset_id,
+                    "provider": "basic_pitch",
+                    "engine": "basic_pitch",
+                    "model": "basic_pitch",
+                    "status": "succeeded",
+                    "cache_path": str(midi_path),
+                    "output_dir": str(output_dir),
+                    "note_count": note_count,
+                    "instrument_count": int(summary.get("instrument_count") or len(instruments)),
+                    "instruments": instruments,
+                    "duration_seconds": summary.get("duration_seconds"),
+                    "summary": summary.get("summary") or f"Basic Pitch produced {note_count} MIDI note events.",
+                    "safe_note": "MIDI output is stored under the Cartolensia cache directory only; originals are never modified.",
+                },
+            )
+        except MissingModelError as exc:
+            return InferenceResponse(
+                status="model_missing",
+                endpoint="music-to-midi",
+                reason=str(exc),
+                metadata={"provider": "basic_pitch", **_music_midi_status(self.config.cache_dir)},
+            )
+        except Exception as exc:
+            return _error("music-to-midi", exc)
+        finally:
+            if should_delete and temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def separate_music(self, request: MediaRequest) -> InferenceResponse:
+        temp_path: Path | None = None
+        should_delete = False
+        try:
+            module_available = importlib.util.find_spec("demucs") is not None
+            executable = shutil.which("demucs")
+            if not module_available and not executable:
+                raise MissingModelError("demucs is not installed in the Cartolensia AI environment")
+            model = str((request.options or {}).get("model") or os.environ.get("CARTOLENSIA_MUSIC_STEMS_MODEL") or "htdemucs").strip()
+            stem_set = str((request.options or {}).get("stem_set") or "vocals_drums_bass_other").strip() or "vocals_drums_bass_other"
+            timeout = _int_option(request.options, "timeout_seconds", 7200)
+            timeout = max(60, min(timeout, 24 * 60 * 60))
+            suffix = str((request.options or {}).get("suffix") or ".media")
+            temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
+            output_dir = _music_output_dir(self.config.cache_dir, "music-stems", request.asset_id) / _safe_token(model)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            if module_available:
+                command = [sys.executable, "-m", "demucs.separate", "-n", model, "-o", str(output_dir), str(temp_path)]
+            else:
+                command = [str(executable), "-n", model, "-o", str(output_dir), str(temp_path)]
+            with self._music_slots:
+                proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+            if proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or f"demucs exited with {proc.returncode}").strip()
+                return InferenceResponse(
+                    status="error",
+                    endpoint="separate-music",
+                    reason=reason[-2000:],
+                    metadata={"provider": "demucs", "model": model, "output_dir": str(output_dir)},
+                )
+            stems = _collect_stems(output_dir)
+            if not stems:
+                raise RuntimeError("demucs completed but did not produce stem audio files")
+            return InferenceResponse(
+                status="ok",
+                endpoint="separate-music",
+                predictions=[
+                    Prediction(label="music:stems_available", confidence=None, metadata={"provider": "demucs", "stem_count": len(stems)}),
+                    *[
+                        Prediction(label=f"music:stem:{stem['name']}", confidence=None, metadata={"provider": "demucs", "model": model})
+                        for stem in stems
+                    ],
+                ],
+                metadata={
+                    "asset_id": request.asset_id,
+                    "provider": "demucs",
+                    "engine": "demucs",
+                    "model": model,
+                    "status": "succeeded",
+                    "stem_set": stem_set,
+                    "output_dir": str(output_dir),
+                    "stems": stems,
+                    "stem_count": len(stems),
+                    "safe_note": "Stem audio is stored under the Cartolensia cache directory only; originals are never modified.",
+                },
+            )
+        except MissingModelError as exc:
+            return InferenceResponse(
+                status="model_missing",
+                endpoint="separate-music",
+                reason=str(exc),
+                metadata={"provider": "demucs", **_music_stems_status(self.config.cache_dir)},
+            )
+        except subprocess.TimeoutExpired as exc:
+            return InferenceResponse(
+                status="error",
+                endpoint="separate-music",
+                reason=f"demucs timed out after {exc.timeout} seconds",
+                metadata={"provider": "demucs"},
+            )
+        except Exception as exc:
+            return _error("separate-music", exc)
+        finally:
+            if should_delete and temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     def _select_device(self) -> str:
         requested = self.config.device
         if requested in {"cpu", "cuda"}:
@@ -914,6 +1075,132 @@ def _audio_analysis_status() -> dict[str, Any]:
         "features": ["tempo_bpm", "key", "mode", "loudness", "speech_music_ratio", "spectral_summary"],
         "genre": "heuristic_only_model_missing",
     }
+
+
+def _music_midi_status(cache_dir: Path) -> dict[str, Any]:
+    package_available = importlib.util.find_spec("basic_pitch") is not None
+    return {
+        "name": "basic_pitch",
+        "available": package_available,
+        "package_available": package_available,
+        "provider": "basic_pitch",
+        "cache_dir": str(cache_dir / "music-midi"),
+        "outputs": ["midi"],
+        "default_for_batch": True,
+    }
+
+
+def _music_stems_status(cache_dir: Path) -> dict[str, Any]:
+    package_available = importlib.util.find_spec("demucs") is not None
+    executable = shutil.which("demucs")
+    return {
+        "name": "demucs",
+        "available": package_available or executable is not None,
+        "package_available": package_available,
+        "executable": executable,
+        "provider": "demucs",
+        "cache_dir": str(cache_dir / "music-stems"),
+        "outputs": ["vocals", "drums", "bass", "other"],
+        "default_for_batch": False,
+        "on_demand": True,
+    }
+
+
+def _music_output_dir(cache_dir: Path, kind: str, asset_id: str) -> Path:
+    return cache_dir / kind / _safe_token(asset_id or "anonymous")
+
+
+def _safe_token(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value.strip())
+    cleaned = cleaned.strip("._")
+    return cleaned[:160] or "item"
+
+
+def _midi_summary(path: Path) -> dict[str, Any]:
+    try:
+        pretty_midi = _import_optional("pretty_midi")
+        midi = pretty_midi.PrettyMIDI(str(path))
+        instruments = [instrument.name or f"program_{instrument.program}" for instrument in midi.instruments]
+        note_count = sum(len(instrument.notes) for instrument in midi.instruments)
+        duration = float(midi.get_end_time())
+        names = sorted(set(instruments)) or ["pitch_contours"]
+        return {
+            "note_count": note_count,
+            "instrument_count": len(names),
+            "instruments": names,
+            "duration_seconds": duration,
+            "summary": f"{note_count} MIDI notes across {len(names)} instrument/program track(s).",
+        }
+    except Exception:
+        pass
+    try:
+        mido = _import_optional("mido")
+        midi = mido.MidiFile(str(path))
+        note_count = 0
+        channels: set[str] = set()
+        programs: set[str] = set()
+        for track in midi.tracks:
+            for message in track:
+                channel = getattr(message, "channel", None)
+                if channel is not None:
+                    channels.add(f"channel_{int(channel) + 1}")
+                if getattr(message, "type", "") == "program_change":
+                    programs.add(f"program_{getattr(message, 'program', 0)}")
+                if getattr(message, "type", "") == "note_on" and int(getattr(message, "velocity", 0) or 0) > 0:
+                    note_count += 1
+        instruments = sorted(programs or channels or {"pitch_contours"})
+        return {
+            "note_count": note_count,
+            "instrument_count": len(instruments),
+            "instruments": instruments,
+            "duration_seconds": None,
+            "summary": f"{note_count} MIDI note-on events across {len(instruments)} channel/program group(s).",
+        }
+    except Exception:
+        return {
+            "note_count": 0,
+            "instrument_count": 1,
+            "instruments": ["pitch_contours"],
+            "duration_seconds": None,
+            "summary": "MIDI file produced; optional MIDI inspection packages are unavailable.",
+        }
+
+
+def _collect_stems(root: Path) -> list[dict[str, Any]]:
+    stems: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".wav", ".mp3", ".flac", ".ogg", ".m4a"}:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        stems.append(
+            {
+                "name": _safe_token(path.stem).lower(),
+                "cache_path": str(path),
+                "size_bytes": size,
+                "mime": _stem_mime(path),
+            }
+        )
+    return stems
+
+
+def _stem_mime(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix == ".flac":
+        return "audio/flac"
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    if suffix == ".ogg":
+        return "audio/ogg"
+    if suffix == ".m4a":
+        return "audio/mp4"
+    return "application/octet-stream"
 
 
 def _import_optional(module_name: str) -> Any:

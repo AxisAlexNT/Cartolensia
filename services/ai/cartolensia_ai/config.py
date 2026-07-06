@@ -10,6 +10,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class ServiceConfig:
     model_dir: Path
+    cache_dir: Path
     mode: str
     device: str
     classifier: str
@@ -22,6 +23,12 @@ class ServiceConfig:
 
 def load_config() -> ServiceConfig:
     model_dir = Path(os.environ.get("CARTOLENSIA_AI_MODEL_DIR", ".cartolensia/models")).resolve()
+    cache_dir = Path(
+        os.environ.get(
+            "CARTOLENSIA_AI_CACHE_DIR",
+            str((model_dir.parent / "realpeek-cache").resolve()),
+        )
+    ).resolve()
     mode = os.environ.get("CARTOLENSIA_AI_MODE", "auto").strip().lower() or "auto"
     threshold_raw = os.environ.get("CARTOLENSIA_AI_SAFETY_THRESHOLD", "0.75")
     try:
@@ -30,6 +37,7 @@ def load_config() -> ServiceConfig:
         threshold = 0.75
     return ServiceConfig(
         model_dir=model_dir,
+        cache_dir=cache_dir,
         mode=mode,
         device=os.environ.get("CARTOLENSIA_AI_DEVICE", "auto").strip().lower() or "auto",
         classifier=os.environ.get("CARTOLENSIA_AI_CLASSIFIER", "efficientnet_b0").strip().lower() or "efficientnet_b0",

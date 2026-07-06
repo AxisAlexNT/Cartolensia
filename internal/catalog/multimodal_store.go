@@ -197,3 +197,95 @@ func (s *MemoryStore) GetDocumentText(_ context.Context, assetID string) (Docume
 	}
 	return doc, nil
 }
+
+func (s *MemoryStore) UpsertMusicMIDITranscription(_ context.Context, transcription MusicMIDITranscription) (MusicMIDITranscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[transcription.AssetID]; !ok {
+		return MusicMIDITranscription{}, ErrNotFound
+	}
+	if transcription.ID == "" {
+		transcription.ID = id.NewUUID()
+	}
+	if transcription.CreatedAt.IsZero() {
+		transcription.CreatedAt = time.Now().UTC()
+	}
+	if transcription.Status == "" {
+		transcription.Status = "succeeded"
+	}
+	if transcription.Metadata == nil {
+		transcription.Metadata = map[string]any{}
+	}
+	current := s.midiTranscripts[transcription.AssetID]
+	replaced := false
+	for i := range current {
+		if current[i].ID == transcription.ID ||
+			(current[i].Provider == transcription.Provider && current[i].Model == transcription.Model) {
+			current[i] = transcription
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		current = append(current, transcription)
+	}
+	s.midiTranscripts[transcription.AssetID] = current
+	return transcription, nil
+}
+
+func (s *MemoryStore) ListMusicMIDITranscriptions(_ context.Context, assetID string, limit int) ([]MusicMIDITranscription, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]MusicMIDITranscription(nil), s.midiTranscripts[assetID]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertMusicStemSet(_ context.Context, stemSet MusicStemSet) (MusicStemSet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assets[stemSet.AssetID]; !ok {
+		return MusicStemSet{}, ErrNotFound
+	}
+	if stemSet.ID == "" {
+		stemSet.ID = id.NewUUID()
+	}
+	if stemSet.CreatedAt.IsZero() {
+		stemSet.CreatedAt = time.Now().UTC()
+	}
+	if stemSet.Status == "" {
+		stemSet.Status = "succeeded"
+	}
+	if stemSet.Metadata == nil {
+		stemSet.Metadata = map[string]any{}
+	}
+	current := s.musicStemSets[stemSet.AssetID]
+	replaced := false
+	for i := range current {
+		if current[i].ID == stemSet.ID ||
+			(current[i].Provider == stemSet.Provider && current[i].Model == stemSet.Model && current[i].StemSet == stemSet.StemSet) {
+			current[i] = stemSet
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		current = append(current, stemSet)
+	}
+	s.musicStemSets[stemSet.AssetID] = current
+	return stemSet, nil
+}
+
+func (s *MemoryStore) ListMusicStemSets(_ context.Context, assetID string, limit int) ([]MusicStemSet, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]MusicStemSet(nil), s.musicStemSets[assetID]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}

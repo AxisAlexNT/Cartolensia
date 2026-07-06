@@ -638,6 +638,39 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/ai/jobs/transcribe \
   }'
 ```
 
+Run music-to-MIDI transcription on a selected audio or video asset with:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/ai/jobs/music-midi \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "scope":"selected",
+    "asset_ids":["<audio-or-video-asset-id>"],
+    "limit":1
+  }'
+```
+
+Stem separation is intentionally on-demand because it writes large derived audio
+files into the Cartolensia cache. Start it from Asset Detail or with:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/ai/jobs/music-stems \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "scope":"selected",
+    "asset_ids":["<audio-or-video-asset-id>"],
+    "limit":1,
+    "model":"htdemucs"
+  }'
+```
+
+MIDI and stem outputs are recorded in PostgreSQL metadata and cache paths only.
+They are never written beside original media. Inspect them with:
+
+- `/api/v1/assets/{id}/music`;
+- `/api/v1/assets/{id}/midi`;
+- `/api/v1/assets/{id}/stems`.
+
 Useful inspection endpoints:
 
 - `/api/v1/assets?media_kind=audio&limit=20`;
@@ -645,6 +678,7 @@ Useful inspection endpoints:
 - `/api/v1/audio/{id}/metadata`;
 - `/api/v1/assets/{id}/transcripts`;
 - `/api/v1/assets/{id}/document`;
+- `/api/v1/assets/{id}/music`;
 - `/api/v1/ai/workers`;
 - `/api/v1/components/status`;
 - `/api/v1/search?q=audio`;
@@ -652,7 +686,7 @@ Useful inspection endpoints:
 - `/api/v1/search?q=tempo:120..140`;
 - `/api/v1/search?q=document:invoice`.
 
-ASR uses faster-whisper when `asr-faster-whisper`, `asr-ctranslate2`, and an ASR model component are installed. Audio analysis uses librosa/SoundFile. Marker, advanced video captioning, and dedicated genre classifiers are optional component/model paths. If they are missing, operators should see a missing-component state rather than silent fallback to a remote service.
+ASR uses faster-whisper when `asr-faster-whisper`, `asr-ctranslate2`, and an ASR model component are installed. Audio analysis uses librosa/SoundFile. Music-to-MIDI uses `music-basic-pitch` when installed. On-demand stem separation uses `music-demucs` when installed. Marker, advanced video captioning, MT3-style multi-instrument transcription, and dedicated genre classifiers are optional component/model paths. If they are missing, operators should see a missing-component state rather than silent fallback to a remote service.
 
 ## Full Cartolensia-Photos Read-Only Indexing
 
@@ -696,7 +730,7 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/ai/jobs/classify \
   -d '{"scope":"indexed","limit":-1}'
 ```
 
-Use the equivalent job paths for `faces`, `safety`, `embed`, `describe`, `ocr`, `transcribe`, and `audio-analyze`. These jobs skip unsupported media kinds, keep generated metadata in PostgreSQL/cache paths, and do not write sidecars to original storage.
+Use the equivalent job paths for `faces`, `safety`, `embed`, `describe`, `ocr`, `transcribe`, `audio-analyze`, and `music-midi`. These jobs skip unsupported media kinds, keep generated metadata in PostgreSQL/cache paths, and do not write sidecars to original storage. `music-stems` is not included in default broad backfill because separated stems are large; run it only for selected assets or albums.
 
 ## GPS Track Direction Arrows
 

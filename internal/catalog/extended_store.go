@@ -133,6 +133,10 @@ func (s *MemoryStore) aiAssetTaskCompleteLocked(assetID, task string) bool {
 	case "analyze_audio":
 		_, ok := s.audioFeatures[assetID]
 		return ok
+	case "music_midi":
+		return len(s.midiTranscripts[assetID]) > 0
+	case "music_stems":
+		return len(s.musicStemSets[assetID]) > 0
 	}
 	return false
 }

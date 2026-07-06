@@ -225,8 +225,53 @@ export type AssetDetail = {
   ocr_full_text?: string;
   transcripts?: TranscriptRecord[];
   audio_features?: AudioFeatureRecord;
+  music_midi?: MusicMIDITranscription[];
+  music_stems?: MusicStemSet[];
   frame_captions?: VideoFrameCaptionRecord[];
   document?: DocumentTextRecord;
+};
+
+export type MusicMIDITranscription = {
+  id: string;
+  asset_id: string;
+  source_kind?: string;
+  provider?: string;
+  model?: string;
+  status?: string;
+  midi_cache_path?: string;
+  note_count?: number;
+  instrument_count?: number;
+  instruments?: string[];
+  summary?: string;
+  error?: string;
+  created_at?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type MusicStem = {
+  name?: string;
+  role?: string;
+  cache_path?: string;
+  mime_type?: string;
+  size_bytes?: number;
+  duration_seconds?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type MusicStemSet = {
+  id: string;
+  asset_id: string;
+  source_kind?: string;
+  provider?: string;
+  model?: string;
+  stem_set?: string;
+  status?: string;
+  stems?: MusicStem[];
+  stem_count?: number;
+  cache_dir?: string;
+  error?: string;
+  created_at?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type RelatedAssetGroup = {
@@ -1553,7 +1598,7 @@ export const api = {
   transcodingMetricsStatus: () => request<Record<string, unknown>>("/api/v1/transcoding/metrics/status"),
   aiStatus: () => request<Record<string, unknown>>("/api/v1/ai/status"),
   aiWorkers: () => request<Record<string, unknown>>("/api/v1/ai/workers"),
-  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze", payload: Record<string, unknown>) =>
+  aiJob: (kind: "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze" | "music-midi" | "music-stems", payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/v1/ai/jobs/${kind}`, { method: "POST", body: JSON.stringify(payload) }),
   aiBackfill: (payload: Record<string, unknown>) =>
     request<Record<string, unknown>>("/api/v1/ai/backfill/start", { method: "POST", body: JSON.stringify(payload) }),

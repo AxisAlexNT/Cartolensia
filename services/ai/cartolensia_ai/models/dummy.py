@@ -7,7 +7,17 @@ from typing import Any
 from cartolensia_ai.schemas import ImageRequest, InferenceResponse
 
 
-CAPABILITIES = ["classify_image", "detect_faces", "describe_image", "embed_image", "ocr_image", "transcribe_audio", "analyze_audio"]
+CAPABILITIES = [
+    "classify_image",
+    "detect_faces",
+    "describe_image",
+    "embed_image",
+    "ocr_image",
+    "transcribe_audio",
+    "analyze_audio",
+    "music_midi",
+    "music_stems",
+]
 
 
 class DummyBackend:

@@ -15,6 +15,7 @@ func TestQueryAIMissingAssetsUsesOutputsAndTaskStatus(t *testing.T) {
 	photo2 := mustInsertTestAsset(t, store, storage.FileInfo{StorageName: "test", StorageURL: "fs://test/b.jpg", RelativePath: "b.jpg", Name: "b.jpg", Extension: "jpg", MediaKind: "photo", MTime: time.Now()})
 	photo3 := mustInsertTestAsset(t, store, storage.FileInfo{StorageName: "test", StorageURL: "fs://test/c.jpg", RelativePath: "c.jpg", Name: "c.jpg", Extension: "jpg", MediaKind: "photo", MTime: time.Now()})
 	audio := mustInsertTestAsset(t, store, storage.FileInfo{StorageName: "test", StorageURL: "fs://test/a.mp3", RelativePath: "a.mp3", Name: "a.mp3", Extension: "mp3", MediaKind: "audio", MTime: time.Now()})
+	video := mustInsertTestAsset(t, store, storage.FileInfo{StorageName: "test", StorageURL: "fs://test/v.mp4", RelativePath: "v.mp4", Name: "v.mp4", Extension: "mp4", MediaKind: "video", MTime: time.Now()})
 
 	if _, err := store.CreateAIPrediction(ctx, AIPrediction{AssetID: photo1.Asset.ID, Task: "ocr_image", Label: "text"}); err != nil {
 		t.Fatal(err)
@@ -26,6 +27,9 @@ func TestQueryAIMissingAssetsUsesOutputsAndTaskStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.UpsertAudioFeatures(ctx, AudioFeatures{AssetID: audio.Asset.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertMusicMIDITranscription(ctx, MusicMIDITranscription{AssetID: video.Asset.ID, Provider: "basic_pitch", Model: "basic_pitch", Status: "succeeded"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,6 +55,13 @@ func TestQueryAIMissingAssetsUsesOutputsAndTaskStatus(t *testing.T) {
 	}
 	if audioPage.Page.Total != 0 {
 		t.Fatalf("expected completed audio to be excluded, got total=%d", audioPage.Page.Total)
+	}
+	midiVideoPage, err := store.QueryAIMissingAssets(ctx, AIMissingQuery{Task: "music_midi", MediaKind: "video", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if midiVideoPage.Page.Total != 0 {
+		t.Fatalf("expected completed video MIDI to be excluded, got total=%d", midiVideoPage.Page.Total)
 	}
 
 	runningPage, err := store.QueryAIMissingAssets(ctx, AIMissingQuery{Task: "classify_image", MediaKind: "photo", Limit: 10})

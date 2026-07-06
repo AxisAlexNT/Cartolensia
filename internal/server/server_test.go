@@ -638,6 +638,72 @@ func TestAudioAnalyzeAIPersistence(t *testing.T) {
 	}
 }
 
+func TestMusicAnalysisAIPersistence(t *testing.T) {
+	ctx := context.Background()
+	store := catalog.NewMemoryStore()
+	cfg := config.Defaults()
+	cfg.Cache.Dir = t.TempDir()
+	registry, err := storage.NewRegistry([]storage.Config{{Name: "fixture", Kind: "fs", Root: t.TempDir(), Mode: "strict_read_only"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{Version: "test", Config: cfg, Plugins: plugins.BuiltIns(), Registry: registry, Store: store, StoreBackend: "memory"})
+	audio, err := store.UpsertDiscoveredFile(ctx, storage.FileInfo{
+		StorageName:  "fixture",
+		StorageURL:   "fs://fixture/music/song.mp3",
+		RelativePath: "music/song.mp3",
+		Name:         "song.mp3",
+		Extension:    ".mp3",
+		MIME:         "audio/mpeg",
+		MediaKind:    "audio",
+		SizeBytes:    256,
+		MTime:        time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, unsafe := srv.persistAIResponse(ctx, "ai-local", "music_midi", audio.Asset.ID, aiInferencePayload{
+		Status:   "ok",
+		Endpoint: "music-to-midi",
+		Metadata: map[string]any{
+			"provider":         "basic_pitch",
+			"model":            "basic_pitch",
+			"status":           "succeeded",
+			"cache_path":       "/tmp/cartolensia-midi/song.mid",
+			"note_count":       float64(42),
+			"instrument_count": float64(2),
+			"instruments":      []any{"piano", "synth"},
+			"summary":          "42 MIDI notes across 2 instrument groups.",
+		},
+	}, aiJobRequest{})
+	if unsafe || stored != 2 {
+		t.Fatalf("midi stored=%d unsafe=%v", stored, unsafe)
+	}
+	stored, unsafe = srv.persistAIResponse(ctx, "ai-local", "music_stems", audio.Asset.ID, aiInferencePayload{
+		Status:   "ok",
+		Endpoint: "separate-music",
+		Metadata: map[string]any{
+			"provider":   "demucs",
+			"model":      "htdemucs",
+			"status":     "succeeded",
+			"stem_set":   "vocals_drums_bass_other",
+			"stem_count": float64(2),
+			"stems": []any{
+				map[string]any{"name": "vocals", "cache_path": "/tmp/cartolensia-stems/vocals.wav", "size_bytes": float64(1024), "mime": "audio/wav"},
+				map[string]any{"name": "other", "cache_path": "/tmp/cartolensia-stems/other.wav", "size_bytes": float64(2048), "mime": "audio/wav"},
+			},
+		},
+	}, aiJobRequest{})
+	if unsafe || stored != 2 {
+		t.Fatalf("stems stored=%d unsafe=%v", stored, unsafe)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+audio.Asset.ID+"/music", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "basic_pitch") || !strings.Contains(rec.Body.String(), "vocals") {
+		t.Fatalf("asset music status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFaceClusterGeoAlignAndVideoTrackWorkflows(t *testing.T) {
 	ctx := context.Background()
 	store := catalog.NewMemoryStore()

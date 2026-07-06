@@ -535,7 +535,7 @@ const transcodeTemplate = ref("ffmpeg -i ${input} -c:v ${preset} -f hls ${output
 const transcodePlannerMessage = ref("Plans write only to the configured Cartolensia transcode cache; originals are never replaced.");
 const aiStatus = ref<Record<string, unknown> | null>(null);
 const aiWorkers = ref<Record<string, unknown> | null>(null);
-type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze";
+type AIJobKind = "classify" | "faces" | "describe" | "safety" | "embed" | "ocr" | "transcribe" | "audio-analyze" | "music-midi" | "music-stems";
 type AIHistoryKind = AIJobKind | "backfill";
 
 const aiMessage = ref("");
@@ -3882,7 +3882,9 @@ function missingComponentsForAIAction(kind: AIJobKind): string[] {
     embed: ["python-ai-venv", "openclip-vit-b32"],
     ocr: ["tesseract", "tessdata-eng"],
     transcribe: ["python-ai-venv", "asr-faster-whisper", "asr-ctranslate2"],
-    "audio-analyze": ["python-ai-venv", "audio-librosa", "audio-soundfile"]
+    "audio-analyze": ["python-ai-venv", "audio-librosa", "audio-soundfile"],
+    "music-midi": ["python-ai-venv", "music-basic-pitch"],
+    "music-stems": ["python-ai-venv", "music-demucs"]
   };
   return requirements[kind].filter((key) => {
     const component = componentByKey(key);
@@ -3896,17 +3898,16 @@ function missingComponentsForAIAction(kind: AIJobKind): string[] {
 async function runAssetAIAction(kind: AIJobKind, label: string, extra: Record<string, unknown> = {}) {
   if (!assetDetail.value) return;
   const mediaKind = assetDetail.value.asset.media_kind;
-  const mediaCompatible =
-    kind === "transcribe"
-      ? mediaKind === "audio" || mediaKind === "video"
-      : kind === "audio-analyze"
-        ? mediaKind === "audio"
+  const mediaCompatible = ["transcribe", "music-midi", "music-stems"].includes(kind)
+    ? mediaKind === "audio" || mediaKind === "video"
+    : kind === "audio-analyze"
+      ? mediaKind === "audio"
       : mediaKind === "photo";
   if (!mediaCompatible) {
     assetAIActionStatus.value[label] = {
       status: "skipped",
-      summary: kind === "transcribe"
-        ? "Transcription runs on audio/video assets only."
+      summary: ["transcribe", "music-midi", "music-stems"].includes(kind)
+        ? "This action runs on audio/video assets only."
         : kind === "audio-analyze"
           ? "Audio feature analysis runs on audio assets only."
           : "This action currently runs on photo assets only."
@@ -7634,11 +7635,18 @@ onBeforeUnmount(() => {
                 Run all enabled AI functions
               </button>
             </div>
-            <div v-else-if="assetDetail.asset.media_kind === 'video'" class="empty-state compact-empty">
-              <p>Frame AI for videos is planned. Audio transcription can run now against the selected video audio stream.</p>
+            <div v-else-if="assetDetail.asset.media_kind === 'video'" class="ai-action-grid">
               <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('transcribe', 'video_transcript', { model: 'small' })">
                 <i class="bi bi-soundwave" aria-hidden="true"></i>
                 Run audio transcription
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-midi', 'video_music_midi')">
+                <i class="bi bi-music-note-beamed" aria-hidden="true"></i>
+                Transcribe music to MIDI
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-stems', 'video_music_stems')">
+                <i class="bi bi-vinyl" aria-hidden="true"></i>
+                Separate vocals/instruments
               </button>
             </div>
             <div v-else-if="assetDetail.asset.media_kind === 'audio'" class="ai-action-grid">
@@ -7649,6 +7657,14 @@ onBeforeUnmount(() => {
               <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('audio-analyze', 'audio_features')">
                 <i class="bi bi-sliders" aria-hidden="true"></i>
                 Run audio analysis
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-midi', 'audio_music_midi')">
+                <i class="bi bi-music-note-beamed" aria-hidden="true"></i>
+                Transcribe music to MIDI
+              </button>
+              <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-stems', 'audio_music_stems')">
+                <i class="bi bi-vinyl" aria-hidden="true"></i>
+                Separate vocals/instruments
               </button>
               <button type="button" class="btn btn-outline-secondary" @click="setActive('Jobs')">
                 <i class="bi bi-list-task" aria-hidden="true"></i>
@@ -7671,7 +7687,7 @@ onBeforeUnmount(() => {
               </article>
             </div>
           </section>
-          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.ocr_blocks?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0 || (assetDetail.transcripts?.length ?? 0) > 0 || !!assetDetail.audio_features || (assetDetail.frame_captions?.length ?? 0) > 0 || !!assetDetail.document)" class="settings-form settings-wide">
+          <section v-if="assetDetail && ((assetDetail.ai_tags?.length ?? 0) > 0 || (assetDetail.ai_predictions?.length ?? 0) > 0 || (assetDetail.face_detections?.length ?? 0) > 0 || (assetDetail.ocr_blocks?.length ?? 0) > 0 || (assetDetail.embeddings?.length ?? 0) > 0 || (assetDetail.transcripts?.length ?? 0) > 0 || !!assetDetail.audio_features || (assetDetail.music_midi?.length ?? 0) > 0 || (assetDetail.music_stems?.length ?? 0) > 0 || (assetDetail.frame_captions?.length ?? 0) > 0 || !!assetDetail.document)" class="settings-form settings-wide">
             <h3>AI Results</h3>
             <div v-if="assetDetail.ai_tags?.length" class="chip-row">
               <span v-for="tag in assetDetail.ai_tags" :key="`${tag.tag}-${tag.source}`" class="chip">
@@ -7801,6 +7817,36 @@ onBeforeUnmount(() => {
                   Genres {{ assetDetail.audio_features.genre_labels?.join(', ') || 'not classified' }}
                 </p>
                 <small>{{ assetDetail.audio_features.model || 'local audio analyzer' }}</small>
+              </article>
+            </section>
+            <section v-if="assetDetail.music_midi?.length" class="ocr-record-list">
+              <h4>Music MIDI</h4>
+              <article v-for="midi in assetDetail.music_midi" :key="midi.id" class="ocr-record-card wide-record-card">
+                <div>
+                  <strong>{{ midi.provider || 'MIDI provider' }} · {{ midi.model || 'music transcription model' }}</strong>
+                  <small>{{ midi.status || 'stored' }} · {{ midi.note_count ?? 0 }} notes · {{ midi.instrument_count ?? 0 }} instrument groups</small>
+                  <p>{{ midi.summary || 'MIDI transcription is stored in the Cartolensia cache.' }}</p>
+                  <div v-if="midi.instruments?.length" class="chip-row compact-chip-row">
+                    <span v-for="instrument in midi.instruments" :key="instrument" class="chip">{{ instrument }}</span>
+                  </div>
+                  <code v-if="midi.midi_cache_path">{{ midi.midi_cache_path }}</code>
+                </div>
+              </article>
+            </section>
+            <section v-if="assetDetail.music_stems?.length" class="ocr-record-list">
+              <h4>Music Stems</h4>
+              <article v-for="stemSet in assetDetail.music_stems" :key="stemSet.id" class="ocr-record-card wide-record-card">
+                <div>
+                  <strong>{{ stemSet.provider || 'stem provider' }} · {{ stemSet.model || 'music separation model' }}</strong>
+                  <small>{{ stemSet.status || 'stored' }} · {{ stemSet.stem_set || 'default stems' }} · {{ stemSet.stem_count ?? stemSet.stems?.length ?? 0 }} files</small>
+                  <div v-if="stemSet.stems?.length" class="place-record-grid">
+                    <article v-for="stem in stemSet.stems" :key="stem.cache_path || stem.name" class="place-record-card">
+                      <strong>{{ stem.name || 'stem' }}</strong>
+                      <small>{{ formatBytes(Number(stem.size_bytes || 0)) }}</small>
+                      <code v-if="stem.cache_path">{{ stem.cache_path }}</code>
+                    </article>
+                  </div>
+                </div>
               </article>
             </section>
             <section v-if="assetDetail.frame_captions?.length" class="ocr-record-list">
@@ -10579,8 +10625,10 @@ onBeforeUnmount(() => {
                 <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['ocr'])">OCR</button>
                 <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['audio_features'])">Audio features</button>
                 <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['audio_transcript', 'video_transcript'])">Transcribe audio/video</button>
+                <button type="button" class="btn btn-outline-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai', ['music_midi_audio', 'music_midi_video'])">Music to MIDI</button>
                 <button type="button" class="btn btn-primary" :disabled="Boolean(tasksBusy)" @click="queueTaskAction('ai')">Run all missing AI</button>
               </div>
+              <p class="muted">Stem separation is available on each audio/video asset detail page and is intentionally on-demand because it writes large cache files.</p>
             </article>
             <article class="settings-form settings-wide">
               <h3>Current Queue</h3>

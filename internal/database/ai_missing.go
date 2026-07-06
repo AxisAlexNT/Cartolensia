@@ -81,6 +81,10 @@ func aiMissingWhere(query catalog.AIMissingQuery) (string, []any, error) {
 		completionClause = `not exists(select 1 from asset_transcripts t where t.asset_id=a.id)`
 	case "analyze_audio":
 		completionClause = `not exists(select 1 from audio_features af where af.asset_id=a.id)`
+	case "music_midi":
+		completionClause = `not exists(select 1 from asset_midi_transcriptions mt where mt.asset_id=a.id and mt.status='succeeded')`
+	case "music_stems":
+		completionClause = `not exists(select 1 from asset_music_stems ms where ms.asset_id=a.id and ms.status='succeeded')`
 	default:
 		return "", nil, fmt.Errorf("unsupported AI missing task %q", task)
 	}
@@ -145,6 +149,11 @@ func aiSupportedTaskExtensions(task, mediaKind string) []string {
 		}
 		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
 	case "analyze_audio":
+		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
+	case "music_midi", "music_stems":
+		if mediaKind == "video" {
+			return []string{"mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp", "3gpp"}
+		}
 		return []string{"mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "amr", "3gp", "3gpp", "webm"}
 	default:
 		return nil

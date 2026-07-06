@@ -109,6 +109,18 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
             return backend.infer("analyze-audio", request)
         return backend.analyze_audio(request)
 
+    @app.post("/music-to-midi", response_model=InferenceResponse, status_code=202)
+    def music_to_midi(request: MediaRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return backend.infer("music-to-midi", request)
+        return backend.music_to_midi(request)
+
+    @app.post("/separate-music", response_model=InferenceResponse, status_code=202)
+    def separate_music(request: MediaRequest) -> InferenceResponse:
+        if isinstance(backend, DummyBackend):
+            return backend.infer("separate-music", request)
+        return backend.separate_music(request)
+
     return app
 
 

@@ -278,12 +278,14 @@ New normalized metadata tables support multimodal search and asset-detail pages:
 
 - `asset_transcripts` and `asset_transcript_segments` for ASR output;
 - `audio_features` for audio analysis;
+- `asset_midi_transcriptions` for audio/video music-to-MIDI metadata and cache references;
+- `asset_music_stems` for on-demand stem-separation metadata and cache references;
 - `video_frame_captions` for sampled-frame descriptions;
 - `document_text` for OCR/Marker/PDF markdown output.
 
 The current `postgres_local` search backend indexes these records through bounded asset-scoped lookups and PostgreSQL indexes. Elasticsearch/OpenSearch remain future optional adapters behind the SearchBackend abstraction.
 
-Asset detail exposes OCR full text, transcripts, audio features, video frame captions, and document text through dedicated subroutes. Heavy engines such as ASR, Marker, advanced video description, and genre classifiers remain optional component-managed integrations.
+Asset detail exposes OCR full text, transcripts, audio features, MIDI transcriptions, music stem sets, video frame captions, and document text through dedicated subroutes. Heavy engines such as ASR, Basic Pitch, Demucs, Marker, advanced video description, MT3-style transcription, and genre classifiers remain optional component-managed integrations.
 
 ## 2026-06-07 Update
 
@@ -322,6 +324,14 @@ Asset detail exposes OCR full text, transcripts, audio features, video frame cap
 - The AI sidecar also exposes `POST /analyze-audio` using librosa/SoundFile. The backend routes `/api/v1/audio/analyze/start` and `/api/v1/ai/jobs/audio-analyze` persist tempo, key, mode, loudness, speech/music ratio, spectral summary, and heuristic labels into the existing `audio_features` table.
 - `postgres_local` search now matches transcript text and audio features. Supported audio tokens include `transcript:...`, `genre:...`, `key:...`, exact tempo values, and tempo ranges such as `tempo:120..140`.
 - Component Manager tracks ASR/audio dependencies and models as first-class components: `asr-faster-whisper`, `asr-ctranslate2`, `asr-model-small`, `asr-model-medium`, `audio-librosa`, and `audio-soundfile`.
+
+## 2026-07-06 Music Analysis Update
+
+- The AI sidecar exposes `POST /music-to-midi` for local Basic Pitch transcription and `POST /separate-music` for local Demucs stem separation when those packages are installed.
+- Backend routes are available at `POST /api/v1/ai/jobs/music-midi` and `POST /api/v1/ai/jobs/music-stems`, with asset inspection routes `GET /api/v1/assets/{id}/music`, `/midi`, and `/stems`.
+- MIDI is eligible for broad missing-metadata backfill across audio and video assets because MIDI outputs are compact. Stem separation is asset-scoped/on-demand because separated stem audio can be large.
+- Generated MIDI/stem files are cache artifacts under the configured Cartolensia cache root. PostgreSQL stores durable metadata, provenance, cache paths, note counts, instrument names, stem names, and sizes. Originals remain immutable.
+- `music-basic-pitch`, `music-demucs`, and optional future `music-mt3` are tracked in Component Manager so offline deployments can provide reviewed packages/models without automatic downloads.
 
 ## 2026-06-09 Indexing, Tracks, And Geocoding Update
 

@@ -314,6 +314,166 @@ func (db *DB) GetDocumentText(ctx context.Context, assetID string) (catalog.Docu
 	return doc, nil
 }
 
+func (db *DB) UpsertMusicMIDITranscription(ctx context.Context, transcription catalog.MusicMIDITranscription) (catalog.MusicMIDITranscription, error) {
+	if transcription.ID == "" {
+		transcription.ID = id.NewUUID()
+	}
+	if transcription.Status == "" {
+		transcription.Status = "succeeded"
+	}
+	meta, err := json.Marshal(orEmptyMap(transcription.Metadata))
+	if err != nil {
+		return catalog.MusicMIDITranscription{}, err
+	}
+	instruments, err := json.Marshal(transcription.Instruments)
+	if err != nil {
+		return catalog.MusicMIDITranscription{}, err
+	}
+	_, err = db.pool.Exec(ctx, `
+		insert into asset_midi_transcriptions(
+			id, asset_id, source_kind, provider, model, status, midi_cache_path,
+			duration_seconds, note_count, instrument_count, instruments_json, summary, metadata_json
+		)
+		values($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb)
+		on conflict(asset_id, provider, model) do update set
+			source_kind=excluded.source_kind,
+			status=excluded.status,
+			midi_cache_path=excluded.midi_cache_path,
+			duration_seconds=excluded.duration_seconds,
+			note_count=excluded.note_count,
+			instrument_count=excluded.instrument_count,
+			instruments_json=excluded.instruments_json,
+			summary=excluded.summary,
+			created_at=now(),
+			metadata_json=excluded.metadata_json
+	`, transcription.ID, transcription.AssetID, transcription.SourceKind, transcription.Provider, transcription.Model, transcription.Status,
+		transcription.MIDICachePath, transcription.DurationSeconds, transcription.NoteCount, transcription.InstrumentCount,
+		instruments, transcription.Summary, meta)
+	if err != nil {
+		return catalog.MusicMIDITranscription{}, err
+	}
+	items, err := db.ListMusicMIDITranscriptions(ctx, transcription.AssetID, 100)
+	if err != nil {
+		return catalog.MusicMIDITranscription{}, err
+	}
+	for _, item := range items {
+		if item.ID == transcription.ID || (item.Provider == transcription.Provider && item.Model == transcription.Model) {
+			return item, nil
+		}
+	}
+	return transcription, nil
+}
+
+func (db *DB) ListMusicMIDITranscriptions(ctx context.Context, assetID string, limit int) ([]catalog.MusicMIDITranscription, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := db.pool.Query(ctx, `
+		select id::text, asset_id::text, source_kind, provider, model, status, midi_cache_path,
+		       duration_seconds, note_count, instrument_count, instruments_json, summary, created_at, metadata_json
+		from asset_midi_transcriptions
+		where asset_id=$1
+		order by created_at desc
+		limit $2
+	`, assetID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.MusicMIDITranscription{}
+	for rows.Next() {
+		var item catalog.MusicMIDITranscription
+		var instruments, meta []byte
+		if err := rows.Scan(
+			&item.ID, &item.AssetID, &item.SourceKind, &item.Provider, &item.Model, &item.Status, &item.MIDICachePath,
+			&item.DurationSeconds, &item.NoteCount, &item.InstrumentCount, &instruments, &item.Summary, &item.CreatedAt, &meta,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(instruments, &item.Instruments)
+		item.Metadata = decodeMap(meta)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) UpsertMusicStemSet(ctx context.Context, stemSet catalog.MusicStemSet) (catalog.MusicStemSet, error) {
+	if stemSet.ID == "" {
+		stemSet.ID = id.NewUUID()
+	}
+	if stemSet.Status == "" {
+		stemSet.Status = "succeeded"
+	}
+	meta, err := json.Marshal(orEmptyMap(stemSet.Metadata))
+	if err != nil {
+		return catalog.MusicStemSet{}, err
+	}
+	stems, err := json.Marshal(stemSet.Stems)
+	if err != nil {
+		return catalog.MusicStemSet{}, err
+	}
+	_, err = db.pool.Exec(ctx, `
+		insert into asset_music_stems(
+			id, asset_id, source_kind, provider, model, status, stem_set, output_dir, stems_json, metadata_json
+		)
+		values($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+		on conflict(asset_id, provider, model, stem_set) do update set
+			source_kind=excluded.source_kind,
+			status=excluded.status,
+			output_dir=excluded.output_dir,
+			stems_json=excluded.stems_json,
+			created_at=now(),
+			metadata_json=excluded.metadata_json
+	`, stemSet.ID, stemSet.AssetID, stemSet.SourceKind, stemSet.Provider, stemSet.Model, stemSet.Status,
+		stemSet.StemSet, stemSet.OutputDir, stems, meta)
+	if err != nil {
+		return catalog.MusicStemSet{}, err
+	}
+	items, err := db.ListMusicStemSets(ctx, stemSet.AssetID, 100)
+	if err != nil {
+		return catalog.MusicStemSet{}, err
+	}
+	for _, item := range items {
+		if item.ID == stemSet.ID || (item.Provider == stemSet.Provider && item.Model == stemSet.Model && item.StemSet == stemSet.StemSet) {
+			return item, nil
+		}
+	}
+	return stemSet, nil
+}
+
+func (db *DB) ListMusicStemSets(ctx context.Context, assetID string, limit int) ([]catalog.MusicStemSet, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := db.pool.Query(ctx, `
+		select id::text, asset_id::text, source_kind, provider, model, status, stem_set, output_dir,
+		       stems_json, created_at, metadata_json
+		from asset_music_stems
+		where asset_id=$1
+		order by created_at desc
+		limit $2
+	`, assetID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []catalog.MusicStemSet{}
+	for rows.Next() {
+		var item catalog.MusicStemSet
+		var stems, meta []byte
+		if err := rows.Scan(
+			&item.ID, &item.AssetID, &item.SourceKind, &item.Provider, &item.Model, &item.Status,
+			&item.StemSet, &item.OutputDir, &stems, &item.CreatedAt, &meta,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(stems, &item.Stems)
+		item.Metadata = decodeMap(meta)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func orEmptyMap(in map[string]any) map[string]any {
 	if in == nil {
 		return map[string]any{}
