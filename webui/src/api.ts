@@ -252,6 +252,7 @@ export type MusicStem = {
   name?: string;
   role?: string;
   cache_path?: string;
+  mime?: string;
   mime_type?: string;
   size_bytes?: number;
   duration_seconds?: number;

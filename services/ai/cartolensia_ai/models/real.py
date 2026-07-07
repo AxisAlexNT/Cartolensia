@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -650,26 +651,37 @@ class RealBackend:
         temp_path: Path | None = None
         should_delete = False
         try:
-            if importlib.util.find_spec("basic_pitch") is None:
-                raise MissingModelError("basic-pitch is not installed in the Cartolensia AI environment")
-            from basic_pitch.inference import predict_and_save  # type: ignore
+            package_available = importlib.util.find_spec("basic_pitch") is not None
+            cli_executable = _basic_pitch_executable(self.config.cache_dir)
+            if not package_available and cli_executable is None:
+                raise MissingModelError(
+                    "basic-pitch is not installed in the Cartolensia AI environment or as an isolated component CLI"
+                )
+            predict_and_save = None
+            if package_available:
+                from basic_pitch.inference import predict_and_save as loaded_predict_and_save  # type: ignore
+
+                predict_and_save = loaded_predict_and_save
 
             suffix = str((request.options or {}).get("suffix") or ".media")
             temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
             output_dir = _music_output_dir(self.config.cache_dir, "music-midi", request.asset_id)
             output_dir.mkdir(parents=True, exist_ok=True)
             with self._music_slots:
-                try:
-                    predict_and_save(
-                        [str(temp_path)],
-                        str(output_dir),
-                        save_midi=True,
-                        sonify_midi=False,
-                        save_model_outputs=False,
-                        save_notes=False,
-                    )
-                except TypeError:
-                    predict_and_save([str(temp_path)], str(output_dir), True, False, False, False)
+                if predict_and_save is not None:
+                    try:
+                        predict_and_save(
+                            [str(temp_path)],
+                            str(output_dir),
+                            save_midi=True,
+                            sonify_midi=False,
+                            save_model_outputs=False,
+                            save_notes=False,
+                        )
+                    except TypeError:
+                        predict_and_save([str(temp_path)], str(output_dir), True, False, False, False)
+                elif cli_executable is not None:
+                    _run_basic_pitch_cli(cli_executable, temp_path, output_dir, _int_option(request.options, "timeout_seconds", 7200))
             midi_files = sorted(output_dir.rglob("*.mid")) + sorted(output_dir.rglob("*.midi"))
             if not midi_files:
                 raise RuntimeError("basic-pitch completed but did not produce a MIDI file")
@@ -692,6 +704,8 @@ class RealBackend:
                     "provider": "basic_pitch",
                     "engine": "basic_pitch",
                     "model": "basic_pitch",
+                    "runtime": "python_api" if package_available else "isolated_cli",
+                    "executable": str(cli_executable) if cli_executable else None,
                     "status": "succeeded",
                     "cache_path": str(midi_path),
                     "output_dir": str(output_dir),
@@ -724,11 +738,14 @@ class RealBackend:
         should_delete = False
         try:
             module_available = importlib.util.find_spec("demucs") is not None
-            executable = shutil.which("demucs")
+            executable = _demucs_executable(self.config.cache_dir)
             if not module_available and not executable:
-                raise MissingModelError("demucs is not installed in the Cartolensia AI environment")
+                raise MissingModelError(
+                    "demucs is not installed in the Cartolensia AI environment or as an isolated component CLI"
+                )
             model = str((request.options or {}).get("model") or os.environ.get("CARTOLENSIA_MUSIC_STEMS_MODEL") or "htdemucs").strip()
             stem_set = str((request.options or {}).get("stem_set") or "vocals_drums_bass_other").strip() or "vocals_drums_bass_other"
+            device = str((request.options or {}).get("device") or os.environ.get("CARTOLENSIA_MUSIC_STEMS_DEVICE") or "").strip()
             timeout = _int_option(request.options, "timeout_seconds", 7200)
             timeout = max(60, min(timeout, 24 * 60 * 60))
             suffix = str((request.options or {}).get("suffix") or ".media")
@@ -736,11 +753,18 @@ class RealBackend:
             output_dir = _music_output_dir(self.config.cache_dir, "music-stems", request.asset_id) / _safe_token(model)
             output_dir.mkdir(parents=True, exist_ok=True)
             if module_available:
-                command = [sys.executable, "-m", "demucs.separate", "-n", model, "-o", str(output_dir), str(temp_path)]
+                command = [sys.executable, "-m", "demucs.separate", "-n", model, "-o", str(output_dir)]
+                isolated_cli = False
             else:
-                command = [str(executable), "-n", model, "-o", str(output_dir), str(temp_path)]
+                command = [str(executable), "-n", model, "-o", str(output_dir)]
+                isolated_cli = True
+            if device:
+                command.extend(["-d", device])
+            command.append(str(temp_path))
+            env = _isolated_python_cli_env() if isolated_cli else dict(os.environ)
+            env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
             with self._music_slots:
-                proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+                proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=env)
             if proc.returncode != 0:
                 reason = (proc.stderr or proc.stdout or f"demucs exited with {proc.returncode}").strip()
                 return InferenceResponse(
@@ -767,6 +791,8 @@ class RealBackend:
                     "provider": "demucs",
                     "engine": "demucs",
                     "model": model,
+                    "runtime": "python_module" if module_available else "isolated_cli",
+                    "executable": str(executable) if executable else None,
                     "status": "succeeded",
                     "stem_set": stem_set,
                     "output_dir": str(output_dir),
@@ -1079,10 +1105,13 @@ def _audio_analysis_status() -> dict[str, Any]:
 
 def _music_midi_status(cache_dir: Path) -> dict[str, Any]:
     package_available = importlib.util.find_spec("basic_pitch") is not None
+    executable = _basic_pitch_executable(cache_dir)
     return {
         "name": "basic_pitch",
-        "available": package_available,
+        "available": package_available or executable is not None,
         "package_available": package_available,
+        "cli_available": executable is not None,
+        "executable": str(executable) if executable else None,
         "provider": "basic_pitch",
         "cache_dir": str(cache_dir / "music-midi"),
         "outputs": ["midi"],
@@ -1090,14 +1119,111 @@ def _music_midi_status(cache_dir: Path) -> dict[str, Any]:
     }
 
 
+def _component_roots(cache_dir: Path) -> list[Path]:
+    roots: list[Path] = []
+    env_root = os.environ.get("CARTOLENSIA_COMPONENT_DIR", "").strip()
+    if env_root:
+        roots.append(Path(env_root))
+    roots.append(cache_dir.parent / "components")
+    roots.append(Path(".cartolensia") / "components")
+    unique: list[Path] = []
+    for root in roots:
+        root = root.expanduser()
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
+def _basic_pitch_executable(cache_dir: Path) -> Path | None:
+    candidates: list[Path] = []
+    env_bin = os.environ.get("CARTOLENSIA_BASIC_PITCH_BIN", "").strip()
+    if env_bin:
+        candidates.append(Path(env_bin))
+    for root in _component_roots(cache_dir):
+        component_root = root / "music-basic-pitch"
+        candidates.extend(
+            [
+                component_root / "venv" / "bin" / "basic-pitch",
+                component_root / "bin" / "basic-pitch",
+                component_root / "basic-pitch",
+            ]
+        )
+    which = shutil.which("basic-pitch")
+    if which:
+        candidates.append(Path(which))
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _demucs_executable(cache_dir: Path) -> Path | None:
+    candidates: list[Path] = []
+    env_bin = os.environ.get("CARTOLENSIA_DEMUCS_BIN", "").strip()
+    if env_bin:
+        candidates.append(Path(env_bin))
+    for root in _component_roots(cache_dir):
+        component_root = root / "music-demucs"
+        candidates.extend(
+            [
+                component_root / "venv" / "bin" / "demucs",
+                component_root / "bin" / "demucs",
+                component_root / "demucs",
+            ]
+        )
+    which = shutil.which("demucs")
+    if which:
+        candidates.append(Path(which))
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _run_basic_pitch_cli(executable: Path, input_path: Path, output_dir: Path, timeout_seconds: int) -> None:
+    timeout_seconds = max(60, min(timeout_seconds, 24 * 60 * 60))
+    env = _isolated_python_cli_env()
+    command = [str(executable), str(output_dir), str(input_path), "--save-midi"]
+    proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout_seconds, env=env)
+    if proc.returncode == 0:
+        return
+    stderr = (proc.stderr or proc.stdout or "").strip()
+    # Older CLI releases differ in option names. Retry the documented minimal
+    # invocation before surfacing the failure.
+    if "no such option" in stderr.lower() or "unrecognized" in stderr.lower():
+        fallback = [str(executable), str(output_dir), str(input_path)]
+        proc = subprocess.run(fallback, check=False, capture_output=True, text=True, timeout=timeout_seconds, env=env)
+        if proc.returncode == 0:
+            return
+        stderr = (proc.stderr or proc.stdout or "").strip()
+    if len(stderr) > 4000:
+        stderr = stderr[-4000:]
+    raise RuntimeError(f"basic-pitch CLI failed with exit code {proc.returncode}: {stderr}")
+
+
+def _isolated_python_cli_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    return env
+
+
 def _music_stems_status(cache_dir: Path) -> dict[str, Any]:
     package_available = importlib.util.find_spec("demucs") is not None
-    executable = shutil.which("demucs")
+    executable = _demucs_executable(cache_dir)
     return {
         "name": "demucs",
         "available": package_available or executable is not None,
         "package_available": package_available,
-        "executable": executable,
+        "executable": str(executable) if executable else "",
         "provider": "demucs",
         "cache_dir": str(cache_dir / "music-stems"),
         "outputs": ["vocals", "drums", "bass", "other"],
@@ -1157,13 +1283,118 @@ def _midi_summary(path: Path) -> dict[str, Any]:
             "summary": f"{note_count} MIDI note-on events across {len(instruments)} channel/program group(s).",
         }
     except Exception:
+        return _midi_summary_builtin(path)
+
+
+def _midi_summary_builtin(path: Path) -> dict[str, Any]:
+    """Read basic Standard MIDI File statistics without optional packages."""
+
+    try:
+        data = path.read_bytes()
+        if len(data) < 14 or data[:4] != b"MThd":
+            raise ValueError("not a Standard MIDI File")
+        header_len = int.from_bytes(data[4:8], "big")
+        if len(data) < 8 + header_len or header_len < 6:
+            raise ValueError("truncated MIDI header")
+        _, track_count, division = struct.unpack(">HHH", data[8:14])
+        offset = 8 + header_len
+        note_count = 0
+        max_ticks = 0
+        tempo_us_per_quarter = 500_000
+        programs: set[str] = set()
+        channels: set[str] = set()
+        for _ in range(track_count):
+            if offset + 8 > len(data) or data[offset : offset + 4] != b"MTrk":
+                break
+            length = int.from_bytes(data[offset + 4 : offset + 8], "big")
+            pos = offset + 8
+            end = min(pos + length, len(data))
+            offset = end
+            tick = 0
+            running_status: int | None = None
+            while pos < end:
+                delta, pos = _midi_read_vlq(data, pos, end)
+                tick += delta
+                if pos >= end:
+                    break
+                first = data[pos]
+                if first < 0x80:
+                    if running_status is None:
+                        break
+                    status = running_status
+                    data_start = pos
+                else:
+                    status = first
+                    pos += 1
+                    data_start = pos
+                    if status < 0xF0:
+                        running_status = status
+                    else:
+                        running_status = None
+
+                if status == 0xFF:
+                    if pos >= end:
+                        break
+                    meta_type = data[pos]
+                    pos += 1
+                    size, pos = _midi_read_vlq(data, pos, end)
+                    payload = data[pos : min(pos + size, end)]
+                    if meta_type == 0x51 and len(payload) == 3:
+                        tempo_us_per_quarter = int.from_bytes(payload, "big")
+                    pos = min(pos + size, end)
+                    continue
+                if status in {0xF0, 0xF7}:
+                    size, pos = _midi_read_vlq(data, pos, end)
+                    pos = min(pos + size, end)
+                    continue
+                if status >= 0xF0:
+                    continue
+
+                event = status & 0xF0
+                channel = status & 0x0F
+                size = 1 if event in {0xC0, 0xD0} else 2
+                if data_start + size > end:
+                    break
+                values = data[data_start : data_start + size]
+                pos = data_start + size
+                channels.add(f"channel_{channel + 1}")
+                if event == 0xC0:
+                    programs.add(f"program_{int(values[0])}")
+                elif event == 0x90 and size == 2 and int(values[1]) > 0:
+                    note_count += 1
+            max_ticks = max(max_ticks, tick)
+        instruments = sorted(programs or channels or {"pitch_contours"})
+        duration = None
+        if division and division < 0x8000:
+            duration = float(max_ticks * tempo_us_per_quarter / division / 1_000_000)
+        return {
+            "note_count": note_count,
+            "instrument_count": len(instruments),
+            "instruments": instruments,
+            "duration_seconds": duration,
+            "summary": f"{note_count} MIDI note-on events across {len(instruments)} channel/program group(s).",
+        }
+    except Exception:
         return {
             "note_count": 0,
             "instrument_count": 1,
             "instruments": ["pitch_contours"],
             "duration_seconds": None,
-            "summary": "MIDI file produced; optional MIDI inspection packages are unavailable.",
+            "summary": "MIDI file produced; built-in parser could not inspect this file.",
         }
+
+
+def _midi_read_vlq(data: bytes, pos: int, end: int) -> tuple[int, int]:
+    value = 0
+    for _ in range(4):
+        if pos >= end:
+            return value, pos
+        byte = data[pos]
+        pos += 1
+        value = (value << 7) | (byte & 0x7F)
+        if byte < 0x80:
+            return value, pos
+    return value, pos
 
 
 def _collect_stems(root: Path) -> list[dict[str, Any]]:

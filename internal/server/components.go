@@ -54,8 +54,8 @@ var defaultComponents = []componentDefinition{
 	{Key: "asr-ctranslate2", Name: "CTranslate2 ASR backend", Category: "python", LicenseName: "MIT", ProvenanceURL: "https://github.com/OpenNMT/CTranslate2", Kind: "python_import", Metadata: map[string]any{"import": "ctranslate2", "modality": "audio_asr"}},
 	{Key: "audio-librosa", Name: "librosa audio analysis", Category: "python", LicenseName: "ISC", ProvenanceURL: "https://librosa.org", Kind: "python_import", Metadata: map[string]any{"import": "librosa", "modality": "audio_features"}},
 	{Key: "audio-soundfile", Name: "SoundFile audio IO", Category: "python", LicenseName: "BSD-3-Clause", ProvenanceURL: "https://python-soundfile.readthedocs.io", Kind: "python_import", Metadata: map[string]any{"import": "soundfile", "modality": "audio_features"}},
-	{Key: "music-basic-pitch", Name: "Basic Pitch audio-to-MIDI", Category: "python", LicenseName: "Apache-2.0", ProvenanceURL: "https://github.com/spotify/basic-pitch", Kind: "python_import", Metadata: map[string]any{"import": "basic_pitch", "modality": "music_midi", "cache_only_outputs": true}},
-	{Key: "music-demucs", Name: "Demucs music stem separation", Category: "python", LicenseName: "MIT package; model weights require provenance review", ProvenanceURL: "https://github.com/facebookresearch/demucs", Kind: "python_import", Metadata: map[string]any{"import": "demucs", "modality": "music_stems", "cache_only_outputs": true, "on_demand": true}},
+	{Key: "music-basic-pitch", Name: "Basic Pitch audio-to-MIDI", Category: "python", LicenseName: "Apache-2.0", ProvenanceURL: "https://github.com/spotify/basic-pitch", SourceURL: "https://pypi.org/project/basic-pitch/", Expected: []string{"venv/bin/basic-pitch", "bin/basic-pitch", "basic-pitch"}, Kind: "python_import", Metadata: map[string]any{"import": "basic_pitch", "modality": "music_midi", "cache_only_outputs": true, "installer": "isolated_python_cli", "pip_package": "basic-pitch[tf]", "pip_dependency_pins": []any{"numpy>=1.23.5,<2.0.0", "protobuf>=3.20.3,<5.0.0dev", "flatbuffers>=23.5.26", "setuptools<81"}, "pip_distribution": "basic-pitch", "python_constraint": ">=3.8,<3.12", "executable": "basic-pitch"}},
+	{Key: "music-demucs", Name: "Demucs music stem separation", Category: "python", LicenseName: "MIT package; model weights require provenance review", ProvenanceURL: "https://github.com/facebookresearch/demucs", SourceURL: "https://pypi.org/project/demucs/", Expected: []string{"venv/bin/demucs", "bin/demucs", "demucs"}, Kind: "python_import", Metadata: map[string]any{"import": "demucs", "modality": "music_stems", "cache_only_outputs": true, "on_demand": true, "installer": "isolated_python_cli", "pip_package": "demucs", "pip_dependency_pins": []any{"--extra-index-url", "https://download.pytorch.org/whl/cu128", "torch==2.7.1+cu128", "torchaudio==2.7.1+cu128"}, "executable": "demucs"}},
 	{Key: "music-mt3", Name: "MT3 multi-instrument music transcription", Category: "model", LicenseName: "Apache-2.0 code/model provenance review", ProvenanceURL: "https://github.com/magenta/mt3", Kind: "model_dir", Metadata: map[string]any{"modality": "music_midi", "optional": true, "status": "future_provider"}},
 	{Key: "document-pymupdf", Name: "PyMuPDF document extraction", Category: "python", LicenseName: "AGPL-3.0-or-later; distribution needs review", ProvenanceURL: "https://pymupdf.readthedocs.io", Kind: "python_import", Metadata: map[string]any{"import": "fitz", "modality": "document_text"}},
 	{Key: "efficientnet-b0", Name: "Torchvision EfficientNet-B0 weights", Category: "model", LicenseName: "Torchvision/ImageNet weights provenance requires review", ProvenanceURL: "https://docs.pytorch.org/vision/main/models/generated/torchvision.models.efficientnet_b0", Kind: "model_path", Expected: []string{".cartolensia/models/torch/hub/checkpoints/efficientnet_b0_rwightman-7f5810bc.pth", ".cartolensia/models/torch/hub/checkpoints/efficientnet_b0-355c32eb.pth"}},
@@ -228,26 +228,49 @@ func (s *Server) handleComponentDownload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	job := s.createComponentJob(r.Context(), key, "component_download")
-	component, err := s.deps.Store.GetComponent(r.Context(), key)
-	if err == nil && strings.TrimSpace(component.SourceURL) != "" {
-		err = fmt.Errorf("network download is intentionally not executed by this local handler yet; provide a reviewed archive/path or run an explicit future downloader for %s", key)
-	} else if err == nil {
-		err = fmt.Errorf("component %s has no reviewed source_url; provide archive/path or configure a reviewed source first", key)
-	}
-	if err != nil {
-		component = s.updateComponentStatus(r.Context(), key, "failed", "", "", err.Error(), map[string]any{"download_job_id": job.ID})
+	def, ok := componentDefinitionByKey(key)
+	if !ok {
+		writeError(w, http.StatusNotFound, catalog.ErrNotFound)
+		return
 	}
 	now := time.Now().UTC()
-	job.Status = jobs.StatusFailed
+	job.Status = jobs.StatusRunning
 	job.StartedAt = &now
-	job.FinishedAt = &now
 	total := int64(1)
 	job.ProgressTotal = &total
-	job.ProgressCurrent = 1
-	job.Error = err.Error()
-	job.Payload = map[string]any{"component_key": key, "action": "download", "status": "failed", "error": err.Error()}
+	job.ProgressCurrent = 0
+	job.Payload = map[string]any{"component_key": key, "action": "download", "status": "running"}
 	_ = s.deps.Store.UpdateJob(r.Context(), job)
-	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": job.ID, "component": component, "status": "failed", "error": err.Error()})
+
+	var component catalog.Component
+	var err error
+	if reviewedComponentInstaller(def) {
+		component, err = s.installReviewedComponent(r.Context(), key, def, job.ID)
+	} else {
+		component, err = s.deps.Store.GetComponent(r.Context(), key)
+		if err == nil && strings.TrimSpace(component.SourceURL) != "" {
+			err = fmt.Errorf("network download is intentionally not executed by this local handler yet; provide a reviewed archive/path or run an explicit future downloader for %s", key)
+		} else if err == nil {
+			err = fmt.Errorf("component %s has no reviewed source_url; provide archive/path or configure a reviewed source first", key)
+		}
+	}
+	status := jobs.StatusSucceeded
+	if err != nil {
+		status = jobs.StatusFailed
+		component = s.updateComponentStatus(r.Context(), key, "failed", "", "", err.Error(), map[string]any{"download_job_id": job.ID})
+	}
+	finished := time.Now().UTC()
+	job.Status = status
+	job.FinishedAt = &finished
+	job.ProgressCurrent = 1
+	payload := map[string]any{"component_key": key, "action": "download", "status": string(status)}
+	if err != nil {
+		job.Error = err.Error()
+		payload["error"] = err.Error()
+	}
+	job.Payload = payload
+	_ = s.deps.Store.UpdateJob(r.Context(), job)
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": job.ID, "component": component, "status": string(status), "error": errorString(err)})
 }
 
 func (s *Server) handleComponentProvidePath(w http.ResponseWriter, r *http.Request, key string) {
@@ -415,16 +438,28 @@ func (s *Server) checkComponent(ctx context.Context, key string) (catalog.Compon
 		}
 	case "python_import":
 		module := stringFromAny(def.Metadata["import"])
-		ok, version, meta := pythonImportAvailable(module)
+		ok, version, meta := false, "", map[string]any{}
+		if stringFromAny(def.Metadata["installer"]) == "isolated_python_cli" {
+			ok, version, meta = isolatedPythonCLIAvailable(def, component)
+		}
+		if !ok {
+			ok, version, meta = pythonImportAvailable(module)
+		}
 		component.Metadata = mergeMaps(component.Metadata, meta)
 		if ok {
 			component.Status = "installed"
 			component.SourceType = "user_provided"
 			component.Version = version
+			component.InstallPath = nonEmpty(component.InstallPath, stringFromAny(meta["install_path"]))
+			component.ExecutablePath = nonEmpty(component.ExecutablePath, stringFromAny(meta["executable_path"]))
 			component.InstalledAt = &now
 		} else {
 			component.Status = "missing"
-			component.Error = "Python module is not importable from .cartolensia/ai-venv"
+			if stringFromAny(def.Metadata["installer"]) == "isolated_python_cli" {
+				component.Error = "Python module or isolated component CLI is not installed"
+			} else {
+				component.Error = "Python module is not importable from the configured AI Python environment"
+			}
 		}
 	case "model_path", "model_dir":
 		path, size, err := firstExistingExpected(def.Expected)
@@ -571,6 +606,227 @@ func componentRoot() string {
 		return configured
 	}
 	return root
+}
+
+func reviewedComponentInstaller(def componentDefinition) bool {
+	return stringFromAny(def.Metadata["installer"]) == "isolated_python_cli" && stringFromAny(def.Metadata["pip_package"]) != ""
+}
+
+func (s *Server) installReviewedComponent(ctx context.Context, key string, def componentDefinition, jobID string) (catalog.Component, error) {
+	switch stringFromAny(def.Metadata["installer"]) {
+	case "isolated_python_cli":
+		return s.installIsolatedPythonCLIComponent(ctx, key, def, jobID)
+	default:
+		return catalog.Component{}, fmt.Errorf("component %s does not have a reviewed installer", key)
+	}
+}
+
+func (s *Server) installIsolatedPythonCLIComponent(ctx context.Context, key string, def componentDefinition, jobID string) (catalog.Component, error) {
+	root := componentRoot()
+	dest := filepath.Join(root, key)
+	if !isPathInside(dest, root) {
+		return catalog.Component{}, errors.New("component destination escaped component root")
+	}
+	if strings.HasPrefix(dest, "/mnt/Models/rclone") {
+		return catalog.Component{}, errors.New("component installation under /mnt/Models/rclone is forbidden")
+	}
+	packageName := stringFromAny(def.Metadata["pip_package"])
+	executable := stringFromAny(def.Metadata["executable"])
+	if executable == "" {
+		executable = packageName
+	}
+	python, version, err := selectComponentPython(def)
+	if err != nil {
+		return catalog.Component{}, err
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return catalog.Component{}, err
+	}
+	component := s.updateComponentStatus(ctx, key, "downloading", dest, "", "", map[string]any{"download_job_id": jobID, "installer": "isolated_python_cli", "python": python, "python_version": version})
+	_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "starting reviewed isolated Python component installation", Metadata: map[string]any{"job_id": jobID, "python": python, "python_version": version, "package": packageName, "install_path": dest}})
+
+	installCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer cancel()
+	venvDir := filepath.Join(dest, "venv")
+	venvPython := filepath.Join(venvDir, "bin", "python")
+	venvExecutable := filepath.Join(venvDir, "bin", executable)
+	pipCache := filepath.Join(dest, "pip-cache")
+	if err := os.MkdirAll(pipCache, 0o755); err != nil {
+		return component, err
+	}
+	env := isolatedPythonCLIEnv(pipCache)
+	if _, err := os.Stat(venvPython); err != nil {
+		if output, runErr := runComponentCommand(installCtx, python, []string{"-m", "venv", venvDir}, env); runErr != nil {
+			err := fmt.Errorf("create component virtualenv: %w: %s", runErr, output)
+			_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+			return component, err
+		}
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "component virtualenv created", Metadata: map[string]any{"path": venvDir}})
+	}
+	if output, runErr := runComponentCommand(installCtx, venvPython, []string{"-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"}, env); runErr != nil {
+		err := fmt.Errorf("upgrade component pip tooling: %w: %s", runErr, output)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+		return component, err
+	}
+	_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "component pip tooling ready"})
+	pins := stringSliceFromAny(def.Metadata["pip_dependency_pins"])
+	installArgs := []string{"-m", "pip", "install", "--upgrade", "--upgrade-strategy", "eager", packageName}
+	installArgs = append(installArgs, pins...)
+	_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "installing reviewed Python package", Metadata: map[string]any{"args": installArgs}})
+	if output, runErr := runComponentCommand(installCtx, venvPython, installArgs, env); runErr != nil {
+		err := fmt.Errorf("install reviewed package %s: %w: %s", packageName, runErr, output)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+		return component, err
+	}
+	if len(pins) > 0 {
+		pinArgs := append([]string{"-m", "pip", "install", "--upgrade"}, pins...)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "repairing reviewed Python dependency pins", Metadata: map[string]any{"args": pinArgs}})
+		if output, runErr := runComponentCommand(installCtx, venvPython, pinArgs, env); runErr != nil {
+			err := fmt.Errorf("install reviewed dependency pins for %s: %w: %s", packageName, runErr, output)
+			_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+			return component, err
+		}
+	}
+	if output, runErr := runComponentCommand(installCtx, venvPython, []string{"-m", "pip", "check"}, env); runErr != nil {
+		err := fmt.Errorf("validate reviewed package dependencies for %s: %w: %s", packageName, runErr, output)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+		return component, err
+	}
+	module := stringFromAny(def.Metadata["import"])
+	validateOut, validateErr := runComponentCommand(installCtx, venvPython, []string{"-c", pythonImportValidationScript(module)}, env)
+	if validateErr != nil {
+		err := fmt.Errorf("validate installed Python module %s: %w: %s", module, validateErr, validateOut)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+		return component, err
+	}
+	distribution := componentDistributionName(def, packageName)
+	versionOut, versionErr := runComponentCommand(installCtx, venvPython, []string{"-c", pythonDistributionVersionScript(distribution)}, env)
+	if versionErr != nil {
+		err := fmt.Errorf("read installed Python package version %s: %w: %s", distribution, versionErr, versionOut)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+		return component, err
+	}
+	if _, err := os.Stat(venvExecutable); err != nil {
+		return component, fmt.Errorf("installed package %s but expected CLI %s is missing", packageName, venvExecutable)
+	}
+	if output, runErr := runComponentCommand(installCtx, venvExecutable, []string{"--help"}, env); runErr != nil {
+		err := fmt.Errorf("validate installed CLI %s: %w: %s", venvExecutable, runErr, output)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+		return component, err
+	}
+	now := time.Now().UTC()
+	component.Status = "installed"
+	component.SourceType = "downloaded"
+	component.SourceURL = nonEmpty(component.SourceURL, def.SourceURL)
+	component.LicenseName = nonEmpty(component.LicenseName, def.LicenseName)
+	component.ProvenanceURL = nonEmpty(component.ProvenanceURL, def.ProvenanceURL)
+	component.InstallPath = dest
+	component.ExecutablePath = venvExecutable
+	component.Version = nonEmpty(strings.TrimSpace(versionOut), "installed")
+	component.Error = ""
+	component.InstalledAt = &now
+	component.LastCheckedAt = &now
+	component.Metadata = mergeMaps(cloneMap(def.Metadata), mergeMaps(component.Metadata, map[string]any{
+		"download_job_id":  jobID,
+		"python":           python,
+		"python_version":   version,
+		"venv":             venvDir,
+		"pip_cache":        pipCache,
+		"install_path":     dest,
+		"executable_path":  venvExecutable,
+		"safe_note":        "Installed under the configured Cartolensia component directory only; originals are never modified.",
+		"runtime_strategy": "sidecar uses this isolated CLI when the package is not importable in the main AI process",
+	}))
+	saved, err := s.deps.Store.UpsertComponent(ctx, component)
+	if err != nil {
+		return component, err
+	}
+	_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "reviewed component installation completed", Metadata: map[string]any{"executable_path": venvExecutable, "version": saved.Version}})
+	return saved, nil
+}
+
+func runComponentCommand(ctx context.Context, name string, args []string, env []string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if len(text) > 8000 {
+		text = text[len(text)-8000:]
+	}
+	return text, err
+}
+
+func componentDistributionName(def componentDefinition, packageName string) string {
+	if value := strings.TrimSpace(stringFromAny(def.Metadata["pip_distribution"])); value != "" {
+		return value
+	}
+	if index := strings.Index(packageName, "["); index > 0 {
+		return packageName[:index]
+	}
+	return packageName
+}
+
+func pythonDistributionVersionScript(distribution string) string {
+	return fmt.Sprintf("from importlib.metadata import version\nprint(version(%q))", distribution)
+}
+
+func pythonImportValidationScript(module string) string {
+	return fmt.Sprintf("import contextlib, importlib, io\nbuf = io.StringIO()\nwith contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):\n    importlib.import_module(%q)\nprint('ok')", module)
+}
+
+func selectComponentPython(def componentDefinition) (string, string, error) {
+	candidates := []string{}
+	for _, envKey := range []string{"CARTOLENSIA_COMPONENT_PYTHON", "CARTOLENSIA_COMPONENT_PYTHON311"} {
+		if value := strings.TrimSpace(os.Getenv(envKey)); value != "" {
+			candidates = append(candidates, value)
+		}
+	}
+	candidates = append(candidates, "python3.11", "python3.10", "python3")
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		path := candidate
+		if !filepath.IsAbs(path) {
+			resolved, err := exec.LookPath(candidate)
+			if err != nil {
+				continue
+			}
+			path = resolved
+		}
+		version, major, minor, err := pythonVersion(path)
+		if err != nil {
+			continue
+		}
+		if stringFromAny(def.Metadata["python_constraint"]) == ">=3.8,<3.12" {
+			if major != 3 || minor < 8 || minor >= 12 {
+				continue
+			}
+		}
+		return path, version, nil
+	}
+	return "", "", fmt.Errorf("no compatible Python interpreter found for %s; install/provide Python matching %s via CARTOLENSIA_COMPONENT_PYTHON311", def.Key, nonEmpty(stringFromAny(def.Metadata["python_constraint"]), "component package requirements"))
+}
+
+func pythonVersion(python string) (string, int, int, error) {
+	out, err := exec.Command(python, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} {sys.version_info.major} {sys.version_info.minor}')").CombinedOutput()
+	if err != nil {
+		return "", 0, 0, err
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 3 {
+		return "", 0, 0, fmt.Errorf("unexpected Python version output from %s: %q", python, strings.TrimSpace(string(out)))
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(fields[1], "%d", &major); err != nil {
+		return "", 0, 0, err
+	}
+	if _, err := fmt.Sscanf(fields[2], "%d", &minor); err != nil {
+		return "", 0, 0, err
+	}
+	return fields[0], major, minor, nil
 }
 
 func safeOperatorPath(input string) (string, error) {
@@ -851,11 +1107,27 @@ func ffmpegFilterAvailable(filter string) (bool, map[string]any) {
 func pythonImportAvailable(module string) (bool, string, map[string]any) {
 	python := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_PYTHON"))
 	if python == "" {
-		var err error
-		python, err = exec.LookPath("python3")
-		if err != nil {
-			python = filepath.Join(".cartolensia", "ai-venv", "bin", "python")
+		for _, candidate := range []string{
+			filepath.Join(".cartolensia", "ai-venv", "bin", "python"),
+			filepath.Join("/var/lib/cartolensia", "ai-venv", "bin", "python"),
+			"python3",
+		} {
+			resolved := candidate
+			if !filepath.IsAbs(candidate) {
+				path, err := exec.LookPath(candidate)
+				if err != nil {
+					continue
+				}
+				resolved = path
+			}
+			if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+				python = resolved
+				break
+			}
 		}
+	}
+	if python == "" {
+		python = "python3"
 	}
 	script := "import importlib; m=importlib.import_module('" + module + "'); print(getattr(m, '__version__', 'installed'))"
 	cmd := exec.Command(python, "-c", script)
@@ -871,6 +1143,94 @@ func pythonImportAvailable(module string) (bool, string, map[string]any) {
 		version = "installed"
 	}
 	return true, version, meta
+}
+
+func isolatedPythonCLIAvailable(def componentDefinition, component catalog.Component) (bool, string, map[string]any) {
+	executable := stringFromAny(def.Metadata["executable"])
+	module := stringFromAny(def.Metadata["import"])
+	key := def.Key
+	candidates := []string{}
+	if value := strings.TrimSpace(os.Getenv("CARTOLENSIA_" + strings.ToUpper(strings.ReplaceAll(key, "-", "_")) + "_BIN")); value != "" {
+		candidates = append(candidates, value)
+	}
+	if key == "music-basic-pitch" {
+		if value := strings.TrimSpace(os.Getenv("CARTOLENSIA_BASIC_PITCH_BIN")); value != "" {
+			candidates = append(candidates, value)
+		}
+	}
+	if component.ExecutablePath != "" {
+		candidates = append(candidates, component.ExecutablePath)
+	}
+	roots := []string{}
+	if component.InstallPath != "" {
+		roots = append(roots, component.InstallPath)
+	}
+	roots = append(roots, filepath.Join(componentRoot(), key))
+	for _, root := range roots {
+		candidates = append(candidates,
+			filepath.Join(root, "venv", "bin", executable),
+			filepath.Join(root, "bin", executable),
+			filepath.Join(root, executable),
+		)
+	}
+	if path, err := exec.LookPath(executable); err == nil {
+		candidates = append(candidates, path)
+	}
+	meta := map[string]any{"module": module, "executable": executable, "isolated_cli": true}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err != nil || info.IsDir() {
+			continue
+		}
+		version := "installed"
+		venvPython := filepath.Join(filepath.Dir(filepath.Dir(candidate)), "bin", "python")
+		if info, err := os.Stat(venvPython); err == nil && !info.IsDir() {
+			env := isolatedPythonCLIEnv("")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			validateOut, validateErr := runComponentCommand(ctx, venvPython, []string{"-c", pythonImportValidationScript(module)}, env)
+			cancel()
+			if validateErr != nil {
+				meta["error"] = fmt.Sprintf("isolated component CLI exists but Python module validation failed: %s", strings.TrimSpace(validateOut))
+				continue
+			}
+			distribution := componentDistributionName(def, stringFromAny(def.Metadata["pip_package"]))
+			ctx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
+			if out, err := runComponentCommand(ctx, venvPython, []string{"-c", pythonDistributionVersionScript(distribution)}, env); err == nil {
+				if text := strings.TrimSpace(out); text != "" {
+					version = text
+				}
+			}
+			cancel()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if output, err := runComponentCommand(ctx, candidate, []string{"--help"}, isolatedPythonCLIEnv("")); err != nil {
+			cancel()
+			meta["error"] = fmt.Sprintf("isolated component CLI exists but failed --help validation: %s", strings.TrimSpace(output))
+			continue
+		}
+		cancel()
+		meta["executable_path"] = candidate
+		meta["install_path"] = filepath.Dir(filepath.Dir(candidate))
+		return true, version, meta
+	}
+	meta["error"] = "isolated component CLI is not installed"
+	return false, "", meta
+}
+
+func isolatedPythonCLIEnv(pipCache string) []string {
+	env := append([]string{}, os.Environ()...)
+	if strings.TrimSpace(pipCache) != "" {
+		env = append(env, "PIP_CACHE_DIR="+pipCache)
+	}
+	return append(env,
+		"PIP_DISABLE_PIP_VERSION_CHECK=1",
+		"PYTHONHOME=",
+		"PYTHONNOUSERSITE=1",
+		"PYTHONPATH=",
+		"TF_CPP_MIN_LOG_LEVEL=2",
+	)
 }
 
 func firstExistingExpected(paths []string) (string, int64, error) {

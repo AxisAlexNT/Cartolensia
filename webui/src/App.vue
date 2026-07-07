@@ -51,6 +51,9 @@ import {
   type KnowledgeFact,
   type KnowledgeLLMStatus,
   type KnowledgeRelation,
+  type MusicMIDITranscription,
+  type MusicStem,
+  type MusicStemSet,
   type MonthBucket,
   type OCRBlock,
   type PlaceCacheEntry,
@@ -348,6 +351,8 @@ const placeDraft = ref<PlaceCacheEntry>({
 });
 const placeDraftAliases = ref("");
 const assetDetail = ref<AssetDetail | null>(null);
+const midiPreviewStatus = ref<Record<string, string>>({});
+let activeMidiPreviewContext: AudioContext | null = null;
 const jobs = ref<Job[]>([]);
 const jobStats = ref<JobStats | null>(null);
 const selectedJob = ref<Job | null>(null);
@@ -4512,6 +4517,177 @@ function downloadTextFile(name: string, text: string) {
   URL.revokeObjectURL(url);
 }
 
+function musicMidiArtifactUrl(midi: MusicMIDITranscription, download = false): string {
+  const assetId = assetDetail.value?.asset.id || midi.asset_id;
+  const query = new URLSearchParams({ type: "midi", id: midi.id });
+  if (download) query.set("download", "1");
+  return `/api/v1/assets/${encodeURIComponent(assetId)}/music-artifact?${query.toString()}`;
+}
+
+function musicStemArtifactUrl(stemSet: MusicStemSet, stem: MusicStem, download = false): string {
+  const assetId = assetDetail.value?.asset.id || stemSet.asset_id;
+  const query = new URLSearchParams({ type: "stem", set_id: stemSet.id, stem: stem.name || "" });
+  if (download) query.set("download", "1");
+  return `/api/v1/assets/${encodeURIComponent(assetId)}/music-artifact?${query.toString()}`;
+}
+
+type MIDIPreviewNote = { note: number; start: number; duration: number; velocity: number };
+
+async function playMIDIPreview(midi: MusicMIDITranscription) {
+  stopMIDIPreview();
+  midiPreviewStatus.value = { ...midiPreviewStatus.value, [midi.id]: "Loading MIDI preview..." };
+  try {
+    const response = await fetch(musicMidiArtifactUrl(midi), { credentials: "same-origin" });
+    if (!response.ok) throw new Error(`MIDI artifact request failed: HTTP ${response.status}`);
+    const notes = parseMIDIPreviewNotes(await response.arrayBuffer()).slice(0, 500);
+    if (!notes.length) throw new Error("No playable MIDI note events found.");
+    const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) throw new Error("This browser does not expose Web Audio playback.");
+    const context = new AudioContextClass();
+    activeMidiPreviewContext = context;
+    const startAt = context.currentTime + 0.08;
+    const maxSeconds = 60;
+    for (const note of notes) {
+      if (note.start > maxSeconds) continue;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "triangle";
+      oscillator.frequency.value = 440 * Math.pow(2, (note.note - 69) / 12);
+      const noteStart = startAt + Math.max(0, note.start);
+      const noteEnd = Math.min(startAt + maxSeconds, noteStart + Math.max(0.04, Math.min(note.duration, 8)));
+      gain.gain.setValueAtTime(0.0001, noteStart);
+      gain.gain.exponentialRampToValueAtTime(Math.max(0.01, Math.min(0.08, note.velocity * 0.08)), noteStart + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteEnd);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(noteStart);
+      oscillator.stop(noteEnd + 0.02);
+    }
+    midiPreviewStatus.value = { ...midiPreviewStatus.value, [midi.id]: `Playing ${Math.min(notes.length, 500)} synthesized MIDI notes.` };
+  } catch (error) {
+    midiPreviewStatus.value = { ...midiPreviewStatus.value, [midi.id]: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function stopMIDIPreview() {
+  if (activeMidiPreviewContext) {
+    void activeMidiPreviewContext.close();
+    activeMidiPreviewContext = null;
+  }
+}
+
+function parseMIDIPreviewNotes(buffer: ArrayBuffer): MIDIPreviewNote[] {
+  const data = new Uint8Array(buffer);
+  let pos = 0;
+  const readText = (length: number) => {
+    const text = String.fromCharCode(...data.slice(pos, pos + length));
+    pos += length;
+    return text;
+  };
+  const readU16 = () => {
+    const value = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    return value;
+  };
+  const readU32 = () => {
+    const value = ((data[pos] << 24) >>> 0) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3];
+    pos += 4;
+    return value >>> 0;
+  };
+  const readVLQ = (end: number) => {
+    let value = 0;
+    for (let i = 0; i < 4 && pos < end; i += 1) {
+      const byte = data[pos++];
+      value = (value << 7) | (byte & 0x7f);
+      if ((byte & 0x80) === 0) break;
+    }
+    return value;
+  };
+  if (readText(4) !== "MThd") return [];
+  const headerLength = readU32();
+  if (headerLength < 6 || pos + headerLength > data.length) return [];
+  pos += 2; // format
+  const trackCount = readU16();
+  const division = readU16();
+  pos += headerLength - 6;
+  const ticksPerQuarter = division > 0 && division < 0x8000 ? division : 480;
+  const notes: MIDIPreviewNote[] = [];
+  const tempoEvents: { tick: number; microsPerQuarter: number }[] = [{ tick: 0, microsPerQuarter: 500000 }];
+  const noteEvents: { tick: number; type: "on" | "off"; note: number; velocity: number; channel: number }[] = [];
+  for (let track = 0; track < trackCount && pos + 8 <= data.length; track += 1) {
+    if (readText(4) !== "MTrk") break;
+    const length = readU32();
+    const end = Math.min(data.length, pos + length);
+    let tick = 0;
+    let runningStatus = 0;
+    let eventsSeen = 0;
+    while (pos < end && eventsSeen < 100000) {
+      eventsSeen += 1;
+      tick += readVLQ(end);
+      let status = data[pos++];
+      if (status < 0x80) {
+        pos -= 1;
+        status = runningStatus;
+      } else {
+        runningStatus = status;
+      }
+      if (status === 0xff) {
+        const type = data[pos++];
+        const size = readVLQ(end);
+        if (type === 0x51 && size === 3 && pos + 3 <= end) {
+          tempoEvents.push({ tick, microsPerQuarter: (data[pos] << 16) | (data[pos + 1] << 8) | data[pos + 2] });
+        }
+        pos = Math.min(end, pos + size);
+        continue;
+      }
+      if (status === 0xf0 || status === 0xf7) {
+        pos = Math.min(end, pos + readVLQ(end));
+        continue;
+      }
+      const eventType = status & 0xf0;
+      const channel = status & 0x0f;
+      const first = data[pos++] ?? 0;
+      const secondNeeded = eventType !== 0xc0 && eventType !== 0xd0;
+      const second = secondNeeded ? data[pos++] ?? 0 : 0;
+      if (eventType === 0x90 && second > 0) noteEvents.push({ tick, type: "on", note: first, velocity: second / 127, channel });
+      if (eventType === 0x80 || (eventType === 0x90 && second === 0)) noteEvents.push({ tick, type: "off", note: first, velocity: 0, channel });
+    }
+    pos = end;
+  }
+  tempoEvents.sort((a, b) => a.tick - b.tick);
+  const tickToSeconds = (tick: number) => {
+    let seconds = 0;
+    let lastTick = 0;
+    let micros = 500000;
+    for (const tempo of tempoEvents) {
+      if (tempo.tick > tick) break;
+      seconds += ((tempo.tick - lastTick) * micros) / ticksPerQuarter / 1_000_000;
+      lastTick = tempo.tick;
+      micros = tempo.microsPerQuarter;
+    }
+    return seconds + ((tick - lastTick) * micros) / ticksPerQuarter / 1_000_000;
+  };
+  noteEvents.sort((a, b) => a.tick - b.tick);
+  const active = new Map<string, { tick: number; velocity: number }>();
+  for (const event of noteEvents) {
+    const key = `${event.channel}:${event.note}`;
+    if (event.type === "on") {
+      active.set(key, { tick: event.tick, velocity: event.velocity });
+      continue;
+    }
+    const started = active.get(key);
+    if (!started) continue;
+    active.delete(key);
+    if (event.tick <= started.tick) continue;
+    notes.push({
+      note: event.note,
+      start: tickToSeconds(started.tick),
+      duration: Math.max(0.04, tickToSeconds(event.tick) - tickToSeconds(started.tick)),
+      velocity: started.velocity
+    });
+  }
+  return notes.sort((a, b) => a.start - b.start);
+}
+
 function assetReverseCoordinate(): { lat: number; lon: number } | null {
   const detail = assetDetail.value;
   if (!detail) return null;
@@ -5199,6 +5375,18 @@ function componentSourceLabel(component: ComponentRecord): string {
   return [component.source_type, component.version].filter(Boolean).join(" · ") || "not checked";
 }
 
+function componentInstallLabel(component: ComponentRecord): string {
+  if (component.key === "music-basic-pitch") return "Install Basic Pitch";
+  if (component.key === "music-demucs") return "Install Demucs";
+  if (String(component.metadata_json?.installer ?? "") === "isolated_python_cli") return "Install package";
+  return "Download/Install";
+}
+
+function componentInstalled(key: string): boolean {
+  const component = componentByKey(key);
+  return component ? ["installed", "user_provided"].includes(component.status) : false;
+}
+
 const readinessGroups = computed(() => {
   const grouped = new Map<string, ReadinessPayload["checks"]>();
   for (const check of readiness.value?.checks ?? []) {
@@ -5240,7 +5428,7 @@ async function runComponentCheck(key: string) {
 
 async function requestComponentDownload(key: string) {
   componentBusyKey.value = key;
-  componentMessage.value = `Creating reviewed-download job for ${key}...`;
+  componentMessage.value = `Installing reviewed component ${key}...`;
   try {
     const result = await api.downloadComponent(key);
     componentMessage.value = `${key}: ${result.status}${result.error ? ` · ${result.error}` : ""}`;
@@ -6702,6 +6890,7 @@ onBeforeUnmount(() => {
   destroyVideoTrackMap();
   destroyGalleryTrackMap();
   destroyPlaceMaps();
+  stopMIDIPreview();
   selectedTrackMap?.setTarget(undefined);
   geoAlignMap?.setTarget(undefined);
   olMap?.setTarget(undefined);
@@ -7644,9 +7833,17 @@ onBeforeUnmount(() => {
                 <i class="bi bi-music-note-beamed" aria-hidden="true"></i>
                 Transcribe music to MIDI
               </button>
+              <button v-if="!componentInstalled('music-basic-pitch')" type="button" class="btn btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload('music-basic-pitch')">
+                <i class="bi bi-cloud-download" aria-hidden="true"></i>
+                Install MIDI provider
+              </button>
               <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-stems', 'video_music_stems')">
                 <i class="bi bi-vinyl" aria-hidden="true"></i>
                 Separate vocals/instruments
+              </button>
+              <button v-if="!componentInstalled('music-demucs')" type="button" class="btn btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload('music-demucs')">
+                <i class="bi bi-cloud-download" aria-hidden="true"></i>
+                Install stems provider
               </button>
             </div>
             <div v-else-if="assetDetail.asset.media_kind === 'audio'" class="ai-action-grid">
@@ -7662,9 +7859,17 @@ onBeforeUnmount(() => {
                 <i class="bi bi-music-note-beamed" aria-hidden="true"></i>
                 Transcribe music to MIDI
               </button>
+              <button v-if="!componentInstalled('music-basic-pitch')" type="button" class="btn btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload('music-basic-pitch')">
+                <i class="bi bi-cloud-download" aria-hidden="true"></i>
+                Install MIDI provider
+              </button>
               <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-stems', 'audio_music_stems')">
                 <i class="bi bi-vinyl" aria-hidden="true"></i>
                 Separate vocals/instruments
+              </button>
+              <button v-if="!componentInstalled('music-demucs')" type="button" class="btn btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload('music-demucs')">
+                <i class="bi bi-cloud-download" aria-hidden="true"></i>
+                Install stems provider
               </button>
               <button type="button" class="btn btn-outline-secondary" @click="setActive('Jobs')">
                 <i class="bi bi-list-task" aria-hidden="true"></i>
@@ -7829,6 +8034,21 @@ onBeforeUnmount(() => {
                   <div v-if="midi.instruments?.length" class="chip-row compact-chip-row">
                     <span v-for="instrument in midi.instruments" :key="instrument" class="chip">{{ instrument }}</span>
                   </div>
+                  <div class="asset-artifact-actions">
+                    <button type="button" class="btn btn-sm btn-outline-primary" @click="playMIDIPreview(midi)">
+                      <i class="bi bi-play-circle" aria-hidden="true"></i>
+                      Preview MIDI
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="stopMIDIPreview">
+                      <i class="bi bi-stop-circle" aria-hidden="true"></i>
+                      Stop
+                    </button>
+                    <a class="btn btn-sm btn-outline-secondary" :href="musicMidiArtifactUrl(midi, true)" download>
+                      <i class="bi bi-download" aria-hidden="true"></i>
+                      Download MIDI
+                    </a>
+                  </div>
+                  <small v-if="midiPreviewStatus[midi.id]" class="muted">{{ midiPreviewStatus[midi.id] }}</small>
                   <code v-if="midi.midi_cache_path">{{ midi.midi_cache_path }}</code>
                 </div>
               </article>
@@ -7842,7 +8062,12 @@ onBeforeUnmount(() => {
                   <div v-if="stemSet.stems?.length" class="place-record-grid">
                     <article v-for="stem in stemSet.stems" :key="stem.cache_path || stem.name" class="place-record-card">
                       <strong>{{ stem.name || 'stem' }}</strong>
-                      <small>{{ formatBytes(Number(stem.size_bytes || 0)) }}</small>
+                      <small>{{ formatBytes(Number(stem.size_bytes || 0)) }} · {{ stem.mime || stem.mime_type || 'audio' }}</small>
+                      <audio v-if="stem.name" class="asset-stem-player" :src="musicStemArtifactUrl(stemSet, stem)" controls preload="metadata"></audio>
+                      <a v-if="stem.name" class="btn btn-sm btn-outline-secondary" :href="musicStemArtifactUrl(stemSet, stem, true)" download>
+                        <i class="bi bi-download" aria-hidden="true"></i>
+                        Download stem
+                      </a>
                       <code v-if="stem.cache_path">{{ stem.cache_path }}</code>
                     </article>
                   </div>
@@ -11242,7 +11467,7 @@ onBeforeUnmount(() => {
                     </button>
                     <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload(component.key)">
                       <i class="bi bi-cloud-download" aria-hidden="true"></i>
-                      Download/Install
+                      {{ componentInstallLabel(component) }}
                     </button>
                     <button
                       type="button"

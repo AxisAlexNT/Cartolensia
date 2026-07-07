@@ -45,9 +45,13 @@ PYTORCH_CPU_INDEX_URL="${CARTOLENSIA_PYTORCH_CPU_INDEX_URL:-https://download.pyt
 PYTORCH_CUDA_INDEX_URL="${CARTOLENSIA_PYTORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 PYTORCH_INTEL_INDEX_URL="${CARTOLENSIA_PYTORCH_INTEL_INDEX_URL:-${PYTORCH_CPU_INDEX_URL}}"
 PYTORCH_ROCM_INDEX_URL="${CARTOLENSIA_PYTORCH_ROCM_INDEX_URL:-}"
+PYTORCH_VERSION="${CARTOLENSIA_PYTORCH_VERSION:-2.7.1}"
+TORCHVISION_VERSION="${CARTOLENSIA_TORCHVISION_VERSION:-0.22.1}"
+TORCHAUDIO_VERSION="${CARTOLENSIA_TORCHAUDIO_VERSION:-2.7.1}"
 PYTHON_BIN="${CARTOLENSIA_LOCAL_FULL_PYTHON:-python3}"
 AI_FLAVORS="${CARTOLENSIA_LOCAL_FULL_AI_FLAVORS:-cpu-avx2 cpu-avx512 nvidia-cu128 intel-arc rocm-radeon}"
 MODELS_DIR="${CARTOLENSIA_MODELS_DIR:-${ROOT_DIR}/.cartolensia/models}"
+COMPONENTS_DIR="${CARTOLENSIA_COMPONENTS_DIR:-${ROOT_DIR}/.cartolensia/components}"
 OLLAMA_BIN="${CARTOLENSIA_LOCAL_FULL_OLLAMA_BIN:-$(command -v ollama || true)}"
 OLLAMA_MODELS_DIR="${CARTOLENSIA_LOCAL_FULL_OLLAMA_MODELS_DIR:-${MODELS_DIR}/ollama}"
 OLLAMA_MODEL_NAME="${CARTOLENSIA_LOCAL_FULL_OLLAMA_MODEL:-qwen3:8b}"
@@ -379,7 +383,7 @@ write_ai_constraints() {
   local constraints="${STAGE}/ai-envs/${flavor}/constraints.txt"
   "${env_dir}/bin/python" - <<'PY' >"${constraints}"
 from importlib import metadata
-for package in ("torch", "torchvision"):
+for package in ("torch", "torchvision", "torchaudio"):
     try:
         print(f"{package}=={metadata.version(package)}")
     except metadata.PackageNotFoundError:
@@ -403,13 +407,13 @@ build_ai_env() {
   "${env_dir}/bin/python" -m pip install --upgrade pip setuptools wheel --index-url "${PYPI_INDEX_URL}"
   local torch_index
   torch_index="$(torch_index_for_flavor "${flavor}")"
-  "${env_dir}/bin/python" -m pip install torch torchvision --index-url "${torch_index}"
+  "${env_dir}/bin/python" -m pip install "torch==${PYTORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" --index-url "${torch_index}"
   local constraints
   constraints="$(write_ai_constraints "${flavor}" "${env_dir}")"
   "${env_dir}/bin/python" -m pip install -r "${STAGE}/ai-envs/${flavor}/requirements-full.txt" --constraint "${constraints}" --index-url "${PYPI_INDEX_URL}" --extra-index-url "${torch_index}"
   "${env_dir}/bin/python" - <<'PY'
 import importlib
-for name in ("torch", "torchvision", "fastapi", "uvicorn", "PIL", "cv2", "transformers", "open_clip", "faster_whisper", "librosa", "fitz"):
+for name in ("torch", "torchvision", "torchaudio", "fastapi", "uvicorn", "PIL", "cv2", "transformers", "open_clip", "faster_whisper", "librosa", "fitz"):
     importlib.import_module(name)
 print("ai environment import smoke passed")
 PY
@@ -506,7 +510,7 @@ bundle_ai_envs() {
 }
 
 bundle_models() {
-  [ "${INCLUDE_MODELS}" = "1" ] || return 0
+	[ "${INCLUDE_MODELS}" = "1" ] || return 0
   if [ "${PREPARE_MODELS}" = "1" ]; then
     prepare_model_cache
   fi
@@ -519,12 +523,82 @@ bundle_models() {
     return 0
   fi
   note "copying reviewed AI model cache from ${MODELS_DIR}"
-  copy_tree "${MODELS_DIR}" "${STAGE}/models"
-  append_component "ai-model-cache" "Reviewed AI model cache" "model" "varies by model; see docs/AI_MODEL_APPROVALS.md" "docs/AI_MODEL_APPROVALS.md" "models"
+	copy_tree "${MODELS_DIR}" "${STAGE}/models"
+	append_component "ai-model-cache" "Reviewed AI model cache" "model" "varies by model; see docs/AI_MODEL_APPROVALS.md" "docs/AI_MODEL_APPROVALS.md" "models"
+}
+
+bundle_component_manager_payloads() {
+	if [ ! -d "${COMPONENTS_DIR}" ]; then
+		warn "component cache not found: ${COMPONENTS_DIR}; skipping component-manager payloads"
+		append_component "component-manager-cache" "Reviewed Component Manager payloads" "component-cache" "not bundled" "docs/OFFLINE_COMPONENTS.md" "missing"
+		return 0
+	fi
+	if [ -z "$(find "${COMPONENTS_DIR}" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
+		warn "component cache is empty: ${COMPONENTS_DIR}; skipping component-manager payloads"
+		append_component "component-manager-cache" "Reviewed Component Manager payloads" "component-cache" "empty" "docs/OFFLINE_COMPONENTS.md" "missing"
+		return 0
+	fi
+	note "copying reviewed Component Manager payloads from ${COMPONENTS_DIR}"
+	copy_tree "${COMPONENTS_DIR}" "${STAGE}/components"
+	repair_bundled_component_venvs
+	append_component "component-manager-cache" "Reviewed Component Manager payloads" "component-cache" "component-specific; see docs/OFFLINE_COMPONENTS.md" "docs/OFFLINE_COMPONENTS.md" "components"
+}
+
+repair_bundled_component_venvs() {
+	local components_root="${STAGE}/components"
+	local python_root="${components_root}/python-3.11.9"
+	if [ ! -x "${python_root}/bin/python3.11" ]; then
+		warn "bundled Component Manager payloads do not include python-3.11.9; isolated music component wrappers may require target-side repair"
+		return 0
+	fi
+	local venv
+	for venv in "${components_root}"/*/venv; do
+		[ -d "${venv}/bin" ] || continue
+		rm -f "${venv}/bin/python" "${venv}/bin/python3" "${venv}/bin/python3.11"
+		ln -s "../../../python-3.11.9/bin/python3.11" "${venv}/bin/python3.11"
+		ln -s "python3.11" "${venv}/bin/python3"
+		ln -s "python3.11" "${venv}/bin/python"
+		if [ -f "${venv}/pyvenv.cfg" ]; then
+			sed -i \
+				-e 's#^home = .*#home = ../../../python-3.11.9/bin#' \
+				-e 's#^executable = .*#executable = ../../../python-3.11.9/bin/python3.11#' \
+				-e 's#^command = .*#command = ../../../python-3.11.9/bin/python3.11 -m venv ./venv#' \
+				"${venv}/pyvenv.cfg"
+		fi
+	done
+	write_python_component_wrapper "music-demucs" "demucs" "demucs.separate"
+	write_python_component_wrapper "music-basic-pitch" "basic-pitch" "basic_pitch.predict"
+}
+
+write_python_component_wrapper() {
+	local component="$1"
+	local executable="$2"
+	local module="$3"
+	local component_dir="${STAGE}/components/${component}"
+	local wrapper="${component_dir}/venv/bin/${executable}"
+	[ -d "${component_dir}/venv/bin" ] || return 0
+	cat >"${wrapper}" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+bin_dir="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+component_dir="\$(cd "\${bin_dir}/../.." && pwd)"
+components_root="\$(cd "\${component_dir}/.." && pwd)"
+python="\${components_root}/python-3.11.9/bin/python3.11"
+if [ ! -x "\${python}" ]; then
+  printf 'Cartolensia bundled Python runtime is missing: %s\n' "\${python}" >&2
+  exit 127
+fi
+site_packages="\${component_dir}/venv/lib/python3.11/site-packages"
+site_packages64="\${component_dir}/venv/lib64/python3.11/site-packages"
+export PYTHONPATH="\${site_packages}:\${site_packages64}:\${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="\${component_dir}/venv/lib:\${component_dir}/venv/lib64:\${components_root}/python-3.11.9/lib:\${LD_LIBRARY_PATH:-}"
+exec "\${python}" -m ${module} "\$@"
+SH
+	chmod +x "${wrapper}"
 }
 
 prepare_model_cache() {
-  if [ "${SKIP_PIP_INSTALL}" = "1" ]; then
+	if [ "${SKIP_PIP_INSTALL}" = "1" ]; then
     warn "skipping model preparation because CARTOLENSIA_LOCAL_FULL_SKIP_PIP_INSTALL=1"
     return 0
   fi
@@ -1010,7 +1084,7 @@ create_archive() {
     7z)
       require_command 7z
       note "creating ${ARCHIVE}"
-      (cd "${WORK_DIR}" && 7z a -t7z -m0=lzma2 -mx=7 "${ARCHIVE}" "${PACKAGE_NAME}" >/dev/null)
+      (cd "${WORK_DIR}" && 7z a -t7z -m0=lzma2 -mx=7 -snl "${ARCHIVE}" "${PACKAGE_NAME}" >/dev/null)
       ;;
   esac
   sha256sum "${ARCHIVE}" >"${CHECKSUM}"
@@ -1026,11 +1100,12 @@ main() {
   stage_project_files
   bundle_ffmpeg
   bundle_tesseract
-  bundle_postgres
-  bundle_ai_envs
-  bundle_models
-  bundle_offline_maps
-  bundle_ollama
+	bundle_postgres
+	bundle_ai_envs
+	bundle_models
+	bundle_component_manager_payloads
+	bundle_offline_maps
+	bundle_ollama
   write_runtime_scripts
   write_manifests
   create_archive

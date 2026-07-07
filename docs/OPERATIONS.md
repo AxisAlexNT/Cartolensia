@@ -830,7 +830,7 @@ Manual offset controls remain important when a device encodes local filenames, E
 
 ## Remote Production HTTPS And AI Backfill
 
-For the current rjazhenka-style production deployment:
+For the current production-host-style production deployment:
 
 - Browser URL: `https://<host-or-ip>:18443/`.
 - Plain HTTP on `:18080` is a redirect-only convenience for browser users.

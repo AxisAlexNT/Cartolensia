@@ -3812,11 +3812,15 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "public": *payload.Public})
 		return
 	}
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
 	if len(parts) == 2 {
+		if parts[1] == "music-artifact" {
+			s.handleMusicArtifact(w, r, asset)
+			return
+		}
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
 		switch parts[1] {
 		case "albums":
 			albums, err := s.deps.Store.ListAssetAlbums(r.Context(), asset.ID)
@@ -3881,6 +3885,8 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"asset_id": asset.ID, "midi": midi, "stems": stems})
+		case "music-artifact":
+			s.handleMusicArtifact(w, r, asset)
 		case "stems":
 			stems, err := s.deps.Store.ListMusicStemSets(r.Context(), asset.ID, parsePositiveInt(r.URL.Query().Get("limit"), 20, 100))
 			if err != nil {
@@ -3918,7 +3924,182 @@ func (s *Server) handleAssetByID(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
 	writeJSON(w, http.StatusOK, s.assetDetail(r.Context(), asset))
+}
+
+func (s *Server) handleMusicArtifact(w http.ResponseWriter, r *http.Request, asset catalog.Asset) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type"))) {
+	case "midi":
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("midi id is required"))
+			return
+		}
+		records, err := s.deps.Store.ListMusicMIDITranscriptions(r.Context(), asset.ID, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, record := range records {
+			if record.ID != id {
+				continue
+			}
+			cachePath := firstNonEmpty(record.MIDICachePath, stringFromAny(record.Metadata["midi_cache_path"]), stringFromAny(record.Metadata["cache_path"]))
+			filename := safeDownloadName(asset.DisplayName, "midi", record.Model, ".mid")
+			s.serveCacheArtifact(w, r, cachePath, "audio/midi", filename)
+			return
+		}
+		writeError(w, http.StatusNotFound, fmt.Errorf("midi artifact not found for asset"))
+	case "stem":
+		setID := strings.TrimSpace(r.URL.Query().Get("set_id"))
+		stemName := strings.TrimSpace(r.URL.Query().Get("stem"))
+		if setID == "" || stemName == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("set_id and stem are required"))
+			return
+		}
+		sets, err := s.deps.Store.ListMusicStemSets(r.Context(), asset.ID, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, set := range sets {
+			if set.ID != setID {
+				continue
+			}
+			for _, stem := range set.Stems {
+				if !strings.EqualFold(stem.Name, stemName) {
+					continue
+				}
+				ext := strings.ToLower(filepath.Ext(stem.CachePath))
+				if ext == "" {
+					ext = ".wav"
+				}
+				filename := safeDownloadName(asset.DisplayName, stem.Name, set.Model, ext)
+				s.serveCacheArtifact(w, r, stem.CachePath, firstNonEmpty(stem.MIME, "audio/wav"), filename)
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, fmt.Errorf("stem artifact not found for asset"))
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported music artifact type"))
+	}
+}
+
+func (s *Server) serveCacheArtifact(w http.ResponseWriter, r *http.Request, rawPath, contentType, filename string) {
+	target, err := s.safeCacheArtifactPath(rawPath)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("cached artifact is missing"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(contentType) != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	disposition := "inline"
+	if r.URL.Query().Get("download") == "1" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename=%q`, disposition, filename))
+	w.Header().Set("X-Cartolensia-Artifact-Root", "cache")
+	http.ServeContent(w, r, filename, stat.ModTime(), file)
+}
+
+func (s *Server) safeCacheArtifactPath(rawPath string) (string, error) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return "", fmt.Errorf("cached artifact path is empty")
+	}
+	target := rawPath
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(s.deps.Config.Cache.Dir, target)
+	}
+	target, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	target = filepath.Clean(target)
+
+	for _, root := range s.safeArtifactRoots() {
+		rel, err := filepath.Rel(root, target)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return target, nil
+		}
+	}
+	return "", fmt.Errorf("cached artifact path is outside configured Cartolensia cache roots")
+}
+
+func (s *Server) safeArtifactRoots() []string {
+	candidates := []string{}
+	if strings.TrimSpace(s.deps.Config.Cache.Dir) != "" {
+		cacheDir := strings.TrimSpace(s.deps.Config.Cache.Dir)
+		candidates = append(candidates, cacheDir, filepath.Join(filepath.Dir(cacheDir), "realpeek-cache"))
+	}
+	if envRoot := strings.TrimSpace(os.Getenv("CARTOLENSIA_AI_CACHE_DIR")); envRoot != "" {
+		candidates = append(candidates, envRoot)
+	}
+	candidates = append(candidates, filepath.Join(".cartolensia", "realpeek-cache"))
+
+	seen := map[string]struct{}{}
+	roots := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		root, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		root = filepath.Clean(root)
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+func safeDownloadName(parts ...string) string {
+	joined := strings.Join(parts, "-")
+	joined = strings.ReplaceAll(joined, string(filepath.Separator), "_")
+	var cleaned strings.Builder
+	for _, ch := range joined {
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '-' || ch == '_' {
+			cleaned.WriteRune(ch)
+		} else if ch == ' ' {
+			cleaned.WriteRune('_')
+		}
+	}
+	out := strings.Trim(cleaned.String(), "._-")
+	if out == "" {
+		return "cartolensia-artifact"
+	}
+	if len(out) > 180 {
+		out = out[:180]
+	}
+	return out
 }
 
 func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
@@ -4654,7 +4835,7 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 
 		updateAuditProgress := func(result aiJobResult) {
 			auditJob.ProgressTotal = int64Ptr(result.Targets)
-			auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
+			auditJob.ProgressCurrent = int64(aiJobAttempted(result))
 			auditJob.Counters.Scanned = int64(result.Targets)
 			auditJob.Counters.Updated = int64(result.Stored)
 			auditJob.Counters.Errors = int64(len(result.Errors))
@@ -4667,10 +4848,11 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 		result, err := s.runAIJob(jobCtx, r, kind, req, updateAuditProgress)
 		if err != nil {
 			auditJob.ProgressTotal = int64Ptr(result.Targets)
-			auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
+			auditJob.ProgressCurrent = int64(aiJobAttempted(result))
 			auditJob.Counters.Scanned = int64(result.Targets)
 			auditJob.Counters.Updated = int64(result.Stored)
 			auditJob.Counters.Errors = int64(len(result.Errors) + 1)
+			addAIJobErrorLogs(&auditJob, result.Errors)
 			jobs.AddLog(&auditJob, "error", err.Error())
 			_ = jobs.Fail(&auditJob, err)
 			_ = s.deps.Store.UpdateJob(jobCtx, auditJob)
@@ -4684,14 +4866,16 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 			"result": result,
 		}
 		auditJob.ProgressTotal = int64Ptr(result.Targets)
-		auditJob.ProgressCurrent = int64(result.Processed + result.Skipped)
+		auditJob.ProgressCurrent = int64(aiJobAttempted(result))
 		auditJob.Counters.Scanned = int64(result.Targets)
 		auditJob.Counters.Updated = int64(result.Stored)
 		auditJob.Counters.Errors = int64(len(result.Errors))
 		if result.Unsafe > 0 {
 			auditJob.Counters.Created = int64(result.Unsafe)
 		}
-		jobs.AddLog(&auditJob, "info", fmt.Sprintf("AI action %s finished: processed %d/%d, stored %d", kind, result.Processed, result.Targets, result.Stored))
+		addAIJobErrorLogs(&auditJob, result.Errors)
+		failed := len(result.Errors)
+		jobs.AddLog(&auditJob, "info", fmt.Sprintf("AI action %s finished: attempted %d/%d, processed %d, skipped %d, failed %d, stored %d", kind, aiJobAttempted(result), result.Targets, result.Processed, result.Skipped, failed, result.Stored))
 		if result.Status == "failed" || result.Status == "not_configured" {
 			cause := fmt.Errorf("AI action %s ended with status %s", kind, result.Status)
 			if len(result.Errors) > 0 {
@@ -4703,6 +4887,25 @@ func (s *Server) handleAIJobRequestWithDefault(kind string, applyDefaults func(*
 		}
 		_ = s.deps.Store.UpdateJob(jobCtx, auditJob)
 		writeJSON(w, http.StatusAccepted, result)
+	}
+}
+
+func aiJobAttempted(result aiJobResult) int {
+	attempted := result.Processed + result.Skipped + len(result.Errors)
+	if result.Targets > 0 && attempted > result.Targets {
+		return result.Targets
+	}
+	return attempted
+}
+
+func addAIJobErrorLogs(job *jobs.Job, errors []string) {
+	const maxLoggedErrors = 20
+	for i, errText := range errors {
+		if i >= maxLoggedErrors {
+			jobs.AddLog(job, "warn", fmt.Sprintf("%d additional AI error(s) omitted from the compact job log; inspect the job payload for the full list", len(errors)-maxLoggedErrors))
+			return
+		}
+		jobs.AddLog(job, "error", errText)
 	}
 }
 
@@ -4898,12 +5101,15 @@ func (s *Server) runSingleAIAsset(ctx context.Context, endpoint, apiPath, kind s
 		return
 	}
 	if response.Status != "ok" {
-		reason := strings.TrimSpace(response.Reason)
-		if reason == "" {
-			reason = "AI sidecar returned status " + response.Status
-		}
+		reason := aiResponseFailureReason(kind, response)
 		update(func() {
 			result.Errors = append(result.Errors, asset.ID+": "+reason)
+			result.Results = append(result.Results, map[string]any{
+				"asset_id": asset.ID,
+				"status":   response.Status,
+				"reason":   reason,
+				"metadata": summarizeAIMetadata(response.Metadata),
+			})
 		})
 		_ = s.markAIAssetTaskStatus(ctx, asset.ID, workerID, kind, "failed", 0, reason, summarizeAIMetadata(response.Metadata))
 		return
@@ -5107,6 +5313,55 @@ func aiSidecarPath(kind string) string {
 		return "/music-to-midi"
 	case "music_stems":
 		return "/separate-music"
+	default:
+		return ""
+	}
+}
+
+func aiResponseFailureReason(kind string, response aiInferencePayload) string {
+	reason := strings.TrimSpace(response.Reason)
+	if reason == "" {
+		reason = "AI sidecar returned status " + response.Status
+	}
+	if response.Status == "model_missing" {
+		if component := aiMissingComponentHint(kind, response); component != "" {
+			return fmt.Sprintf("required component missing (%s): %s", component, reason)
+		}
+		return "required AI model/component missing: " + reason
+	}
+	if response.Status == "not_configured" {
+		return "AI worker is not configured: " + reason
+	}
+	return reason
+}
+
+func aiMissingComponentHint(kind string, response aiInferencePayload) string {
+	provider := strings.ToLower(strings.TrimSpace(stringFromAny(response.Metadata["provider"])))
+	switch kind {
+	case "music_midi":
+		if provider == "" || strings.Contains(provider, "basic") {
+			return "music-basic-pitch"
+		}
+		return "music-" + provider
+	case "music_stems":
+		if provider == "" || strings.Contains(provider, "demucs") {
+			return "music-demucs"
+		}
+		return "music-" + provider
+	case "transcribe_audio":
+		return "asr-faster-whisper"
+	case "ocr_image":
+		return "tesseract"
+	case "describe_image":
+		return "blip-base"
+	case "embed_image":
+		return "openclip-vit-b32"
+	case "detect_faces":
+		return "opencv-yunet"
+	case "classify_image":
+		return "efficientnet-b0"
+	case "safety_nsfw":
+		return "falconsai-nsfw"
 	default:
 		return ""
 	}
@@ -5528,7 +5783,7 @@ func (s *Server) persistAIResponse(ctx context.Context, workerID, kind, assetID 
 			Provider:        provider,
 			Model:           model,
 			Status:          firstNonEmpty(stringFromAny(response.Metadata["status"]), "succeeded"),
-			MIDICachePath:   stringFromAny(response.Metadata["midi_cache_path"]),
+			MIDICachePath:   firstNonEmpty(stringFromAny(response.Metadata["midi_cache_path"]), stringFromAny(response.Metadata["cache_path"])),
 			DurationSeconds: floatPtrFromOptionalAny(response.Metadata["duration_seconds"]),
 			NoteCount:       noteCount,
 			InstrumentCount: instrumentCount,

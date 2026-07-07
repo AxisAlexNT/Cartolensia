@@ -115,7 +115,7 @@ Commands run:
 - `gofmt -w internal/server/server.go internal/server/server_test.go`
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
 - `npm --prefix webui run build` passed.
-- Built and deployed the refreshed backend/WebUI to rjazhenka as
+- Built and deployed the refreshed backend/WebUI to production host as
   `/opt/cartolensia/releases/local-20260629T200001Z-places-ui`.
 - Verified the remote HTTPS-served WebUI bundle contains `bi-hammer`,
   `place-title-link`, `coordinate-badge`, and `Place Details`.
@@ -3507,7 +3507,7 @@ Validation:
 
 Remote deployment:
 
-- Built and deployed a new rjazhenka release: `/opt/cartolensia/releases/local-20260628T-ai-backfill`.
+- Built and deployed a new production host release: `/opt/cartolensia/releases/local-20260628T-ai-backfill`.
 - Restarted `cartolensia`; PostgreSQL and AI sidecar remained active.
 - Migration applied on startup through embedded migrations.
 - Increased production worker concurrency from `2` to `6` so discovery, metadata, hash, and multiple AI lanes can progress together.
@@ -3651,7 +3651,7 @@ Implemented:
   - records tool calls and conversation messages;
   - does not call remote LLM APIs.
 
-Remote deployment and validation on rjazhenka:
+Remote deployment and validation on production host:
 
 - Deployed updated backend binary to `/opt/cartolensia/current/bin/cartolensia`.
 - Deployed updated WebUI to `/opt/cartolensia/current/webui/dist`.
@@ -3735,7 +3735,7 @@ Implemented:
 
 Remote production deployment:
 
-- Deployed rebuilt backend, WebUI assets, and migration `018_readonly_search_views.sql` to rjazhenka.
+- Deployed rebuilt backend, WebUI assets, and migration `018_readonly_search_views.sql` to production host.
 - App restarted successfully on HTTPS `:18443`; PostgreSQL and AI sidecar remained running.
 - Migration validation: 10 `cartolensia_search_*` views present.
 - Authenticated validation:
@@ -3812,7 +3812,7 @@ Implemented:
 - Original-media failures now return structured JSON with storage name, relative path, health code, and action-oriented message instead of a generic server error.
 - Settings UI now shows source URL, SMB host/share/path, credentials-file status, health code, and probe details.
 
-Remote rjazhenka validation:
+Remote production host validation:
 
 - Deployed updated backend and WebUI to `/opt/cartolensia/current`.
 - Added non-secret SMB metadata to the active production config; Samba credentials remain in `/etc/cartolensia/smb-multimedia.credentials`.
@@ -3837,7 +3837,7 @@ Tests:
 Known limitations:
 
 - If `smbclient` is unavailable on a deployment host, Cartolensia still distinguishes host reachability and local mount/path failures, but cannot independently verify share names or credentials through SMB protocol.
-- The current rjazhenka Samba server is reachable, but reports the configured shares as unavailable. No metadata was deleted and no missing-file marking was run.
+- The current production host Samba server is reachable, but reports the configured shares as unavailable. No metadata was deleted and no missing-file marking was run.
 
 Safety confirmation:
 
@@ -3852,7 +3852,7 @@ Safety confirmation:
 
 Issue:
 
-- After the utility outage, rjazhenka booted PostgreSQL and the AI sidecar, but the main Cartolensia app did not serve UI/API while the Samba-backed originals roots were unavailable.
+- After the utility outage, production host booted PostgreSQL and the AI sidecar, but the main Cartolensia app did not serve UI/API while the Samba-backed originals roots were unavailable.
 - Root cause: filesystem storage initialization treated `filepath.EvalSymlinks` errors such as `ENODEV` from unavailable CIFS mounts as fatal, so one offline originals storage could block the whole metadata service.
 - Readiness diagnostics also probed offline storage roots sequentially, taking about 26 seconds.
 - On the 615k-asset remote index, `ext:mp4` search timed out because search loaded all matching assets before pagination.
@@ -3872,7 +3872,7 @@ Implemented:
   - `kind:video` / `media:video`;
   - plain tokens that exactly match a supported extension, such as `mp4`.
 
-Remote validation on rjazhenka:
+Remote validation on production host:
 
 - Services active:
   - `cartolensia-postgres`;
@@ -3883,7 +3883,7 @@ Remote validation on rjazhenka:
   - AI sidecar `0.0.0.0:19090`;
   - HTTPS `*:18443`;
   - HTTP redirect `*:18080`.
-- LAN URL: `https://192.168.237.126:18443/`.
+- LAN URL: `https://<production-lan-ip>:18443/`.
 - Authenticated readiness:
   - overall `warn`;
   - `0` errors;
@@ -3920,7 +3920,7 @@ Safety confirmation:
 
 ## 2026-06-27 OCR/Captions Asset Navigation Fix
 
-Fixed and deployed to rjazhenka:
+Fixed and deployed to production host:
 
 - The global `openAsset` path now opens Asset Detail immediately after loading the asset record instead of waiting for related/context and video stream option calls.
 - Related/context and stream options now hydrate asynchronously after the page is visible, preventing large-database context queries from leaving the UI stuck on `Loading`.
@@ -3933,7 +3933,7 @@ Tests run:
 - `npm --prefix webui run build`
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
 - `git diff --check`
-- WebUI assets synced to rjazhenka; no service restart was required.
+- WebUI assets synced to production host; no service restart was required.
 
 Safety confirmation:
 
@@ -3946,7 +3946,7 @@ Safety confirmation:
 
 ## 2026-06-27 Explorer Load All Control
 
-Fixed and deployed to rjazhenka:
+Fixed and deployed to production host:
 
 - Explorer pagination now has two explicit controls:
   - `Load more` fetches the next page;
@@ -3959,7 +3959,7 @@ Tests run:
 - `npm --prefix webui run build`
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
 - `git diff --check`
-- WebUI assets synced to rjazhenka; no service restart was required.
+- WebUI assets synced to production host; no service restart was required.
 
 Safety confirmation:
 
@@ -3972,7 +3972,7 @@ Safety confirmation:
 
 ## 2026-06-27 Explorer Scale, AI Backfill, And Remote Deployment Update
 
-Implemented locally and deployed to rjazhenka:
+Implemented locally and deployed to production host:
 
 - Replaced the folder-mode Explorer fallback that could load the full asset catalog with a PostgreSQL-backed folder aggregation and direct-file page query.
 - Added production path indexes for Explorer-scale browsing:
@@ -3985,9 +3985,9 @@ Implemented locally and deployed to rjazhenka:
 - Split the new Explorer controls into `MonthFilterBar.vue` and `PagedFileControls.vue`.
 - Added Vite manual chunks for Vue, OpenLayers, and HLS; HLS is loaded dynamically only when HLS playback needs it.
 
-Remote rjazhenka validation after deploy:
+Remote production host validation after deploy:
 
-- Production URL remains `https://192.168.237.126:18443/`.
+- Production URL remains `https://<production-lan-ip>:18443/`.
 - Authenticated stats at latest poll:
   - `249,219` assets;
   - `218,903` photos;
@@ -4051,9 +4051,9 @@ Implemented locally:
 - Added mobile shell hardening: the sidebar becomes a horizontal sticky navigation strip, topbar/login forms reflow, content padding shrinks, and gallery/audio overlays fit small screens.
 - Added `scripts/remote/run-ai-backfill.py`, a low-concurrency production AI backfill driver that selects missing metadata work from PostgreSQL and feeds small authenticated API batches. It records successful no-result checks locally under `/var/lib/cartolensia/run/ai-backfill-state` to avoid repeatedly OCRing/transcribing blank assets.
 
-Remote rjazhenka status after deployment:
+Remote production host status after deployment:
 
-- Public LAN UI is available at `https://192.168.237.126:18443/` with a self-signed certificate.
+- Public LAN UI is available at `https://<production-lan-ip>:18443/` with a self-signed certificate.
 - Authentication is local/session based. Login email is `admin@example.local`; password is the exact value in `/etc/cartolensia/admin-password` on the remote host. Do not include the trailing shell prompt when copying it; pasted trailing newlines are ignored by the server.
 - Services are active: `cartolensia-postgres`, `cartolensia-ai`, and `cartolensia`.
 - HTTPS is active on `:18443`; HTTP `:18080` redirects to HTTPS for browser traffic.
@@ -4199,7 +4199,7 @@ Safety confirmation:
 
 ## 2026-06-27 Parent Samba Storage, Overlap-Safe Discovery, And Essential Export
 
-Implemented locally and deployed to rjazhenka:
+Implemented locally and deployed to production host:
 
 - Added subtree pruning to the bounded filesystem walker. `exclude_patterns` ending in `/**` now skip whole directory trees instead of walking into them and filtering files afterward.
 - Discovery now automatically detects configured nested filesystem storages. When scanning a parent storage or `storage=all`, the parent scan excludes child storage roots so the same NAS subtree is not indexed through both `old_compressed_data` and its child storage entries.
@@ -4218,7 +4218,7 @@ Implemented locally and deployed to rjazhenka:
 
 Remote actions completed:
 
-- Deployed the backend binary with overlap-safe discovery to rjazhenka.
+- Deployed the backend binary with overlap-safe discovery to production host.
 - Added read-only parent storage `old_compressed_data` rooted at `/mnt/cartolensia-originals/old_drives/compressed_data`.
 - Existing child storages remain configured:
   - `old_x12_los20`;
@@ -4294,7 +4294,7 @@ Fixed:
 
 Deployed:
 
-- Rebuilt and deployed only `webui/dist` to rjazhenka to avoid interrupting active discovery/metadata jobs.
+- Rebuilt and deployed only `webui/dist` to production host to avoid interrupting active discovery/metadata jobs.
 - Backend active-sort implementation is tested locally and will be picked up with the next backend deploy/restart.
 
 Remote validation:
@@ -4342,12 +4342,12 @@ Implemented:
   - opens matching assets from transcript rows and transcript search results.
 - OCR and Captions pages now show how many rows are loaded from the shared prediction payload and have `Load more` / `Load all` controls.
 - AI Classification and Face Gallery no longer hide rows via silent small template slices; face clusters have explicit `Load more` / `Load all`.
-- Backend AI metadata endpoints now support higher limits, offset, and query filtering for predictions/faces. This is tested locally and will take effect on rjazhenka after the next backend deploy/restart.
+- Backend AI metadata endpoints now support higher limits, offset, and query filtering for predictions/faces. This is tested locally and will take effect on production host after the next backend deploy/restart.
 
 Remote deployment:
 
-- Rebuilt and deployed `webui/dist` to rjazhenka only, avoiding a backend restart while active indexing/AI jobs are running.
-- The live WebUI at `https://192.168.237.126:18443/` now includes the track paging/typeahead and Transcripts page.
+- Rebuilt and deployed `webui/dist` to production host only, avoiding a backend restart while active indexing/AI jobs are running.
+- The live WebUI at `https://<production-lan-ip>:18443/` now includes the track paging/typeahead and Transcripts page.
 
 Tests:
 
@@ -4359,7 +4359,7 @@ Tests:
 
 Known limitations:
 
-- AI/OCR/Captions large-result paging above the old backend cap needs the next backend restart/deploy on rjazhenka. It was intentionally not restarted during active production jobs.
+- AI/OCR/Captions large-result paging above the old backend cap needs the next backend restart/deploy on production host. It was intentionally not restarted during active production jobs.
 - Track paging works with the current live backend because `/api/v1/gps/tracks` already supports `limit`, `offset`, and `q`.
 
 Safety confirmation:
@@ -4398,12 +4398,12 @@ Implemented:
 - Hardened `scripts/remote/run-ai-backfill.py`:
   - probes past the first already-seen candidate window;
   - retries transient `RemoteDisconnected`, timeout, and connection reset errors.
-- Deployed rebuilt backend, WebUI, and backfill supervisor script to rjazhenka.
+- Deployed rebuilt backend, WebUI, and backfill supervisor script to production host.
 - Cleaned one stale pre-restart `audio_analyze` job metadata row; replacement backfill work is running.
 
 Remote validation:
 
-- rjazhenka services active:
+- production host services active:
   - `cartolensia`
   - `cartolensia-ai`
 - AI sidecar health: real CUDA-backed mode, with classifier, YuNet, NSFW, OpenCLIP, BLIP, Tesseract OCR, faster-whisper, and audio analysis available.
@@ -4471,7 +4471,7 @@ Validation:
 Remote deployment:
 
 - Rebuilt the backend binary and WebUI locally.
-- Installed the updated release under `/opt/cartolensia/releases/local-20260628T-ai-backfill` on rjazhenka.
+- Installed the updated release under `/opt/cartolensia/releases/local-20260628T-ai-backfill` on production host.
 - Switched `/opt/cartolensia/current` and restarted `cartolensia` only; PostgreSQL and AI sidecar remained active.
 - Increased `workers.max_concurrency` to `6` for the production host so metadata/hash work and multiple AI lanes can progress together.
 - Queued full missing-metadata backfill with `limit_per_task=-1`, `batch_size=64`, `max_audio_seconds=2700`, and `max_video_seconds=900`.
@@ -4539,7 +4539,7 @@ Validation:
 
 Remote production validation:
 
-- Deployed the rebuilt backend/WebUI to rjazhenka as `/opt/cartolensia/releases/local-20260628T-map-overlay-v5`.
+- Deployed the rebuilt backend/WebUI to production host as `/opt/cartolensia/releases/local-20260628T-map-overlay-v5`.
 - Restarted only the Cartolensia service; PostgreSQL, existing metadata, jobs, and originals were preserved.
 - Backfilled `9468` local DB render points for existing parsed tracks in about `9.0 s`.
 - Authenticated checks after backfill:
@@ -4591,9 +4591,9 @@ Validation:
 
 Remote production validation:
 
-- Deployed to rjazhenka as `/opt/cartolensia/releases/local-20260628T-settings-fast`.
+- Deployed to production host as `/opt/cartolensia/releases/local-20260628T-settings-fast`.
 - Restarted only the Cartolensia service.
-- Authenticated endpoint timings on rjazhenka:
+- Authenticated endpoint timings on production host:
   - `/api/v1/settings`: `3193` bytes, `0.002 s`, no `effective` field.
   - `/api/v1/settings?include_effective=1`: `6048` bytes, `0.002 s`.
   - `/api/v1/settings/effective`: `4903` bytes, `0.002 s`.
@@ -4642,7 +4642,7 @@ Additional implementation:
 
 Remote production work:
 
-- Started a local Ollama runtime in Docker on rjazhenka with data under `/var/lib/cartolensia/ollama`.
+- Started a local Ollama runtime in Docker on production host with data under `/var/lib/cartolensia/ollama`.
 - Pulled `qwen3:8b` successfully (`5.2 GB`, Q4_K_M, reported by Ollama as `8.2B` parameters).
 - Deployed the LLM-enabled backend/WebUI to `/opt/cartolensia/releases/local-20260628T-llm-chat`.
 - Corrected a deployment mistake where an overlay `rsync --delete` removed bundle support files such as `bin/cartolensia-env`; restored the release from `/opt/cartolensia/releases/local-20260628T-settings-fast`, overlaid the new build without deletion, and restarted Cartolensia back on the PostgreSQL store.
@@ -4650,7 +4650,7 @@ Remote production work:
 
 Remaining remote action:
 
-- The last SSH deployment/configuration command was blocked by the platform approval/usage gate before the restart-safe environment file could be installed on rjazhenka. The required next remote action is to set the `CARTOLENSIA_KNOWLEDGE_*` environment variables for the `cartolensia` service, restart the service, and re-run an authenticated `/api/v1/knowledge/chat` probe.
+- The last SSH deployment/configuration command was blocked by the platform approval/usage gate before the restart-safe environment file could be installed on production host. The required next remote action is to set the `CARTOLENSIA_KNOWLEDGE_*` environment variables for the `cartolensia` service, restart the service, and re-run an authenticated `/api/v1/knowledge/chat` probe.
 - No workaround was attempted after the remote command was rejected.
 
 Safety confirmation:
@@ -4688,7 +4688,7 @@ Validation:
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
 - `npm --prefix webui run build`
 - Built `/tmp/cartolensia-fix` from the verified source tree.
-- Deployed the verified backend and WebUI bundle to rjazhenka and restarted only
+- Deployed the verified backend and WebUI bundle to production host and restarted only
   the `cartolensia` service.
 - Authenticated remote validation:
   - `/api/v1/settings` returned successfully;
@@ -4742,7 +4742,7 @@ Implemented and deployed:
 Remote production status:
 
 - Active remote release: `/opt/cartolensia/releases/local-20260628T-env-llm-actions2`.
-- Public LAN URL remains `https://192.168.237.126:18443/`.
+- Public LAN URL remains `https://<production-lan-ip>:18443/`.
 - `cartolensia`, `cartolensia-ai`, and `cartolensia-postgres` are active.
 - TLS startup log confirms cached certificate reuse from `/var/lib/cartolensia/cache/tls/`.
 - Local LLM status is configured and reachable through Ollama:
@@ -4826,7 +4826,7 @@ Tests run locally:
 
 Remote deployment/validation:
 
-- Deployed the verified backend binary to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka.
+- Deployed the verified backend binary to `/opt/cartolensia/current/bin/cartolensia` on production host.
 - Deployed the verified WebUI bundle to `/opt/cartolensia/current/webui/dist`.
 - Restarted only the `cartolensia` service; PostgreSQL, originals/Samba mounts, Ollama, and the AI sidecar were not reset.
 - Authenticated remote `/api/v1/knowledge/llm/status` returned local LLM mode with provider `ollama`, model `qwen3:8b`, endpoint `http://127.0.0.1:11434`, `configured=true`, and `reachable=true`.
@@ -4857,7 +4857,7 @@ Safety confirmation:
 
 Scope:
 
-- Focused on the production rjazhenka deployment while the full NAS/originals scan continued.
+- Focused on the production production host deployment while the full NAS/originals scan continued.
 - Addressed SSD write amplification, misleading long-job progress, stale canceled jobs, and missing AI backfill lanes.
 - Kept originals/Samba storage strictly read-only and did not reset PostgreSQL.
 
@@ -4886,7 +4886,7 @@ Implemented and deployed:
 
 Remote validation:
 
-- rjazhenka is running the updated backend from `/opt/cartolensia/current/bin/cartolensia`.
+- production host is running the updated backend from `/opt/cartolensia/current/bin/cartolensia`.
 - TLS is reusing the cached self-signed certificate under `/var/lib/cartolensia/cache/tls`.
 - `/api/v1/previews/status` reports `mode: on_demand` and `persistent_previews: false`.
 - A sample photo preview returned `X-Cartolensia-Preview-Cache: on-demand`.
@@ -5009,7 +5009,7 @@ Safety confirmation:
 
 Scope:
 
-- Continued the remote production run on rjazhenka without touching originals or Samba mounts.
+- Continued the remote production run on production host without touching originals or Samba mounts.
 - Focused on the Map page freeze/coverage issue for thousands of parsed tracks and added a Places browsing surface backed by local reverse-geocode cache data.
 
 Implemented:
@@ -5130,7 +5130,7 @@ Tests run:
 Remote deployment:
 
 - Rebuilt the backend binary with `CGO_ENABLED=0`.
-- Deployed the backend to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka.
+- Deployed the backend to `/opt/cartolensia/current/bin/cartolensia` on production host.
 - Deployed the rebuilt WebUI bundle to `/opt/cartolensia/current/webui/dist`.
 - Restarted only the `cartolensia` service.
 
@@ -5165,7 +5165,7 @@ Safety confirmation:
 
 Live remote state captured before the platform blocked further SSH escalation:
 
-- Public LAN URL remained `https://192.168.237.126:18443/`.
+- Public LAN URL remained `https://<production-lan-ip>:18443/`.
 - AI sidecar was reachable and CUDA-backed:
   - worker status: `ok`;
   - device: `cuda`;
@@ -5233,7 +5233,7 @@ Root causes found:
 - Several long-running production jobs had expired leases after restarts or long task stalls. When all worker slots were occupied, expired running leases were not released promptly before normal dispatch, so some queued AI/metadata work could appear stuck.
 - Track-map coverage was also genuinely incomplete for some assets: many track-like files were indexed, but not all had parsed track geometry yet. Metadata enrichment is required to reduce that remaining gap.
 
-Fixes implemented locally and deployed to rjazhenka:
+Fixes implemented locally and deployed to production host:
 
 - Added a map-specific geotag page normalizer:
   - default map geotag limit: `10000`;
@@ -5332,7 +5332,7 @@ Tests run:
 Remote deployment/validation:
 
 - Built `/tmp/cartolensia-geocoder` from the verified source tree.
-- Deployed `/tmp/cartolensia-geocoder` to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka.
+- Deployed `/tmp/cartolensia-geocoder` to `/opt/cartolensia/current/bin/cartolensia` on production host.
 - Deployed `webui/dist/` to `/opt/cartolensia/current/webui/dist/`.
 - Restarted only the `cartolensia` service; PostgreSQL, AI sidecar, and original/Samba mounts were not reset or modified.
 - Remote `/api/v1/health` returned `ok`.
@@ -5379,9 +5379,9 @@ Tests run:
 
 Remote validation:
 
-- Authenticated `GET /api/v1/knowledge/llm/status` on rjazhenka reported
+- Authenticated `GET /api/v1/knowledge/llm/status` on production host reported
   provider `ollama`, model `qwen3:8b`, `configured=true`, and `reachable=true`.
-- Authenticated `POST /api/v1/knowledge/chat/stream` on rjazhenka was verified
+- Authenticated `POST /api/v1/knowledge/chat/stream` on production host was verified
   with the production CSRF flow from `/api/v1/auth/csrf`. It emitted `status`,
   `tool`, and `token` events from the local Ollama-backed runner.
 - Remote `/api/v1/ai/status` still reports the CUDA sidecar as configured with
@@ -5482,7 +5482,7 @@ Tests run:
 Remote deployment/validation:
 
 - Built `/tmp/cartolensia-llm-agent` from the verified source tree.
-- Deployed it to `/opt/cartolensia/current/bin/cartolensia` on rjazhenka and
+- Deployed it to `/opt/cartolensia/current/bin/cartolensia` on production host and
   restarted only the `cartolensia` service.
 - Remote `https://127.0.0.1:18443/api/v1/health` returned `ok`.
 - Authenticated production Knowledge Base query:
@@ -5536,9 +5536,239 @@ Safety confirmation:
 - `git diff --check`
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
 - `npm --prefix webui run build`
-- Built `/tmp/cartolensia-online-geocoder` and deployed it plus the rebuilt WebUI to `rjazhenka`.
+- Built `/tmp/cartolensia-online-geocoder` and deployed it plus the rebuilt WebUI to `production host`.
 - Remote `/api/v1/places/providers` now reports `mode=online_cache`, `online_enabled=true`, active provider `nominatim`, URL `https://nominatim.openstreetmap.org`, and minimum interval `1100 ms`.
 - A remote authenticated `/api/v1/places/reverse` call with omitted `online` used the default online cache-fill path and stored one Nominatim result in `place_cache`.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
+## 2026-07-07 Music Artifacts, Asset Playback Links, and Full Local Offline Bundle
+
+### Implemented
+
+- Added authenticated cache-artifact streaming for generated music outputs:
+  - `GET /api/v1/assets/{id}/music-artifact?type=midi&id=...`
+  - `GET /api/v1/assets/{id}/music-artifact?type=stem&set_id=...&stem=...`
+  - `download=1` returns an attachment for browser download.
+- The artifact endpoint only serves files below configured Cartolensia cache
+  roots and rejects path traversal or paths outside the cache/component
+  workspace.
+- Asset Details now exposes generated music artifacts:
+  - MIDI records have `Preview MIDI`, `Stop`, and `Download MIDI` actions.
+  - Stem sets show one audio player per stem plus a `Download stem` action.
+  - Music action cards now include install buttons when Basic Pitch or Demucs
+    is missing.
+- Hardened the AI sidecar music provider discovery:
+  - Basic Pitch is loaded from an isolated Component Manager environment.
+  - Demucs is loaded from an isolated Component Manager environment.
+  - Demucs supports explicit `device` selection and uses the isolated CLI to
+    avoid mixed CUDA/cuDNN dependencies in the main sidecar environment.
+- Updated Component Manager metadata so `music-demucs` installs PyTorch,
+  torchaudio, and the CUDA wheel channel consistently for CUDA hosts.
+- Updated the local full offline 7z build so the personal-only bundle includes:
+  - Go backend and built WebUI.
+  - production configs/scripts/docs/license bundle.
+  - PostgreSQL runtime payload.
+  - BtbN GPL shared ffmpeg/ffprobe payload.
+  - AI Python runtime profiles.
+  - reviewed AI model cache.
+  - reviewed Component Manager payloads, including `music-demucs`,
+    `music-basic-pitch`, and the Python 3.11 component runtime.
+  - bundle-relative wrappers for `components/music-demucs/venv/bin/demucs` and
+    `components/music-basic-pitch/venv/bin/basic-pitch`.
+- Normalized previously logged production hostnames and LAN IPs in
+  `RUN_REPORT.md` and `docs/OPERATIONS.md` to avoid publishing local topology.
+
+### Remote Validation
+
+- Deployed the updated backend, WebUI, and AI sidecar music-provider code to
+  the production host without modifying originals.
+- Repaired the production `music-demucs` component environment to use matching
+  CUDA PyTorch/torchaudio wheels.
+- Verified the sidecar `/separate-music` endpoint with a synthetic WAV:
+  Demucs returned the expected `bass`, `drums`, `other`, and `vocals` stems.
+- Ran one bounded production music-stems job on an already indexed audio asset:
+  the job processed one asset and stored one stem set with seven related
+  records.
+- Verified generated artifact delivery:
+  - MIDI `HEAD` returned `200` with `audio/midi`.
+  - Stem `HEAD` returned `200` with `audio/wav`.
+  - `download=1` returned `content-disposition: attachment`.
+
+### Distribution Artifact
+
+- Built the personal full local offline archive:
+  - `dist/release/cartolensia-local-full-linux-x86_64-20260707.7z`
+  - size: `21G`
+  - SHA-256:
+    `384093d4265946574fde55c21ea099d9a39479a49efe1cb5b95c58d12458358b`
+- Archive integrity:
+  - `7z t dist/release/cartolensia-local-full-linux-x86_64-20260707.7z`
+  - result: `Everything is Ok`
+  - archive contains 263385 files and 30106 folders.
+- Staged wrapper smoke checks:
+  - `components/music-demucs/venv/bin/demucs --help` succeeded.
+  - `components/music-basic-pitch/venv/bin/basic-pitch --help` succeeded.
+  - Basic Pitch emitted TensorFlow CUDA/plugin registration warnings during
+    help startup; these were non-fatal.
+
+### Validation
+
+- `git diff --check`
+- `python3 -m py_compile services/ai/cartolensia_ai/models/real.py`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `bash scripts/release/check-licenses.sh`
+- `bash scripts/release/smoke-release.sh`
+
+### Known Limitations
+
+- Basic Pitch supports Python 3.7-3.11 upstream, so it is bundled as an
+  isolated Python 3.11 component rather than installed into every generic
+  Python 3.12 AI runtime profile.
+- The full bundle intentionally includes GPL ffmpeg tools only for local,
+  personal deployment. Redistribution still requires the documented GPL notices
+  and source-offer/source-location obligations.
+- The staging tree remains under `dist/local-full-work/...` for post-build
+  inspection. It can be removed manually after the archive is copied and
+  verified elsewhere.
+
+### Safety Notes
+
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
+## 2026-07-07 WebUI Model Install Button And Basic Pitch E2E
+
+### Implemented
+
+- Added a first-class WebUI install path for reviewed isolated Python CLI
+  components:
+  - Components page now labels `music-basic-pitch` as `Install Basic Pitch`.
+  - Audio/video asset detail shows `Install MIDI provider` when Basic Pitch is
+    missing.
+  - The same `/api/v1/components/music-basic-pitch/download` endpoint is used by
+    the button and by automation.
+- Implemented a reviewed isolated Basic Pitch installer:
+  - installs only under the configured component root, never under originals;
+  - selects a compatible Python interpreter, including operator-provided
+    Python 3.11;
+  - creates a component-local venv and pip cache;
+  - installs `basic-pitch[tf]` with TensorFlow-compatible pins for NumPy,
+    protobuf, flatbuffers, and `setuptools<81`;
+  - scrubs `PYTHONPATH`/`PYTHONHOME` and sets `PYTHONNOUSERSITE=1` so the
+    isolated venv cannot accidentally import packages from the main AI sidecar
+    environment;
+  - validates `pip check`, Python import, and the `basic-pitch` CLI before
+    marking the component installed.
+- Hardened the AI sidecar MIDI path:
+  - sidecar uses the isolated Basic Pitch CLI when Basic Pitch is not importable
+    in the main AI environment;
+  - CLI subprocesses also scrub global Python path variables;
+  - generated MIDI files remain under Cartolensia cache;
+  - added a built-in Standard MIDI File summary fallback so note counts and
+    channel/program summaries work even when optional `pretty_midi`/`mido`
+    packages are absent.
+
+### Remote Deployment And Validation
+
+- Deployed the rebuilt backend binary, WebUI bundle, and AI sidecar module to
+  the production host through the existing SSH alias and restarted
+  `cartolensia` and `cartolensia-ai`; both services reported `active`.
+- Authenticated against the production API without printing credentials and ran
+  the same component install endpoint used by the WebUI button.
+- Remote component install result:
+  - `music-basic-pitch` status: `installed`;
+  - version: `0.4.0`;
+  - source type: `downloaded`;
+  - executable:
+    `/var/lib/cartolensia/components/music-basic-pitch/venv/bin/basic-pitch`.
+- Remote sidecar synthetic smoke:
+  - generated a short sine-wave WAV under `/tmp`;
+  - `POST /music-to-midi` returned `status=ok`;
+  - runtime: `isolated_cli`;
+  - output MIDI path under `/var/lib/cartolensia/realpeek-cache/music-midi/...`;
+  - built-in parser reported 1 MIDI note-on event.
+- Remote full Cartolensia job smoke:
+  - selected one indexed audio asset through `/api/v1/assets?media_kind=audio`;
+  - `POST /api/v1/ai/jobs/music-midi` completed with 1 target, 1 processed, 0
+    skipped, 0 errors, and stored MIDI metadata;
+  - persisted MIDI metadata reported `basic_pitch`, `isolated_cli`, and 1,891
+    MIDI note-on events for the tested audio asset.
+
+### Commands Run
+
+- `python3 -m py_compile services/ai/cartolensia_ai/models/real.py`
+- `gofmt -w internal/server/components.go internal/server/server.go`
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go build -o /tmp/cartolensia-model-installer-bin ./cmd/cartolensia`
+
+### Safety Notes
+
+- No writes to originals, Samba storage, or `/mnt/Models/rclone`.
+- Generated component files were placed under `/var/lib/cartolensia/components`
+  on the production host.
+- Generated MIDI smoke outputs were placed under `/tmp` and
+  `/var/lib/cartolensia/realpeek-cache`.
+- No DB reset.
+- No missing-file marking.
+- No commit or push.
+
+## 2026-07-06 MIDI Job Failure Diagnosis
+
+### Diagnosis
+
+- Investigated a failed `music_midi` AI action shown in Jobs.
+- Production PostgreSQL job metadata reports the exact failure:
+  `basic-pitch is not installed in the Cartolensia AI environment`.
+- Production AI sidecar direct `/music-to-midi` probe returns a structured
+  `model_missing` response for the same reason.
+- Root cause: the MIDI transcription endpoint and database/UI plumbing are
+  present, but the production AI Python environment does not yet contain a
+  working Basic Pitch provider. Earlier packaging also recorded that Basic
+  Pitch is not installed in the Python 3.12 production venv; a Python 3.11
+  compatible provider bundle or another supported MIDI provider is still
+  required before MIDI jobs can produce `.mid` outputs.
+
+### Implemented
+
+- Improved backend AI action reporting:
+  - per-asset `model_missing` and `not_configured` responses are now included
+    in the job result payload;
+  - job logs now include the concrete per-asset failure reason;
+  - missing components are annotated with actionable component keys such as
+    `music-basic-pitch` and `music-demucs`;
+  - attempted progress now counts completed failures, so a missing-provider
+    one-asset run shows as attempted `1/1` instead of appearing stuck at `0/1`.
+- Deployed the updated backend binary to the production host and restarted the
+  Cartolensia app service.
+
+### Validation
+
+- `git diff --check`
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...`
+- `npm --prefix webui run build`
+- Built `/tmp/cartolensia-midi-job-errors`.
+- Deployed the binary to the production host.
+- Remote `systemctl is-active cartolensia` returned `active`.
+- Remote `/api/v1/health` returned `ok`.
+- Remote sidecar `/music-to-midi` diagnostic returned
+  `{"status":"model_missing","endpoint":"music-to-midi","reason":"basic-pitch is not installed in the Cartolensia AI environment"}`.
+
+### Known Limitation
+
+- MIDI transcription will continue to fail until a compatible `music-basic-pitch`
+  component is installed/provided or a different supported MIDI transcription
+  provider is added. The failure is now explicit and visible in Jobs.
 
 ### Safety Notes
 
@@ -5765,7 +5995,7 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
   `/var/lib/cartolensia/marker-venv-cu128-20260704T011311Z`.
 - Installed the official PyTorch CUDA 12.8 stack in the isolated venv:
   `torch 2.8.0+cu128`, CUDA 12.8, cuDNN 9.10.
-- Validated on `rjazhenka`:
+- Validated on `production host`:
   - `torch.cuda.is_available()` is true;
   - device is `NVIDIA GeForce RTX 4060 Ti`;
   - a CUDA convolution succeeds;
@@ -5827,7 +6057,7 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
 
 ### Current Production Status
 
-- Remote host: `rjazhenka` via the production HTTPS service.
+- Remote host: `production host` via the production HTTPS service.
 - Indexed production DB snapshot during this run:
   - 627,420 assets;
   - 422,978 photos;
@@ -5880,7 +6110,7 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
 ### Remote Actions
 
 - Deployed the patched `run-ai-backfill.py` and `run-document-backfill.py` to
-  `/opt/cartolensia/current/scripts/remote/` on `rjazhenka`.
+  `/opt/cartolensia/current/scripts/remote/` on `production host`.
 - Marker CUDA mode failed with a CUDNN sublibrary mismatch on this host. The
   document worker was restarted with `CUDA_VISIBLE_DEVICES=` so Marker uses CPU
   reliably while the image AI sidecar keeps CUDA available.
@@ -5942,11 +6172,11 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
 - No missing-file marking.
 - No commit or push.
 
-## 2026-07-03 rjazhenka Missing-Only AI and Reverse-Geocode Supervision
+## 2026-07-03 production host Missing-Only AI and Reverse-Geocode Supervision
 
 ### Implemented / Operated
 
-- Audited the production `rjazhenka` queue and AI sidecar after the GPU appeared
+- Audited the production `production host` queue and AI sidecar after the GPU appeared
   idle. The root cause was not a stopped sidecar: most AI-eligible originals
   already had either a completed task status or a recorded permanent failure, so
   the remaining selectable queue was small.
@@ -6045,7 +6275,7 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
 
 ### Remote Supervision
 
-- Checked `rjazhenka` production services over SSH:
+- Checked `production host` production services over SSH:
   - `cartolensia`: active
   - `cartolensia-ai`: active
   - `cartolensia-postgres`: active
@@ -6140,7 +6370,7 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
 ### Commands Run
 
 - Remote service and AI health checks through
-  `ssh -o BatchMode=yes -o ConnectTimeout=10 rjazhenka-cartolensia`.
+  `ssh -o BatchMode=yes -o ConnectTimeout=10 <cartolensia-ssh-alias>`.
 - Remote PostgreSQL queue audits and enqueue SQL through the production
   PostgreSQL listener on `127.0.0.1:15432`.
 - Remote backup export with `/usr/bin/pg_dump`, `tar --zstd`, and `sha256sum`.
@@ -6158,7 +6388,7 @@ folders, 52.4 GB unpacked, and 25.1 GB compressed.
 
 ### Remote Status
 
-- Checked `rjazhenka` over SSH at `2026-07-03T03:10-03:18+04:00`.
+- Checked `production host` over SSH at `2026-07-03T03:10-03:18+04:00`.
 - `cartolensia` and `cartolensia-postgres` were active.
 - `cartolensia-ai` briefly appeared as `activating` during one health probe, then returned to `active/running`; `systemctl show` reported `NRestarts=2`.
 - AI sidecar logs showed live local requests for:
@@ -6261,7 +6491,7 @@ are picked up without manual intervention. Each sweep covers:
 
 ### Implemented
 
-- Investigated why `rjazhenka` GPU was intermittently idle while the archive
+- Investigated why `production host` GPU was intermittently idle while the archive
   still had large AI queues.
 - Fixed AI-sidecar concurrency stability in
   `services/ai/cartolensia_ai/models/real.py`:
@@ -6290,7 +6520,7 @@ are picked up without manual intervention. Each sweep covers:
 ### Remote Deployment and Validation
 
 - Built `/tmp/cartolensia-reverse-geocode-complete` and deployed it to
-  `/opt/cartolensia/current/bin/cartolensia` on `rjazhenka`.
+  `/opt/cartolensia/current/bin/cartolensia` on `production host`.
 - Restarted only the `cartolensia` service; `cartolensia-ai` was left running
   to keep loaded models resident.
 - Remote services after deployment:
@@ -6382,7 +6612,7 @@ are picked up without manual intervention. Each sweep covers:
 - `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./internal/server ./cmd/cartolensia`
 - `npm --prefix webui run build`
 - Built `/tmp/cartolensia-reverse-geocode-missing` and deployed it plus the
-  rebuilt WebUI to `rjazhenka`.
+  rebuilt WebUI to `production host`.
 - Remote `systemctl is-active cartolensia` returned `active` and
   `https://127.0.0.1:18443/api/v1/health` returned `ok`.
 - Remote authenticated `/api/v1/places/providers` still reports

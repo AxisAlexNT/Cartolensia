@@ -1110,6 +1110,21 @@ td {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.asset-artifact-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+}
+
+.asset-stem-player {
+  display: block;
+  margin: 0.45rem 0;
+  max-width: 100%;
+  width: 100%;
+}
+
 .segment-list {
   display: grid;
   gap: 6px;
