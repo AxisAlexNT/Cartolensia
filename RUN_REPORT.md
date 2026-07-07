@@ -1,5 +1,108 @@
 # Run Report
 
+## 2026-07-07 Music Component Stabilization And Private Full Bundle
+
+### Scope
+
+- Fixed the Basic Pitch component install path by installing reviewed
+  TensorFlow-compatible dependency pins before resolving `basic-pitch[tf]`.
+- Kept Basic Pitch isolated on Python 3.11 so it does not break the main
+  Python 3.12 AI environment.
+- Fixed the Demucs stem output policy:
+  - default output format is now compressed FLAC, not uncompressed WAV;
+  - optional MP3/WAV output remains configurable through sidecar request
+    options or environment variables;
+  - stem cache paths include the output format to avoid mixing old/new outputs.
+- Clarified the current model boundary:
+  - Demucs provides vocals, drums, bass, and other stems;
+  - piano, vibraphone/glockenspiel, reed, brass, and strings are represented
+    through MIDI transcription where Basic Pitch detects notes;
+  - true instrument-specific audio stems require a future reviewed provider.
+- Updated Asset Detail copy/buttons so the UI no longer promises unsupported
+  generic "instrument" audio stems.
+- Confirmed Asset Detail still exposes download links for generated MIDI files
+  and generated stem files.
+- Confirmed missing Basic Pitch and Demucs components can be requested from the
+  WebUI component-download buttons on audio/video Asset Detail actions.
+- Rebuilt and validated a private local full offline archive with the fixed
+  music components and current app/WebUI.
+
+### Local Verification
+
+Commands run:
+
+- `python3 -m py_compile services/ai/cartolensia_ai/models/real.py` passed.
+- `git diff --check` passed.
+- `GOCACHE=/tmp/cartolensia-go-build GOTOOLCHAIN=local go test ./...` passed.
+- `npm --prefix webui run build` passed.
+- `sha256sum -c dist/release/cartolensia-local-full-linux-x86_64-20260707-musicfix.7z.sha256` passed.
+- `7z t dist/release/cartolensia-local-full-linux-x86_64-20260707-musicfix.7z` passed before this report update.
+- Local isolated Basic Pitch package validation passed with:
+  - `basic-pitch 0.4.0`;
+  - `tensorflow 2.15.0.post1`;
+  - `numpy 1.26.4`;
+  - `protobuf 4.25.9`;
+  - `setuptools 80.10.2`.
+- Local Demucs CLI validation passed with `demucs --help`.
+
+Private full archive:
+
+- Archive: `dist/release/cartolensia-local-full-linux-x86_64-20260707-musicfix.7z`
+- Size: about 35 GiB.
+- Expanded payload reported by `7z t`: 77,672,422,874 bytes.
+- SHA-256:
+  `37b615e7f6c37c7de99f06f6d6e16ae2d596ad5c4bf80f4534a9c8e1499f2ea3`
+- The superseded `20260707` archive without the music fixes was removed to
+  recover local disk space.
+
+### Production Host Validation
+
+- Deployed the refreshed backend binary, WebUI, AI sidecar source, and launcher
+  environment changes to the production host.
+- Restarted `cartolensia` and `cartolensia-ai`; both services are active.
+- Backend HTTPS health endpoint returned `ok`.
+- AI sidecar health endpoint returned `ok` and advertises:
+  - `analyze_audio`;
+  - `music_midi`;
+  - `music_stems`;
+  - CUDA device mode;
+  - Tesseract OCR with English, Russian, Armenian, Chinese Simplified, and
+    Chinese Traditional language packs;
+  - faster-whisper ASR;
+  - BLIP/OpenCLIP/classifier/NSFW model integrations.
+- Sidecar music capability status now reports:
+  - Basic Pitch available through the isolated CLI component;
+  - Demucs available through the isolated CLI component;
+  - default music stem output format: `flac`.
+- Direct sidecar smoke tests with a synthetic local audio file succeeded for:
+  - audio analysis;
+  - music-to-MIDI;
+  - stem separation with FLAC outputs.
+- A prior authenticated app-level smoke run on one indexed audio asset completed
+  `audio-analyze`, `music-midi`, and `music-stems`, and the resulting stems
+  were retrievable from the asset music endpoints as `audio/flac`.
+
+### Known Limitations
+
+- Demucs is intentionally on-demand because even compressed stem outputs can be
+  large for a large music library.
+- Demucs does not split piano, vibraphone/glockenspiel, reeds, brass, or strings
+  into reliable audio stems in the current release profile. MIDI transcription
+  is the supported compact instrument-level representation for now.
+- Basic Pitch transcription is inferred metadata and should not be treated as
+  ground-truth notation.
+- The full local archive is a private operator bundle for local/offline use; it
+  is not intended to be uploaded as a public GitHub release artifact.
+
+### Safety
+
+- No writes to `/mnt/Models/rclone`.
+- No writes to originals or Samba storage.
+- No DB reset.
+- No missing-file marking.
+- No commit.
+- No push.
+
 ## 2026-07-06 Music MIDI And Stem Separation
 
 ### Scope

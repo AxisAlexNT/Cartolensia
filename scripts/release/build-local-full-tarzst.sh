@@ -373,7 +373,11 @@ REQ
 # Basic Pitch currently supports Python 3.7-3.11 upstream. On Python 3.12+
 # this install is best-effort and may need an operator-provided component
 # archive built with Python 3.11.
-basic-pitch
+setuptools<81
+numpy>=1.23.5,<2.0.0
+protobuf>=3.20.3,<5.0.0dev
+flatbuffers>=23.5.26
+basic-pitch[tf]
 REQ
 }
 
@@ -668,6 +672,9 @@ for env_file in "${ROOT}/.env" "${ROOT}/.env.local" "${ROOT}/config/remote-execu
     set +a
   fi
 done
+if [ -z "${CARTOLENSIA_ADMIN_PASSWORD:-}" ] && [ -n "${CARTOLENSIA_ADMIN_PASSWORD_FILE:-}" ] && [ -r "${CARTOLENSIA_ADMIN_PASSWORD_FILE}" ]; then
+  export CARTOLENSIA_ADMIN_PASSWORD="$(tr -d '\r\n' <"${CARTOLENSIA_ADMIN_PASSWORD_FILE}")"
+fi
 export CARTOLENSIA_HOME="${CARTOLENSIA_HOME:-${ROOT}}"
 export CARTOLENSIA_DATA_DIR="${CARTOLENSIA_DATA_DIR:-${ROOT}/data}"
 export CARTOLENSIA_CONFIG="${CARTOLENSIA_CONFIG:-${ROOT}/config/production-bundle.yaml}"

@@ -108,7 +108,16 @@ For a self-contained private bundle that is not uploaded to GitHub Releases, use
 - PostgreSQL server/client binaries from the configured `pg_config`;
 - Python AI executor environments for `cpu-avx2`, `cpu-avx512`, `nvidia-cu128`, `intel-arc`, and `rocm-radeon`;
 - reviewed AI model cache, including torchvision classifiers, YuNet, Falconsai NSFW, OpenCLIP, BLIP, and faster-whisper small when model preparation is enabled;
+- reviewed music components when enabled:
+  - Basic Pitch in an isolated Python 3.11 component with TensorFlow-compatible NumPy/Protobuf pins for compact MIDI transcription;
+  - Demucs for on-demand vocals/drums/bass/other separation, writing compressed FLAC stems by default instead of uncompressed WAV;
 - optional operator-provided offline map bundle.
+
+Demucs does not provide reliable piano, vibraphone/glockenspiel, reed, brass,
+or string audio stems in the default Cartolensia profile. Those instrument
+classes are represented through MIDI transcription when available. A future
+multi-instrument stem provider can be added as a reviewed component without
+changing originals.
 
 Build:
 

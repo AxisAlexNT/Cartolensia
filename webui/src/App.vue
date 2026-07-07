@@ -7839,7 +7839,7 @@ onBeforeUnmount(() => {
               </button>
               <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-stems', 'video_music_stems')">
                 <i class="bi bi-vinyl" aria-hidden="true"></i>
-                Separate vocals/instruments
+                Separate vocals/drums/bass/other
               </button>
               <button v-if="!componentInstalled('music-demucs')" type="button" class="btn btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload('music-demucs')">
                 <i class="bi bi-cloud-download" aria-hidden="true"></i>
@@ -7865,7 +7865,7 @@ onBeforeUnmount(() => {
               </button>
               <button type="button" class="btn btn-outline-primary" @click="runAssetAIAction('music-stems', 'audio_music_stems')">
                 <i class="bi bi-vinyl" aria-hidden="true"></i>
-                Separate vocals/instruments
+                Separate vocals/drums/bass/other
               </button>
               <button v-if="!componentInstalled('music-demucs')" type="button" class="btn btn-outline-secondary" :disabled="Boolean(componentBusyKey)" @click="requestComponentDownload('music-demucs')">
                 <i class="bi bi-cloud-download" aria-hidden="true"></i>
@@ -8055,6 +8055,10 @@ onBeforeUnmount(() => {
             </section>
             <section v-if="assetDetail.music_stems?.length" class="ocr-record-list">
               <h4>Music Stems</h4>
+              <p class="muted">
+                Demucs stores compressed FLAC stems by default under the Cartolensia cache. This provider separates vocals, drums, bass, and other;
+                piano, strings, brass, reeds, and mallet instruments are represented through MIDI transcription when available.
+              </p>
               <article v-for="stemSet in assetDetail.music_stems" :key="stemSet.id" class="ocr-record-card wide-record-card">
                 <div>
                   <strong>{{ stemSet.provider || 'stem provider' }} · {{ stemSet.model || 'music separation model' }}</strong>

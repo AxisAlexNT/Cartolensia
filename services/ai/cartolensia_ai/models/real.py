@@ -745,12 +745,26 @@ class RealBackend:
                 )
             model = str((request.options or {}).get("model") or os.environ.get("CARTOLENSIA_MUSIC_STEMS_MODEL") or "htdemucs").strip()
             stem_set = str((request.options or {}).get("stem_set") or "vocals_drums_bass_other").strip() or "vocals_drums_bass_other"
+            output_format = str(
+                (request.options or {}).get("format")
+                or (request.options or {}).get("output_format")
+                or os.environ.get("CARTOLENSIA_MUSIC_STEMS_FORMAT")
+                or "flac"
+            ).strip().lower()
+            if output_format not in {"flac", "mp3", "wav"}:
+                output_format = "flac"
+            try:
+                default_mp3_bitrate = int(os.environ.get("CARTOLENSIA_MUSIC_STEMS_MP3_BITRATE", "192") or "192")
+            except ValueError:
+                default_mp3_bitrate = 192
+            mp3_bitrate = _int_option(request.options, "mp3_bitrate", default_mp3_bitrate)
+            mp3_bitrate = max(96, min(mp3_bitrate, 320))
             device = str((request.options or {}).get("device") or os.environ.get("CARTOLENSIA_MUSIC_STEMS_DEVICE") or "").strip()
             timeout = _int_option(request.options, "timeout_seconds", 7200)
             timeout = max(60, min(timeout, 24 * 60 * 60))
             suffix = str((request.options or {}).get("suffix") or ".media")
             temp_path, should_delete = materialize_media_input(request, self.config, suffix=suffix)
-            output_dir = _music_output_dir(self.config.cache_dir, "music-stems", request.asset_id) / _safe_token(model)
+            output_dir = _music_output_dir(self.config.cache_dir, "music-stems", request.asset_id) / _safe_token(model) / _safe_token(output_format)
             output_dir.mkdir(parents=True, exist_ok=True)
             if module_available:
                 command = [sys.executable, "-m", "demucs.separate", "-n", model, "-o", str(output_dir)]
@@ -760,6 +774,10 @@ class RealBackend:
                 isolated_cli = True
             if device:
                 command.extend(["-d", device])
+            if output_format == "flac":
+                command.append("--flac")
+            elif output_format == "mp3":
+                command.extend(["--mp3", "--mp3-bitrate", str(mp3_bitrate)])
             command.append(str(temp_path))
             env = _isolated_python_cli_env() if isolated_cli else dict(os.environ)
             env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
@@ -795,9 +813,14 @@ class RealBackend:
                     "executable": str(executable) if executable else None,
                     "status": "succeeded",
                     "stem_set": stem_set,
+                    "output_format": output_format,
+                    "compressed": output_format != "wav",
+                    "mp3_bitrate": mp3_bitrate if output_format == "mp3" else None,
                     "output_dir": str(output_dir),
                     "stems": stems,
                     "stem_count": len(stems),
+                    "supported_stems": ["vocals", "drums", "bass", "other"],
+                    "instrument_stem_note": "The installed Demucs provider separates vocals/drums/bass/other. Piano, strings, brass, reeds, and mallet instruments are exposed through MIDI transcription when available; dedicated multi-instrument stem models can be added later as reviewed components.",
                     "safe_note": "Stem audio is stored under the Cartolensia cache directory only; originals are never modified.",
                 },
             )
@@ -1227,6 +1250,9 @@ def _music_stems_status(cache_dir: Path) -> dict[str, Any]:
         "provider": "demucs",
         "cache_dir": str(cache_dir / "music-stems"),
         "outputs": ["vocals", "drums", "bass", "other"],
+        "default_output_format": os.environ.get("CARTOLENSIA_MUSIC_STEMS_FORMAT", "flac"),
+        "compressed_outputs": True,
+        "instrument_stem_note": "Demucs does not provide reliable piano/strings/brass/reed/glockenspiel stems in this profile; use MIDI transcription for instrument-level notes or install a future reviewed multi-instrument provider.",
         "default_for_batch": False,
         "on_demand": True,
     }

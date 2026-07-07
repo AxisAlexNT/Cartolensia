@@ -27,8 +27,14 @@ The sidecar now supports both dummy/no-model mode and approved local inference m
 - Vector search uses a local JSON/PostgreSQL vector fallback with brute-force cosine search for small local collections.
 - Music analysis is split into two explicit workflows:
   - `music_midi` uses Basic Pitch when installed to produce compact MIDI metadata under the Cartolensia cache root. It can be queued as a missing-metadata backfill for audio and video assets.
-  - `music_stems` uses Demucs when installed to produce vocals/drums/bass/other-style pseudo-stems under the Cartolensia cache root. It is intentionally on-demand from asset detail because stem WAV/FLAC outputs can be large.
+  - `music_stems` uses Demucs when installed to produce vocals/drums/bass/other-style pseudo-stems under the Cartolensia cache root. Stems default to FLAC to avoid large uncompressed WAV cache growth and remain intentionally on-demand from asset detail.
   - MT3 is tracked as a future optional multi-instrument transcription provider, not a default dependency.
+
+Demucs does not provide reliable piano, vibraphone/glockenspiel, reed, brass,
+or strings stems in the current release profile. Cartolensia exposes those
+instrument classes through MIDI transcription where possible and will require a
+separate reviewed multi-instrument stem provider before presenting them as audio
+stems.
 
 All model files and caches are repo-local under `.cartolensia/models`; the sidecar accepts only localhost media URLs or safe local temporary/cache paths. No remote inference API is used.
 

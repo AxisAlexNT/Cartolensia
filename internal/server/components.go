@@ -670,7 +670,16 @@ func (s *Server) installIsolatedPythonCLIComponent(ctx context.Context, key stri
 	}
 	_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "component pip tooling ready"})
 	pins := stringSliceFromAny(def.Metadata["pip_dependency_pins"])
-	installArgs := []string{"-m", "pip", "install", "--upgrade", "--upgrade-strategy", "eager", packageName}
+	if len(pins) > 0 {
+		pinArgs := append([]string{"-m", "pip", "install", "--upgrade", "--upgrade-strategy", "only-if-needed"}, pins...)
+		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "installing reviewed Python dependency pins before package resolution", Metadata: map[string]any{"args": pinArgs}})
+		if output, runErr := runComponentCommand(installCtx, venvPython, pinArgs, env); runErr != nil {
+			err := fmt.Errorf("install reviewed dependency pins for %s: %w: %s", packageName, runErr, output)
+			_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "error", Message: err.Error()})
+			return component, err
+		}
+	}
+	installArgs := []string{"-m", "pip", "install", "--upgrade", "--upgrade-strategy", "only-if-needed", packageName}
 	installArgs = append(installArgs, pins...)
 	_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "installing reviewed Python package", Metadata: map[string]any{"args": installArgs}})
 	if output, runErr := runComponentCommand(installCtx, venvPython, installArgs, env); runErr != nil {
@@ -679,7 +688,7 @@ func (s *Server) installIsolatedPythonCLIComponent(ctx context.Context, key stri
 		return component, err
 	}
 	if len(pins) > 0 {
-		pinArgs := append([]string{"-m", "pip", "install", "--upgrade"}, pins...)
+		pinArgs := append([]string{"-m", "pip", "install", "--upgrade", "--upgrade-strategy", "only-if-needed"}, pins...)
 		_, _ = s.deps.Store.AddComponentEvent(ctx, catalog.ComponentEvent{ComponentKey: key, Level: "info", Message: "repairing reviewed Python dependency pins", Metadata: map[string]any{"args": pinArgs}})
 		if output, runErr := runComponentCommand(installCtx, venvPython, pinArgs, env); runErr != nil {
 			err := fmt.Errorf("install reviewed dependency pins for %s: %w: %s", packageName, runErr, output)
