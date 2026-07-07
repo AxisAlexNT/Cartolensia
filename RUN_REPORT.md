@@ -1,5 +1,25 @@
 # Run Report
 
+## 2026-07-07 Encryption Hardening Plan Saved
+
+### Scope
+
+- Saved the at-rest encryption and privacy hardening plan to
+  `docs/ENCRYPTION_HARDENING_PLAN.md` for later review and implementation.
+- The plan recommends a dedicated LUKS2 Cartolensia data vault at
+  `/var/lib/cartolensia`, TPM auto-unlock when available, encrypted essential
+  backups, and readiness diagnostics.
+- The plan explicitly avoids default row-level encryption for searchable media
+  metadata because it would break OCR/transcript/caption/place/search workflows.
+
+### Safety
+
+- Documentation/reporting only.
+- No writes to originals or Samba storage.
+- No DB reset.
+- No commit.
+- No push.
+
 ## 2026-07-07 Music Component Stabilization And Private Full Bundle
 
 ### Scope
